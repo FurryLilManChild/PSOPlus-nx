@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Statically recompile a GameCube DOL plus its REL module into C.
+"""Statically recompile a GameCube DOL (plus an optional REL module) into C.
 
 usage: gcrecomp.py CONFIG_DIR BASEROM_DIR OUTDIR [--insns-per-file N]
 
@@ -20,6 +20,9 @@ Front end for the forked ZeldaWWHDRecomp translator (ppc2c.py, crlive.py, leaflo
   in the translator's terms: c->r[n], c->f[n].ps0, ...; it is rewritten with the instruction's) and
   `decl C-DECLARATION` lines for runtime globals the statements use (emitted into funcs.h). Patches
   are the native form of Gecko code hooks; a runtime flag in the statement makes them switchable.
+
+- CONFIG_DIR/recomp.txt (optional): `dol NAME` and `rel NAME|none` choose the files in BASEROM_DIR
+  (default main.dol and _Main.rel). PSOPlus-nx: `dol PsoV3.dol`, `rel none` (the game is one DOL).
 
 Output (all derived from the game: stays in build/, never committed):
   OUTDIR/funcs.h, OUTDIR/code_NNN.c, OUTDIR/table.c, OUTDIR/report.txt
@@ -81,7 +84,7 @@ class Image:
             else:
                 self.regions.append((lo, lo + len(data), data))
         self.rel_text = []
-        for i, off, size, ex in rel.sections:
+        for i, off, size, ex in (rel.sections if rel else []):
             if ex and size:
                 lo = rel_addrs[i]
                 data = rel_img[off:off + size]
@@ -110,9 +113,20 @@ class Image:
 class GcRecompiler:
     def __init__(self, config_dir, baserom):
         self.config_dir = config_dir
-        self.dol = Dol(os.path.join(baserom, "main.dol"))
-        self.rel = Rel(os.path.join(baserom, "_Main.rel"))
-        rel_img, self.rel_addrs, self.rel_bss, self.rel_relocs = self.rel.link(REL_BASE)
+        files = {"dol": "main.dol", "rel": "_Main.rel"}
+        rc = os.path.join(config_dir, "recomp.txt")
+        if os.path.exists(rc):
+            for line in open(rc):
+                line = line.split("#")[0].split()
+                if len(line) == 2 and line[0] in files:
+                    files[line[0]] = line[1]
+        self.dol = Dol(os.path.join(baserom, files["dol"]))
+        if files["rel"] == "none":
+            self.rel = None
+            rel_img, self.rel_addrs, self.rel_bss, self.rel_relocs = b"", {}, 0, []
+        else:
+            self.rel = Rel(os.path.join(baserom, files["rel"]))
+            rel_img, self.rel_addrs, self.rel_bss, self.rel_relocs = self.rel.link(REL_BASE)
         self.rel_img = rel_img
         self.img = Image(self.dol, rel_img, self.rel_addrs, self.rel)
 
@@ -120,7 +134,8 @@ class GcRecompiler:
         self.jt_targets = collections.defaultdict(set)  # function start -> case targets
         self.jt_count = 0
         self._load_dtk(os.path.join(config_dir, "symbols.txt"), rel=False)
-        self._load_dtk(os.path.join(config_dir, "_Main", "symbols.txt"), rel=True)
+        if self.rel:
+            self._load_dtk(os.path.join(config_dir, "_Main", "symbols.txt"), rel=True)
         self.entries.add(self.dol.entry)
         self.hooks = {}  # address -> hle name
         hle = os.path.join(config_dir, "hle.txt")
@@ -431,7 +446,7 @@ class GcRecompiler:
         self.summary_count = 0
         if NONLEAF and leaflocal.USE_SUMMARY:
             self.compute_summaries()
-        # hot functions first, in the list's order (config/GXEE8P/hot_functions.txt, tools/hot_functions.py):
+        # hot functions first, in the list's order (config/<game>/hot_functions.txt, tools/hot_functions.py):
         # the code a race runs then sits together in the program. RECOMP_HOT=0 keeps address order.
         hot = []
         hot_path = os.path.join(self.config_dir, "hot_functions.txt")
@@ -473,9 +488,9 @@ class GcRecompiler:
         for e in self.sorted_entries:
             lines.append("void f_%08X(Cpu* __restrict c);" % e)
         if self.patch_decls:
-            lines.append("\n/* runtime state used by code patches (config/GXEE8P/patches.txt) */")
+            lines.append("\n/* runtime state used by code patches (config/<game>/patches.txt) */")
             lines += self.patch_decls
-        lines.append("\n/* native replacements (config/GXEE8P/hle.txt) */")
+        lines.append("\n/* native replacements (config/<game>/hle.txt) */")
         for a, name in sorted(self.hooks.items()):
             lines.append("void f_%08X_orig(Cpu* __restrict c);\nvoid hle_%s(Cpu* c);" % (a, name))
         open(os.path.join(outdir, "funcs.h"), "w").write("\n".join(lines) + "\n")
@@ -488,18 +503,25 @@ class GcRecompiler:
         t += ['    {0x%08Xu, "%s", f_%08X_orig},' % (a, n, a) for a, n in sorted(self.hooks.items())]
         t.append("    {0u, 0, 0}};\nconst unsigned g_recomp_hle_count = %d;" % len(self.hooks))
         t.append("const uint32_t g_recomp_entry_point = 0x%08Xu;" % self.dol.entry)
-        t.append("const uint32_t g_rel_base = 0x%08Xu, g_rel_bss = 0x%08Xu, g_rel_bss_size = 0x%08Xu;" % (
-            REL_BASE, self.rel_bss, self.rel.bss_size))
-        t.append("const uint32_t g_rel_prolog = 0x%08Xu;" % (self.rel_addrs[self.rel.prolog_section] + self.rel.prolog))
+        if self.rel:
+            t.append("const uint32_t g_rel_base = 0x%08Xu, g_rel_bss = 0x%08Xu, g_rel_bss_size = 0x%08Xu;" % (
+                REL_BASE, self.rel_bss, self.rel.bss_size))
+            t.append("const uint32_t g_rel_prolog = 0x%08Xu;" % (self.rel_addrs[self.rel.prolog_section] + self.rel.prolog))
+        else:  # no REL module: the runtime's REL linker has nothing to do
+            t.append("const uint32_t g_rel_base = 0u, g_rel_bss = 0u, g_rel_bss_size = 0u;")
+            t.append("const uint32_t g_rel_prolog = 0u;")
         t.append("const RecompRange g_code_ranges[] = {%s};\nconst unsigned g_code_range_count = %d;" % (
             ", ".join("{0x%08Xu, 0x%08Xu}" % (lo, hi) for lo, hi, _ in self.img.regions), len(self.img.regions)))
         open(os.path.join(outdir, "table.c"), "w").write("\n".join(t) + "\n")
 
     def write_report(self, outdir, nfiles):
         with open(os.path.join(outdir, "report.txt"), "w") as f:
-            f.write("REL linked at %08X (bss %08X, %d relocations), prolog %08X\n" % (
-                REL_BASE, self.rel_bss, len(self.rel_relocs),
-                self.rel_addrs[self.rel.prolog_section] + self.rel.prolog))
+            if self.rel:
+                f.write("REL linked at %08X (bss %08X, %d relocations), prolog %08X\n" % (
+                    REL_BASE, self.rel_bss, len(self.rel_relocs),
+                    self.rel_addrs[self.rel.prolog_section] + self.rel.prolog))
+            else:
+                f.write("no REL module\n")
             for lo, hi, _ in self.img.regions:
                 f.write("code %08X-%08X\n" % (lo, hi))
             f.write("functions: %d (fixpoint rounds %d)\nfiles: %d\n" % (
