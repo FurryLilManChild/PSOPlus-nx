@@ -1,5 +1,6 @@
-/* Put the game in guest memory the way the IPL and apploader would, then link _Main.rel at the
- * fixed address the recompiler translated it for (tools/recomp/gcrecomp.py REL_BASE). */
+/* Put the game in guest memory the way the IPL and apploader would. PSO: the program is PsoV3.dol from
+ * the disc's file system (the disc's boot DOL, main.dol, is only a loader for it; docs/design.md), and
+ * there is no REL module. Based on sonic-riders-recomp's loader.c (MPL-2.0). */
 #include <stdlib.h>
 #include <string.h>
 
@@ -11,9 +12,11 @@ static uint16_t be16(const uint8_t* p) { return (uint16_t)(p[0] << 8 | p[1]); }
 static void put32(uint8_t* p, uint32_t v) { p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = v; }
 static void put16(uint8_t* p, uint16_t v) { p[0] = v >> 8; p[1] = (uint8_t)v; }
 
+#define GAME_DOL "PsoV3.dol"
+
 static void load_dol(void) {
-    const uint8_t* h = disc_header();
-    uint32_t dol_off = be32(h + 0x420);
+    uint32_t dol_off, dol_size;
+    if (!disc_find(GAME_DOL, &dol_off, &dol_size)) rt_fatal(GAME_DOL " not found on the disc");
     uint8_t dh[0x100];
     disc_read(dol_off, dh, sizeof dh);
     for (int i = 0; i < 18; i++) {
@@ -25,7 +28,9 @@ static void load_dol(void) {
     /* No clearing here: the header's bss range spans .sdata/.sdata2 too (they sit between .sbss
      * pieces), so clearing it would wipe initialized small data. MEM1 was zeroed before loading,
      * and __init_data clears the real bss sections from _bss_init_info. */
-    rt_log("[load] main.dol: entry %08X, bss %08X+%X", be32(dh + 0xE0), bss, bss_size);
+    rt_log("[load] " GAME_DOL ": entry %08X, bss %08X+%X", be32(dh + 0xE0), bss, bss_size);
+    if (be32(dh + 0xE0) != g_recomp_entry_point)
+        rt_fatal(GAME_DOL "'s entry %08X differs from the recompiled code's %08X", be32(dh + 0xE0), g_recomp_entry_point);
 }
 
 /* OSLink for a module at a fixed base; module 0 (the DOL) targets are absolute addends */
@@ -97,12 +102,13 @@ void load_game(void) {
     mem_write_bytes(fst_addr, fst, fst_size);
     mem_w32(0x80000038, fst_addr);
     mem_w32(0x8000003C, be32(h + 0x42C));
+    mem_w32(0x80000030, 0);                             /* ArenaLo: OSInit uses __ArenaLo */
+    mem_w32(0x80000034, fst_addr);                      /* ArenaHi */
+    if (!g_rel_base) return;                            /* no REL module (PSO) */
+
     uint32_t rel_end = g_rel_bss + g_rel_bss_size;
     if (g_rel_base < 0x80000000u + MEM1_SIZE || rel_end > 0x80000000u + GUEST_RAM_SIZE)
         rt_fatal("REL (%08X-%08X) must lie in the backed area above MEM1", g_rel_base, rel_end);
-    mem_w32(0x80000030, 0);                             /* ArenaLo: OSInit uses __ArenaLo */
-    mem_w32(0x80000034, fst_addr);                      /* ArenaHi */
-
     uint32_t off, size;
     if (!disc_find("_Main.rel", &off, &size)) rt_fatal("_Main.rel not found on the disc");
     uint8_t* rel = malloc(size);

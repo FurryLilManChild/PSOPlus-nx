@@ -63,32 +63,10 @@ static GxFrame* frame(void) {
         float k = settings_wide_k();
         g_frame->wide_k = k;
         memcpy(&g_gx.xf_reg[GX_XR_WIDE_K], &k, 4);
-        /* fit window: the race HUD at the screen edges; menus stay 4:3 in the middle (their rows of
-         * text and icons would come apart) */
-        /* the menu flag blips to 1 for single frames during races: the HUD leaves the edges only after
-         * 8 menu frames in a row */
-        static unsigned menu_frames;
-        /* after the finish line (results screen: menu flag 0) the rank/name/time rows must stay together */
-        menu_frames = ld32(GAME_MENU_FLAG) || ld32(GAME_RACE_PHASE) == GAME_RACE_FINISHED ? menu_frames + 1 : 0;
-        int racing = ld32(GAME_TOP_MODE) == GAME_TOP_MODE_RACE && menu_frames < 8;
-        /* bloom: races only. Mode 8 alone stays on in menus (character select / Player Entry after a race,
-         * notes/game-addresses.md), so also the menu flag, 8 frames in a row to leave (it blips in races);
-         * the results screen (menu flag 0) keeps it */
-        static unsigned bloom_menu_frames;
-        bloom_menu_frames = ld32(GAME_MENU_FLAG) ? bloom_menu_frames + 1 : 0;
-        g_frame->in_race = ld32(GAME_TOP_MODE) == GAME_TOP_MODE_RACE && bloom_menu_frames < 8;
-        /* the HUD goes to the edges whenever the picture is wide: Fit to screen, or an online session or recording
-         * whose (host's) camera is wide on a machine set to 4:3 (the joiner's HUD stayed in the middle, 2026-11-14) */
-        int fit = g_settings.screen == SCREEN_FIT || (settings_wide_k_fixed() && k > 1.0f);
-        g_gx.xf_reg[GX_XR_WIDE_FLAGS] =
-            fit ? GX_WIDE_HUD_43 | (racing ? GX_WIDE_HUD_EDGES : 0u) : g_settings.hud_stretch ? 0u : GX_WIDE_HUD_43;
-        {
-            static uint32_t last_fl = ~0u;
-            if (g_gx.xf_reg[GX_XR_WIDE_FLAGS] != last_fl && k > 1.0f)
-                rt_log("[wide] frame %llu: game mode %u, menu flag %u, race phase %X, HUD flags %u", g_frames,
-                       ld32(GAME_TOP_MODE), ld32(GAME_MENU_FLAG), ld32(GAME_RACE_PHASE), g_gx.xf_reg[GX_XR_WIDE_FLAGS]);
-            last_fl = g_gx.xf_reg[GX_XR_WIDE_FLAGS];
-        }
+        /* PSO: no game-state probes yet (Riders read its race/menu flags here for the HUD layout and
+         * bloom). The HUD stays in the 4:3 middle when the picture is wide; no bloom. */
+        g_frame->in_race = 0;
+        g_gx.xf_reg[GX_XR_WIDE_FLAGS] = g_settings.hud_stretch ? 0u : GX_WIDE_HUD_43;
         float fov = (float)g_fov_scale;
         memcpy(&g_gx.xf_reg[GX_XR_FOV], &fov, 4);
         float asp = settings_game_k() / k;  /* online: the room's camera wider than this screen */
@@ -992,9 +970,7 @@ static int hud_join(const float a[4], const float b[4], int quad) {
 }
 static void local_hud_frame(GxFrame* f) {
     if (!(f->wide_k > 1.0f)) return;
-    uint32_t mode = ld32(GAME_TOP_MODE);
-    if ((mode != GAME_TOP_MODE_RACE && mode != GAME_TOP_MODE_MULTIPLAYER) ||
-        ld32(GAME_RACE_PHASE) == GAME_RACE_FINISHED) return;
+    return;  /* PSO: Riders' split-screen HUD regrouping is not used (no game-state probes yet) */
     /* Respect original 4:3, menus/results, and the online picture-aspect policy. */
     if (g_settings.screen != SCREEN_FIT && !settings_wide_k_fixed()) return;
     unsigned halves = 0, quarters = 0;

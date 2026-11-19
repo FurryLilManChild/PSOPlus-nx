@@ -120,7 +120,7 @@ static void handoff(GThread* next) {
     (void)prof_fn;
     uint32_t ret = 0;
     for (int i = 0; i < 12 && t_self->bt[i]; i++)
-        if (t_self->bt[i] < 0x8000F000u || t_self->bt[i] >= 0x80012000u) { ret = t_self->bt[i]; break; }
+        if (t_self->bt[i] < OS_THREAD_CODE_LO || t_self->bt[i] >= OS_THREAD_CODE_HI) { ret = t_self->bt[i]; break; }
     g_ppc_cur_fn = PROF_RESUMED;
     g_ppc_cur_lr = ret;
 }

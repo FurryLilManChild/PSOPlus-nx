@@ -39,8 +39,8 @@ int disc_open(const char* path) {
     if (!g_disc) return 0;
     if (disc_read(0, g_header, sizeof g_header) != sizeof g_header) return 0;
     if (be32(g_header + 0x1C) != 0xC2339F3Du) rt_fatal("%s is not a GameCube disc image", path);
-    if (memcmp(g_header, "GXEE8P", 6) != 0 || g_header[7] != 0)
-        rt_fatal("%s is %.6s rev %d; this port is built for Sonic Riders USA (GXEE8P) rev 0", path,
+    if (memcmp(g_header, "GPOE8P", 6) != 0 || g_header[7] != 2)
+        rt_fatal("%s is %.6s rev %d; this port is built for Phantasy Star Online Episode I & II Plus USA (GPOE8P) rev 2", path,
                  (const char*)g_header, g_header[7]);
     uint32_t fst_off = be32(g_header + 0x424);
     g_fst_size = be32(g_header + 0x428);

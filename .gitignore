@@ -47,3 +47,15 @@ config/*/splits.txt
 # PC toolchain downloaded by setup\setup_pc.ps1, and its log
 toolchain/
 setup.log
+
+# PC run output (logs, saves, settings, mods folder)
+*.log
+saves/
+settings.ini
+mods/
+crash.txt
+
+# ninja state written by configure.py / ninja
+build.ninja
+.ninja_deps
+.ninja_log

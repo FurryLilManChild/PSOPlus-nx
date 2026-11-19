@@ -291,7 +291,7 @@ void init() {
     io.DisplaySize = ImVec2(OVERLAY_W, OVERLAY_H);
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad | ImGuiConfigFlags_NoMouseCursorChange;
     io.BackendFlags |= ImGuiBackendFlags_HasGamepad | ImGuiBackendFlags_RendererHasTextures;
-    io.BackendRendererName = "sonicriders-software";
+    io.BackendRendererName = "psoplus-software";
     io.ConfigNavCursorVisibleAlways = true;
     setup_style();
     setup_fonts();
@@ -705,11 +705,11 @@ void tab_about() {
 #endif
 #ifdef SR_IOS
     {
-        /* one app ID per player: net.srnative.sonicriders.<10-character team ID> (the Mac's builds and Sideloadly's
+        /* one app ID per player: net.srnative.psoplus.<10-character team ID> (the Mac's builds and Sideloadly's
          * default settings); older installs (no suffix, .t<hash>) renew into a second, empty app with Sideloadly's
          * default, so say how to move (tools/ios_run.py install moves them, docs/notes/ios.md) */
         const char* id = ios_bundle_id();
-        const char* base = "net.srnative.sonicriders.";
+        const char* base = "net.srnative.psoplus.";
         size_t n = strlen(base), len = strlen(id);
         bool standard = len == n + 10 && strncmp(id, base, n) == 0;
         for (size_t i = n; standard && i < len; i++)

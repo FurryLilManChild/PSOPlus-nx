@@ -129,7 +129,7 @@ static const DkShader* frag_shader_for(const GxUniforms* u) {
         if (k_spec_keys[mid] < k.hash) lo = mid + 1; else hi = mid - 1;
     }
     g_spec_misses++;
-    gx_frag_key_record(&k, "sdmc:/switch/sonicriders/shader_keys.txt");
+    gx_frag_key_record(&k, "sdmc:/switch/psoplus/shader_keys.txt");
     return uber;
 }
 #define OVERLAY_SLOT 1                         /* image descriptor of the overlay image */
@@ -912,7 +912,7 @@ static int shot_thread(void* arg) {
     rt_thread_lower_priority();
     uint64_t t0 = armGetSystemTick();
     char path[96];
-    snprintf(path, sizeof path, "sdmc:/switch/sonicriders/shot_%u.png", sh->frame);
+    snprintf(path, sizeof path, "sdmc:/switch/psoplus/shot_%u.png", sh->frame);
     /* PNG rows run top-down like the capture, so only the channels are packed: stb reads comp bytes
      * per pixel and uses the stride only between rows, so the alpha cannot be skipped in place. */
     uint8_t* out = malloc((size_t)FB_W * FB_H * 3);

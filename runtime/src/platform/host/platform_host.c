@@ -60,7 +60,7 @@ static LONG WINAPI crash_handler(EXCEPTION_POINTERS* ep) {
 #ifdef _WIN32
 #include <tlhelp32.h>
 /* debugging (SR_WATCH): freeze every other thread of the process and log where each one is, as
- * exe+offset (map with build/host/sonicriders.map: recompiled functions are f_<guest address>) */
+ * exe+offset (map with build/host/psoplus.map: recompiled functions are f_<guest address>) */
 void platform_sample_threads(void) {
     DWORD self = GetCurrentThreadId(), pid = GetCurrentProcessId();
     uintptr_t base = (uintptr_t)GetModuleHandleA(NULL);
@@ -120,7 +120,7 @@ extern const char g_build_version[];
 /* a native crash (Android, Linux), as the Windows crash_handler: the report goes to crash.txt first
  * (plain write(), works even if the log's stdio lock is held), then to logcat and the log, then the
  * guest state; then the previous handler (Android's debuggerd: tombstone) runs. On Android the app
- * folder's crash.txt and sonicriders.log are picked up on the next launch (CrashReport.java). */
+ * folder's crash.txt and psoplus.log are picked up on the next launch (CrashReport.java). */
 static struct sigaction crash_old[NSIG];
 static char crash_buf[16384];
 static int crash_len;
@@ -191,7 +191,7 @@ static void crash_signal(int sig, siginfo_t* si, void* uctx) {
         close(fd);
     }
 #ifdef __ANDROID__
-    __android_log_write(ANDROID_LOG_FATAL, "sonicriders", crash_buf);
+    __android_log_write(ANDROID_LOG_FATAL, "psoplus", crash_buf);
 #endif
     fflush(stderr);
     write(fileno(stderr), crash_buf, (size_t)crash_len);
@@ -237,9 +237,9 @@ static void android_files(void) {
     if (!dir || chdir(dir) != 0) dir = SDL_AndroidGetInternalStoragePath();
     if (dir && chdir(dir) != 0) dir = NULL;
 #endif
-    remove("sonicriders.prev.log");
-    rename("sonicriders.log", "sonicriders.prev.log");
-    freopen("sonicriders.log", "w", stderr);
+    remove("psoplus.prev.log");
+    rename("psoplus.log", "psoplus.prev.log");
+    freopen("psoplus.log", "w", stderr);
     mkdir("baserom", 0777);
     FILE* f = fopen("env.txt", "r");
     if (f) {
@@ -279,17 +279,17 @@ void platform_init(void) {
 #endif
 #ifdef _WIN32
     /* started as a normal windowed program (no console, stderr not redirected): the log goes to
-     * sonicriders.log next to the game; the four runs before it are kept as sonicriders.prev.log (the last one,
+     * psoplus.log next to the game; the four runs before it are kept as psoplus.prev.log (the last one,
      * as on the Switch and iOS), .prev2.log, .prev3.log and .prev4.log (the oldest) */
     HANDLE eh = GetStdHandle(STD_ERROR_HANDLE);
     if (eh == NULL || eh == INVALID_HANDLE_VALUE || GetFileType(eh) == FILE_TYPE_UNKNOWN) {
-        static const char* const keep[] = {"sonicriders.log", "sonicriders.prev.log", "sonicriders.prev2.log",
-                                           "sonicriders.prev3.log", "sonicriders.prev4.log"};
+        static const char* const keep[] = {"psoplus.log", "psoplus.prev.log", "psoplus.prev2.log",
+                                           "psoplus.prev3.log", "psoplus.prev4.log"};
         for (int i = 4; i > 0; i--) {
             remove(keep[i]);
             rename(keep[i - 1], keep[i]);
         }
-        freopen("sonicriders.log", "w", stderr);
+        freopen("psoplus.log", "w", stderr);
     }
 #endif
 #ifdef _WIN32
@@ -560,7 +560,7 @@ void rt_thread_raise_priority(void) {
 void platform_set_handheld_gpu(int on) { (void)on; }
 
 /* ---- "Save a bug report" (settings menu, About): one zip in the game folder with what a report needs:
- * sonicriders.log (this run, flushed first), sonicriders.prev.log (.prev2-.prev4 on PC), setup.log, saves/settings.ini, crash.txt
+ * psoplus.log (this run, flushed first), psoplus.prev.log (.prev2-.prev4 on PC), setup.log, saves/settings.ini, crash.txt
  * and info.txt (version, system). Stored (uncompressed) zip: no library needed. Not on Android (its own
  * crash reports, CrashReport.java). Returns 0 and the file's name, or -1. */
 #ifndef __ANDROID__
@@ -627,8 +627,8 @@ int platform_bug_report(char* name, size_t n) {
     strftime(name, n, "bug-report-%Y%m%d-%H%M%S.zip", localtime(&t));
     FILE* z = fopen(name, "wb");
     if (!z) return -1;
-    static const char* files[] = {"info.txt", "sonicriders.log", "sonicriders.prev.log", "sonicriders.prev2.log",
-                                  "sonicriders.prev3.log", "sonicriders.prev4.log", "setup.log",
+    static const char* files[] = {"info.txt", "psoplus.log", "psoplus.prev.log", "psoplus.prev2.log",
+                                  "psoplus.prev3.log", "psoplus.prev4.log", "setup.log",
                                   "saves/settings.ini", "crash.txt"};
     struct { const char* name; uint32_t crc, size, off; } ent[sizeof files / sizeof files[0]];
     int ne = 0;

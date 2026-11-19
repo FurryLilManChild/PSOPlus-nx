@@ -1,10 +1,10 @@
 /* Switch platform layer: SD-card paths and log, threads, the guest memory window.
  *
- * Files (sdmc:/switch/sonicriders/):
- *   sonicriders.nro     the program
+ * Files (sdmc:/switch/psoplus/):
+ *   psoplus.nro     the program
  *   *.iso               the user's own disc image (GXEE8P, the first .iso found)
  *   saves/card_a.raw    memory card in slot A (created formatted on first start)
- *   sonicriders.log     log of the last session
+ *   psoplus.log     log of the last session
  *
  * Guest memory follows SwitchWakerHD (runtime/src/platform/core_switch.cpp): Horizon commits every
  * mapping, so a code-memory region is reserved for the whole physical window and only MEM1 (+ the
@@ -22,7 +22,7 @@
 
 #include "runtime.h"
 
-#define BASE_DIR "sdmc:/switch/sonicriders"
+#define BASE_DIR "sdmc:/switch/psoplus"
 
 /* newlib declares C11 timespec_get but libnx does not provide it; CLOCK_REALTIME is also the clock
  * of cnd_timedwait's absolute deadlines */
@@ -90,9 +90,9 @@ void platform_init(void) {
     mkdir(BASE_DIR, 0777);
     mkdir(BASE_DIR "/saves", 0777);
     /* the previous session's log is kept (a relaunch would otherwise erase it) */
-    remove(BASE_DIR "/sonicriders.prev.log");
-    rename(BASE_DIR "/sonicriders.log", BASE_DIR "/sonicriders.prev.log");
-    if (!freopen(BASE_DIR "/sonicriders.log", "w", stderr)) return;
+    remove(BASE_DIR "/psoplus.prev.log");
+    rename(BASE_DIR "/psoplus.log", BASE_DIR "/psoplus.prev.log");
+    if (!freopen(BASE_DIR "/psoplus.log", "w", stderr)) return;
     static char logbuf[64 * 1024];
     setvbuf(stderr, logbuf, _IOFBF, sizeof logbuf);  /* flushed by rt_log at most once a second */
     rt_log("[switch] Sonic Riders native port; log started");

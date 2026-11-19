@@ -4,15 +4,15 @@
 usage: python configure.py [--target host|switch|android]
 
 Pipeline (everything under build/ is derived from the game and never committed):
-  1. dtk analysis       baserom/main.dol + _Main.rel -> config/GXEE8P/{,_Main/}symbols.txt
-                        (run once by hand: build/tools/dtk.exe dol split config/GXEE8P/config.yml build/GXEE8P)
+  1. dtk analysis       baserom/PsoV3.dol -> config/GPOE8P/symbols.txt
+                        (run once by hand: build/tools/dtk.exe dol split config/GPOE8P/config.yml build/GPOE8P)
   2. recompile          tools/recomp/gcrecomp.py -> build/gen/*.c
-  3. compile + link     build/gen/*.c + runtime/src/* -> build/<target>/sonicriders(.exe|.nro)
+  3. compile + link     build/gen/*.c + runtime/src/* -> build/<target>/psoplus(.exe|.nro)
 
 host: --toolchain msvc (default): clang with the MSVC/SDK headers (run `. tools/host/env.ps1` first)
       --toolchain mingw: llvm-mingw (--llvm-mingw DIR) with SDL2's MinGW build (--sdl DIR); the setup
       tool (setup/setup.ps1) uses this one
-      --toolchain linux: Linux / Steam Deck -> build/host-linux/sonicriders; compiler from --cc/--cxx, $CC/$CXX,
+      --toolchain linux: Linux / Steam Deck -> build/host-linux/psoplus; compiler from --cc/--cxx, $CC/$CXX,
       clang or gcc (SonicRidersSetup.sh passes "zig cc" where there is none); SDL2 headers from sdl2-config
       or --sdl DIR (include/SDL2); links against the system's libSDL2-2.0.so.0, so no -dev package is needed
 switch: devkitA64 + libnx + deko3d (devkitPro: $DEVKITPRO, --devkitpro DIR, or C:/devkitPro)
@@ -88,10 +88,14 @@ if not gen_c:
     # the list of generated files is needed to write build.ninja: recompile once now
     import subprocess
     print("build/gen is empty: recompiling first", flush=True)
-    subprocess.check_call([sys.executable, "tools/recomp/gcrecomp.py", "config/GXEE8P", "baserom", GEN], cwd=ROOT)
+    subprocess.check_call([sys.executable, "tools/recomp/gcrecomp.py", "config/GPOE8P", "baserom", GEN], cwd=ROOT)
     gen_c = sorted(glob.glob(os.path.join(ROOT, GEN, "code_*.c")))
 gen_c = [os.path.relpath(p, ROOT).replace("\\", "/") for p in gen_c] + [GEN + "/table.c"]
 rt_c = sorted(os.path.relpath(p, ROOT).replace("\\", "/") for p in glob.glob(os.path.join(ROOT, "runtime/src/*.c")))
+# REL linking (OSLink) is not built: PSO has no REL module. Riders-only files were removed; their callers
+# reach runtime/src/pso_stubs.c instead.
+RIDERS_ONLY = ("rel.c",)
+rt_c = [p for p in rt_c if os.path.basename(p) not in RIDERS_ONLY]
 rt_cpp = sorted(os.path.relpath(p, ROOT).replace("\\", "/") for p in glob.glob(os.path.join(ROOT, "runtime/src/*.cpp")))
 plats = ["runtime/src/platform/%s" % args.target]
 if args.target in ("android", "ios"):
@@ -137,9 +141,9 @@ if args.trace_loads:
 gen_flags = "-O2 -ffp-contract=off -fno-strict-aliasing -fwrapv -w"
 
 def shader_key_files():
-    """the specialized-shader keys: the shipped list (config/GXEE8P/shader_keys.txt) plus any local extras
+    """the specialized-shader keys: the shipped list (config/GPOE8P/shader_keys.txt) plus any local extras
     (build/shaderkeys/*.txt, e.g. keys a console reported that the list lacks)"""
-    files = ["config/GXEE8P/shader_keys.txt"] if os.path.exists(os.path.join(ROOT, "config/GXEE8P/shader_keys.txt")) else []
+    files = ["config/GPOE8P/shader_keys.txt"] if os.path.exists(os.path.join(ROOT, "config/GPOE8P/shader_keys.txt")) else []
     return files + sorted(os.path.relpath(p, ROOT).replace("\\", "/") for p in glob.glob(os.path.join(ROOT, "build/shaderkeys/*.txt")))
 
 
@@ -236,7 +240,7 @@ with open(os.path.join(ROOT, "build.ninja"), "w") as f:
             is_zig = "zig" in os.path.basename(cxx.split()[0]) or cxx.split()[0] == "zig"
             static_rt = "" if args.shared_cxx_runtime else "-static-libstdc++ -static-libgcc "
             n.variable("ldflags", "-g -pthread %s -ldl -lm -Wl,-rpath,'$$ORIGIN' %s" % (sdl_lib, "" if is_zig else
-                       "%s-Wl,-Map=%s/sonicriders.map" % (static_rt, OUT)))
+                       "%s-Wl,-Map=%s/psoplus.map" % (static_rt, OUT)))
             sdl_dll = ""
         elif args.toolchain == "mingw":
             lm = args.llvm_mingw.replace("\\", "/")
@@ -255,7 +259,7 @@ with open(os.path.join(ROOT, "build.ninja"), "w") as f:
             n.variable("cflags", "-std=gnu11 -g " + hostinc)
             n.variable("cxxflags", "-std=c++20 -g " + hostinc)
             # a windowed program (no console window); the log goes to sonicriders.log then (platform_host.c)
-            n.variable("ldflags", "-g -static-libstdc++ -static-libgcc -L%s/lib -lSDL2 -lopengl32 -lwinmm -lws2_32 -lwinhttp -Wl,--subsystem,windows -Wl,-Map=%s/sonicriders.map" % (sdl, OUT))
+            n.variable("ldflags", "-g -static-libstdc++ -static-libgcc -L%s/lib -lSDL2 -lopengl32 -lwinmm -lws2_32 -lwinhttp -Wl,--subsystem,windows -Wl,-Map=%s/psoplus.map" % (sdl, OUT))
             sdl_dll = sdl + "/bin/SDL2.dll"
         else:
             sdl = args.sdl or pick_sdl(lambda d: os.path.isdir(os.path.join(d, "lib", "x64")))
@@ -266,9 +270,9 @@ with open(os.path.join(ROOT, "build.ninja"), "w") as f:
             n.variable("cxx", "clang++")
             n.variable("cflags", "-std=gnu11 -g %s -I%s/include -DSDL_MAIN_HANDLED -D_CRT_SECURE_NO_WARNINGS" % (inc, sdl))
             n.variable("cxxflags", "-std=c++20 -g %s -I%s/include -DSDL_MAIN_HANDLED -D_CRT_SECURE_NO_WARNINGS" % (inc, sdl))
-            n.variable("ldflags", "-g -fuse-ld=lld -L%s/lib/x64 -lSDL2 -lopengl32 -lwinmm -lws2_32 -lwinhttp -Wl,/MAP:%s/sonicriders.map" % (sdl, OUT))
+            n.variable("ldflags", "-g -fuse-ld=lld -L%s/lib/x64 -lSDL2 -lopengl32 -lwinmm -lws2_32 -lwinhttp -Wl,/MAP:%s/psoplus.map" % (sdl, OUT))
             sdl_dll = sdl + "/lib/x64/SDL2.dll"
-        exe = OUT + ("/sonicriders" if args.toolchain == "linux" else "/sonicriders.exe")
+        exe = OUT + ("/psoplus" if args.toolchain == "linux" else "/psoplus.exe")
     elif args.target == "android":
         t = atools
         sdl_inc, sdl_link = android_build.sdl_flags(t, args.abi)
@@ -279,7 +283,7 @@ with open(os.path.join(ROOT, "build.ninja"), "w") as f:
         n.variable("cflags", "-std=gnu11 -g " + andinc)
         n.variable("cxxflags", "-std=c++20 -g -fno-exceptions -fno-rtti " + andinc)
         n.variable("ldflags", "-shared -g -Wl,-soname,libmain.so -Wl,--no-undefined -Wl,-z,max-page-size=16384 "
-                   "-Wl,--build-id=sha1 -Wl,--gc-sections -Wl,-Map=%s/sonicriders.map %s -lvulkan -landroid -llog -ldl -lm" % (OUT, sdl_link))
+                   "-Wl,--build-id=sha1 -Wl,--gc-sections -Wl,-Map=%s/psoplus.map %s -lvulkan -landroid -llog -ldl -lm" % (OUT, sdl_link))
         exe = OUT + "/libmain.so"
     elif args.target == "ios":
         t = itools
@@ -307,16 +311,16 @@ with open(os.path.join(ROOT, "build.ninja"), "w") as f:
         n.variable("cxx", dkp + "/devkitA64/bin/aarch64-none-elf-g++")
         n.variable("cflags", "-std=gnu11 -g %s %s -D__SWITCH__ -I%s/libnx/include -ffunction-sections" % (arch, inc, dkp))
         n.variable("cxxflags", "-std=gnu++20 -g %s %s -D__SWITCH__ -I%s/libnx/include -ffunction-sections -fno-rtti -fno-exceptions" % (arch, inc, dkp))
-        n.variable("ldflags", "-specs=%s/libnx/switch.specs -g %s -L%s/libnx/lib -Wl,-Map,%s/sonicriders.map -ldeko3d -lnx -lm"
+        n.variable("ldflags", "-specs=%s/libnx/switch.specs -g %s -L%s/libnx/lib -Wl,-Map,%s/psoplus.map -ldeko3d -lnx -lm"
                    % (dkp, arch, dkp, OUT))
-        exe = OUT + "/sonicriders.elf"
+        exe = OUT + "/psoplus.elf"
 
     n.rule("cc", "$cc -MMD -MF $out.d $cflags $extra -c $in -o $out", depfile="$out.d", deps="gcc",
            description="CC $in")
     n.rule("cxx", "$cxx -MMD -MF $out.d $cxxflags $extra -c $in -o $out", depfile="$out.d", deps="gcc",
            description="CXX $in")
     n.rule("link", "$cxx $in -o $out $ldflags", description="LINK $out")
-    n.rule("recomp", "%s tools/recomp/gcrecomp.py config/GXEE8P baserom %s" % (py, GEN),
+    n.rule("recomp", "%s tools/recomp/gcrecomp.py config/GPOE8P baserom %s" % (py, GEN),
            description="RECOMP", restat=True, pool="console",
            generator=True)  # no ninja log yet (first build) must not mean "recompile again": mtimes decide
 
@@ -326,8 +330,8 @@ with open(os.path.join(ROOT, "build.ninja"), "w") as f:
     n.build(version_c, "version", implicit=["version_always"])
 
     recomp_inputs = ["tools/recomp/gcrecomp.py", "tools/recomp/ppc2c.py", "tools/recomp/crlive.py",
-                     "tools/recomp/leaflocal.py", "tools/recomp/singleflow.py", "tools/gcbin.py", "config/GXEE8P/symbols.txt",
-                     "config/GXEE8P/_Main/symbols.txt"] + [p for p in ("config/GXEE8P/hle.txt", "config/GXEE8P/patches.txt", "config/GXEE8P/hot_functions.txt")
+                     "tools/recomp/leaflocal.py", "tools/recomp/singleflow.py", "tools/gcbin.py", "config/GPOE8P/symbols.txt",
+                     "config/GPOE8P/recomp.txt"] + [p for p in ("config/GPOE8P/hle.txt", "config/GPOE8P/patches.txt", "config/GPOE8P/hot_functions.txt")
                                                            if os.path.exists(os.path.join(ROOT, p))]
     n.build(gen_c + [GEN + "/funcs.h"], "recomp", recomp_inputs)
 
@@ -362,7 +366,7 @@ with open(os.path.join(ROOT, "build.ninja"), "w") as f:
     if shader_h:
         n.build(shader_h, "shaders", shader_src)
     if args.target == "switch":
-        # specialized fragment shaders from config/GXEE8P/shader_keys.txt (+ local extras in build/shaderkeys/)
+        # specialized fragment shaders from config/GPOE8P/shader_keys.txt (+ local extras in build/shaderkeys/)
         key_files = shader_key_files()
         spec_h = OUT + "/gen/gx_spec_dksh.h"
         n.rule("specshaders", "%s tools/gen_shaders.py $out %s/tools/bin/uam.exe %s/spec $in_keys" % (py, dkp, OUT),
@@ -372,7 +376,7 @@ with open(os.path.join(ROOT, "build.ninja"), "w") as f:
                 variables={"in_keys": " ".join(key_files)})
         shader_h = [shader_h, spec_h]
     elif args.target in ("android", "ios"):
-        # the same specialized fragment shaders as SPIR-V (keys: config/GXEE8P/shader_keys.txt + build/shaderkeys/)
+        # the same specialized fragment shaders as SPIR-V (keys: config/GPOE8P/shader_keys.txt + build/shaderkeys/)
         key_files = shader_key_files()
         spec_h = OUT + "/gen/gx_spec_spv.h"
         n.rule("specshaders", "%s tools/gen_shaders.py --vk $out %s %s/spec $in_keys" % (py, glslc, OUT),
@@ -423,15 +427,15 @@ with open(os.path.join(ROOT, "build.ninja"), "w") as f:
     else:
         n.build(exe, "link", objs, implicit=[android_build.sdl_lib(args.abi)] if args.target == "android" else None)
     if args.target == "switch":
-        n.rule("nacp", "%s/tools/bin/nacptool.exe --create \"Sonic Riders\" \"native port (own disc image required)\" 0.1.0 $out" % dkp,
+        n.rule("nacp", "%s/tools/bin/nacptool.exe --create \"PSO Ep I&II Plus\" \"native port (own disc image required)\" 0.0.1 $out" % dkp,
                description="NACP $out")
-        n.build(OUT + "/sonicriders.nacp", "nacp")
+        n.build(OUT + "/psoplus.nacp", "nacp")
         # the Homebrew Menu icon: setup/icon_256.jpg (256 x 256 JPEG; the fan-made icon by cedry2kio, README credits)
         nro_icon = "setup/icon_256.jpg" if os.path.isfile(os.path.join(ROOT, "setup/icon_256.jpg")) else ""
-        n.rule("nro", "%s/tools/bin/elf2nro.exe $in $out --nacp=%s/sonicriders.nacp%s" % (dkp, OUT, " --icon=" + nro_icon if nro_icon else ""),
+        n.rule("nro", "%s/tools/bin/elf2nro.exe $in $out --nacp=%s/psoplus.nacp%s" % (dkp, OUT, " --icon=" + nro_icon if nro_icon else ""),
                description="NRO $out")
-        n.build(OUT + "/sonicriders.nro", "nro", exe, implicit=[OUT + "/sonicriders.nacp"] + ([nro_icon] if nro_icon else []))
-        n.default(OUT + "/sonicriders.nro")
+        n.build(OUT + "/psoplus.nro", "nro", exe, implicit=[OUT + "/psoplus.nacp"] + ([nro_icon] if nro_icon else []))
+        n.default(OUT + "/psoplus.nro")
     if args.target == "host" and sdl_dll:
         n.rule("copy", "%s -c \"import shutil,sys; shutil.copy(sys.argv[1], sys.argv[2])\" $in $out" % py, description="COPY $out")
         n.build(OUT + "/SDL2.dll", "copy", sdl_dll)

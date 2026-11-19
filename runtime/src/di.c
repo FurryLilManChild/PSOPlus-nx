@@ -264,6 +264,7 @@ void di_dump(void) {
            g_di[DICVR], g_di[DICMD0], g_di[DICMD1], g_di[DICMD2], g_di[DIMAR], g_di[DILEN], g_di[DICR],
            g_di_done_at < 0 ? -1LL : (long long)(g_di_done_at - (int64_t)rt_ticks()));
     /* what DVDGetDriveStatus reports: fatal error, pausing, or the executing block's state */
+    if (!DVD_EXECUTING) return;  /* the DVD library's statics are not located for this game */
     uint32_t ex = ld32(DVD_EXECUTING);
     rt_log("[dvd] fatal %u pause %u pausing %u curr command %u resume-from-here %u; executing %08X%s", ld32(DVD_FATAL_ERROR_FLAG),
            ld32(DVD_PAUSE_FLAG), ld32(DVD_PAUSING_FLAG), ld32(DVD_CURR_COMMAND), ld32(DVD_RESUME_FROM_HERE), ex,

@@ -16,7 +16,8 @@
 8000E334 memset
 8039A568 memmove
 
-# --- Frame pacing, to wire up in the first build (runtime/src/frame_pacing.c) ---
-# 803DCF2C frame_end        # the Ninja-layer flip: VISetNextFrameBuffer, wait until 2 retraces since the
-#                           # last flip (interval set once at boot by 803DD080), VIFlush, VIWaitForRetrace
-# 8037BC54 vi_wait_retrace  # VIWaitForRetrace
+# --- Frame pacing (runtime/src/frame_pacing.c) ---
+# The Ninja-layer flip: VISetNextFrameBuffer, wait until 2 retraces since the last flip (interval set once
+# at boot by 803DD080), VIFlush, VIWaitForRetrace. hle_frame_end runs the game's own flip unchanged and
+# only adds the host pause, perftest marks and the [pace] log line.
+803DCF2C frame_end

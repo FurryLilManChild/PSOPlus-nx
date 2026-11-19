@@ -1,0 +1,46 @@
+# tools/sweep_hw.py exceptions for PsoV3.dol: hardware the game's code touches that the runtime does not
+# model or replace, each with the reason it is safe. KEY # reason. Checked 2026-11-19.
+
+# --- memory-mapped devices ---
+mmio MI  # memory interface: protection setup (__OSInitMemoryProtection, replaced by a nop in hle.txt) and its fault interrupt handler (MEMIntrruptHandler, runs only on a protection fault, which the runtime never raises); GXInit's MI hit is an address computed from the PE/PI base. Unmodelled reads return 0 and are logged ([mmio]).
+
+# --- privileged instructions and special registers (cpu.c: ppc_mtspr/ppc_mfspr keep every SPR as plain state; DEC drives the scheduler's timer) ---
+mfmsr  # cpu.c keeps MSR as state; OSDisableInterrupts/OSEnableInterrupts/OSRestoreInterrupts use it for EE, which sched.c honours
+mtmsr  # as mfmsr (ppc_mtmsr delivers pending interrupts when EE turns on)
+dcbi  # DCInvalidateRange / LCDisable: cache control, no effect on host memory (ppc2c: no-op)
+icbi  # ICInvalidateRange / __flush_cache: no self-modifying code in the recompiled image (all code is translated ahead of time)
+dcbz_l (locked cache)  # LCEnable's helper (0x80371178, called from LCEnable 0x80371244, called by the Ninja layer at 0x803DD028): zeroes locked-cache lines; the runtime backs the 16 KiB locked cache at 0xE0000000 (ppc.h)
+mfspr DAR  # OSDefaultExceptionHandler: only on a guest exception, which the runtime never raises (a fault is a host crash with its own report)
+mfspr DSISR  # as DAR
+mfspr HID0  # cache enable / flash-invalidate at boot: plain SPR state
+mfspr HID2  # locked cache and paired-single enable bits: plain state; the translator always supports paired singles
+mfspr L2CR  # L2 cache configuration at boot: plain state
+mfspr SPRG0  # OSExceptionVector only (never called: exceptions are native)
+mfspr SRR0  # OSExceptionVector only
+mfspr SRR1  # OSExceptionVector only
+mtspr 528  # IBAT0U: Config24MB/Config48MB, reached only through RealMode from __OSInitMemoryProtection (nop)
+mtspr 529  # IBAT0L: as 528
+mtspr 532  # IBAT2U: as 528
+mtspr 533  # IBAT2L: as 528
+mtspr 536  # DBAT0U: as 528
+mtspr 537  # DBAT0L: as 528
+mtspr 540  # DBAT2U: as 528
+mtspr 541  # DBAT2L: as 528
+mtspr 542  # DBAT3U: LCEnable maps the locked cache at 0xE0000000; the runtime backs that range already
+mtspr 543  # DBAT3L: as 542
+mtspr DEC  # PPCMtdec: the decrementer, modelled (cpu.c ppc_mtspr -> sched_set_decrementer)
+mtspr HID0  # as mfspr HID0; Reset() (hot reset) writes it too, see rfi/Reset below
+mtspr HID2  # as mfspr HID2
+mtspr L2CR  # as mfspr L2CR
+mtspr SPRG0  # OSExceptionVector only
+mtspr SRR0  # OSExceptionVector / OSLoadContext (replaced) / Config24MB, Config48MB (unreached) / RealMode (unreached)
+mtspr SRR1  # as SRR0
+mtspr WPAR  # PPCMtwpar from GXInit (0x80387B98): the write-gather pipe address; the runtime routes 0xCC008000 writes to the GX FIFO whatever WPAR holds
+
+# --- functions containing rfi that stay translated (cpu.c ppc_rfi stops the game if one ever runs) ---
+rfi OSExceptionVector  # copied to low memory as the exception vector; never called (interrupts are delivered natively, sched.c)
+rfi OSSwitchFPUContext  # installed as the FP-unavailable exception handler; the runtime never raises that exception
+rfi Config24MB  # passed to RealMode only by __OSInitMemoryProtection (0x80373600), which is a nop
+rfi Config48MB  # as Config24MB (0x8037361C)
+rfi RealMode  # called only from __OSInitMemoryProtection (0x80373608, 0x80373624), a nop
+rfi fn_80374CE0  # __OSSystemCallVector: copied to low memory as the sc handler; `sc` is native (cpu.c ppc_sc)

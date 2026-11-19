@@ -1,4 +1,4 @@
-/* Entry point: sonicriders [path to the GXEE8P disc image] (default: platform_disc_path) */
+/* Entry point: psoplus [path to the GXEE8P disc image] (default: platform_disc_path) */
 #ifdef SR_IOS
 #include <SDL.h>
 #endif
@@ -101,7 +101,7 @@ int platform_android_args(int argc, char** argv);
  * a plain one on the scene first (without it the alert waited unseen on a black screen) */
 static void ios_message(const char* title, const char* text) {
     SDL_Init(SDL_INIT_VIDEO);
-    SDL_Window* w = SDL_CreateWindow("Sonic Riders", 0, 0, 0, 0, SDL_WINDOW_FULLSCREEN | SDL_WINDOW_ALLOW_HIGHDPI);
+    SDL_Window* w = SDL_CreateWindow("PSO Episode I & II Plus", 0, 0, 0, 0, SDL_WINDOW_FULLSCREEN | SDL_WINDOW_ALLOW_HIGHDPI);
     void ios_attach_window(SDL_Window* win);  /* ios_scene.m: onto the app's window scene, or it stays unseen */
     if (w) ios_attach_window(w);
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, title, text, w);
@@ -126,7 +126,7 @@ int main(int argc, char** argv) {
     }
 #endif
     { void netplay_init(void); netplay_init(); }
-    { void update_check_start(void); update_check_start(); }  /* newer release on GitHub? (banner) */  /* SR_RECORD / SR_REPLAY / SR_NET (they turn SR_DETCLOCK on) */
+     /* SR_RECORD / SR_REPLAY / SR_NET (they turn SR_DETCLOCK on) */
 #ifdef SR_IOS
     if (argc <= 1) {  /* no image yet (a Sideloadly install starts empty): say where it goes, not just close */
         FILE* f = fopen(disc, "rb");
@@ -164,7 +164,7 @@ int main(int argc, char** argv) {
             rt_log("[ios] the disc image is only %lld bytes (a full one: 1459978240)", size);
             fflush(stderr);
             ios_message( "The disc image is incomplete",
-                "Your disc image is smaller than a full Sonic Riders (USA) disc (1.4 GB).\n\n"
+                "Your disc image is smaller than a full PSO Episode I & II Plus (USA) disc (1.4 GB).\n\n"
                 "If it is still being copied, wait until Finder has finished, then open the game again. Otherwise "
                 "copy a clean, full .iso again (not RVZ, CISO or a trimmed image).");
             exit(0);

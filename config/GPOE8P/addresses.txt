@@ -1,0 +1,13 @@
+# Every hard-coded PsoV3.dol address in runtime/ (tools/preflight.py "addresses"), with its evidence.
+# ADDRESS # where it is used: how it was found
+803707CC # game_addrs.h FN_DecrementerExceptionCallback: decomp-toolkit name and Dolphin signature (analysis/sig.txt)
+80371844 # game_addrs.h FN_OSSaveContext: Dolphin signature; hle.txt
+803718C4 # game_addrs.h FN_OSLoadContext: 0x80 after OSSaveContext as in the SDK; ends with rfi at 0x80371998; hle.txt
+8037542C # game_addrs.h FN_OSReschedule (__OSReschedule): decomp-toolkit name and Dolphin signature
+80374D64 # game_addrs.h OS_THREAD_CODE_LO: __OSThreadInit (decomp-toolkit name)
+80375F08 # game_addrs.h OS_THREAD_CODE_HI: OSGetTime, the first function after OSThread.c (Dolphin signature)
+80543BB8 # game_addrs.h OS_RUNQUEUE: __OSThreadInit 0x80374D68 (lis/addi RunQueue); DefaultThread +0x410 and IdleContext +0x720 from the same function
+805D70D0 # game_addrs.h OS_RUNQUEUE_BITS: __OSThreadInit 0x80374E10 (stw RunQueueBits@sda21)
+805D70D4 # game_addrs.h OS_RUNQUEUE_HINT: __OSThreadInit 0x80374E18
+805D70D8 # game_addrs.h OS_RESCHEDULE: __OSThreadInit 0x80374E74
+8071FEED # dsp.c: not an address, the DSP ROM's boot mail value (as in sonic-riders-recomp)

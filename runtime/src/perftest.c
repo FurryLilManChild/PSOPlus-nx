@@ -22,13 +22,13 @@
 #include "runtime.h"
 #include "settings.h"
 
-#define SCENE_KEY 0x8021BB64u  /* frames since the current scene started (the game's own counter) */
+#define SCENE_KEY 0u  /* Riders' scene frame counter (0x8021BB64); PSO's is not located: perftest scene windows are off */
 #define WIN_FROM 240u
 #define WIN_LEN 1800u
 #define NSCENES 2
 
 #ifdef __SWITCH__
-#define OUT_DEFAULT "sdmc:/switch/sonicriders/perftest.json"
+#define OUT_DEFAULT "sdmc:/switch/psoplus/perftest.json"
 #define PLATFORM "switch"
 #else
 #define OUT_DEFAULT "build/perftest.json"
@@ -127,7 +127,7 @@ static void finish(void) {
 void perftest_frame_begin(void) {
     if (!perftest_on() || g_finished) return;
     uint64_t now = platform_now_ns();
-    uint32_t key = ld32(SCENE_KEY);
+    uint32_t key = SCENE_KEY ? ld32(SCENE_KEY) : 0;
     if (key < g_prev_key && g_prev_key >= 100) {
         g_long_scenes++;
         rt_log("[perftest] scene %d starts at presented frame %llu", g_long_scenes + 1, gx_frames_presented());
