@@ -39,3 +39,7 @@ __pycache__/
 .vscode/
 Thumbs.db
 .DS_Store
+
+# decomp-toolkit output (generated from the game; config/*/symbols_seed.txt is the hand-written input)
+config/*/symbols.txt
+config/*/splits.txt

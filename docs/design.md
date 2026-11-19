@@ -1,4 +1,4 @@
-# PSOPlus-nx design (draft for review, 2026-11-19)
+# PSOPlus-nx design (reviewed with the owner 2026-11-19)
 
 ## Goal
 
@@ -14,10 +14,15 @@ of scope; the network code stays in the game but finds no adapter.
 - Disc: GPOE8P, revision 2, 1,459,978,240 bytes as ISO, SHA-1 `0ff155311f4cc57951c03baeb1a8cc15de5fe1cd`
   (converted from the owner's .rvz). The size matches a full GameCube disc; the SHA-1 has not yet been checked against
   Redump.
-- `main.dol` (214 KB) is only a loader: its one notable string is `psov3.dol`. The game is **`PsoV3.dol`**
-  (5.2 MB): entry 0x8000C040, code 0x8000F740 to 0x80433F20 (4.15 MiB of text), bss up to 0x805E1224, so it
-  fits in the 24 MiB of MEM1 with room for the game's heaps. Plan: boot PsoV3.dol directly, after checking what
-  main.dol sets up before it jumps (arguments, memory).
+- `main.dol` (214 KB) is only a loader. It reads `switcher.prs` (a compressed copy of `switcher.dol`, which
+  runs high in memory at 0x806C5000) and chain-loads it, handing over a block at 0x80003100 that names the next
+  program, `psov3.dol`. The game is **`PsoV3.dol`** (5.2 MB): entry 0x8000C040, code 0x8000F740 to 0x80433F20
+  (4.15 MiB of text), bss up to 0x805E1224, so it fits in the 24 MiB of MEM1 with room for the game's heaps.
+- **Booting PsoV3.dol directly works by design**: at start the game looks for a shared settings block with the
+  magic "SEGA" at 0x80003210; when it is missing the game clears 32 KiB there and fills in its own defaults. So
+  the port skips main.dol and the switcher. PsoV3.dol also contains the same chain loader (0x8042E8C4), used to
+  hand control back to another program; it is called from one place (0x8007FA08) and will be replaced natively
+  if that path is ever reached.
 - **No code modules.** 648 of the 649 `.rel` files are Sega's own data format (map, NPC, text and table data
   with pointer fixups), not Nintendo RELs, so the whole game is one executable. Simpler than Sonic Riders, which
   links `_Main.rel`. The one file that looks like a Nintendo REL still has to be checked.
@@ -28,8 +33,17 @@ of scope; the network code stays in the game but finds no adapter.
   only), DSP/AX audio.
 - 3,510 files, 1.41 GB: 111 ADX music and voice streams, Ninja models (.nj, .gj), GVM textures, AFS archives.
 
-Unknown, to measure before decisions: the game's frame rate and frame limit (single player and split screen),
-CPU load on the original hardware, which SDK functions the game reaches.
+**Frame rate: 30 fps.** The game's display flip (Sega's Ninja layer, 0x803DCF2C) waits until at least N retraces
+have passed since the last flip, and N is set exactly once, at boot, to 2 (0x8000FB2C, through 0x803DD080). On a
+60 Hz display that caps every mode at 30 fps; split screen uses the same flip, so it can only be 30 fps or lower.
+The port targets a steady 30 fps first. 60 fps would mean changing that interval and checking that game logic,
+animation and physics are tied to the frame time, not the frame count: a later experiment, not a goal yet.
+
+Analysis numbers (decomp-toolkit 1.8.4): 27,573 functions. System libraries sit in 0x8036F900 to 0x80433F20
+(OS, DVD, VI, PAD, AI, AR, DSP, CARD, GX, SI, EXI, plus CRI and AVE-TCP); the game itself is 0x8000F740 to about
+0x8036F900 (3.4 MiB). 1,450 functions matched Dolphin's signature database with sizes of 0x24 bytes or more.
+
+Unknown, to measure later: CPU load on the original hardware, how far below 30 fps split screen drops.
 
 ## Pieces and plan
 
@@ -58,11 +72,9 @@ CPU load on the original hardware, which SDK functions the game reaches.
 4. **First Switch build**: deko3d with the starter shader cache, logs, crash handler, port menu.
 5. **Performance at stock clocks**, then split screen (2 to 4 players), then a test release.
 
-## Open decisions for the owner
+## Decisions (the owner, 2026-11-19)
 
-1. **License**: MPL-2.0 for the repo (needed for the files forked from sonic-riders-recomp; our own files could
-   be MIT, but one license is simpler). Recommended: MPL-2.0 throughout.
-2. **Frame rate target**: decided after measuring the original (30 or 60).
-3. **Base strategy**: copy sonic-riders-recomp's runtime into our repo (our own copy, changed freely, with the
-   pinned commit recorded) rather than a submodule with patches. Recommended, because PSO needs changes in many
-   shared files (no REL, different HLE list, no Riders mods).
+1. **License**: MPL-2.0 throughout (required for the files forked from sonic-riders-recomp).
+2. **Base strategy**: our own copy of sonic-riders-recomp's runtime and recompiler in this repo, changed freely,
+   with the pinned commit in docs/upstream.md.
+3. **Frame rate target**: the original's 30 fps (see above).

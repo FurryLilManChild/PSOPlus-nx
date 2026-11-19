@@ -1,0 +1,4 @@
+// Hand-written seeds for decomp-toolkit, copied to symbols.txt before the first analysis.
+// PsoV3.dol's DOL chain loader ends by jumping to the next DOL's entry, so the epilogue after it is dead
+// code; without this size dtk stops with "Unpaired epilogue 3:0x8042EA04".
+dol_chainload_8042E8C4 = .text:0x8042E8C4; // type:function size:0x14C scope:global

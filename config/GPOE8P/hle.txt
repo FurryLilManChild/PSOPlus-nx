@@ -1,0 +1,22 @@
+# Native replacements: ADDRESS NAME  ->  f_ADDRESS calls the runtime's hle_NAME(c).
+# The game's own code stays available as f_ADDRESS_orig. Addresses: PsoV3.dol (GPOE8P rev 2).
+# Names from decomp-toolkit's SDK detection and Dolphin's totaldb.dsy signatures (analysis/sig.txt).
+
+# --- OS: context switch (runtime/src/sched.c) ---
+80371844 OSSaveContext
+803718C4 OSLoadContext
+
+# --- OS: hardware initialisation with no native counterpart ---
+80370D7C nop        # __OSInitAudioSystem (DSP reset, ARAM probe)
+80370F38 nop        # __OSStopAudioSystem
+803735CC nop        # __OSInitMemoryProtection (Config24MB/RealMode via rfi)
+
+# --- C library: block copies and fills (runtime/src/hle_misc.c) ---
+8000E41C memcpy
+8000E334 memset
+8039A568 memmove
+
+# --- Frame pacing, to wire up in the first build (runtime/src/frame_pacing.c) ---
+# 803DCF2C frame_end        # the Ninja-layer flip: VISetNextFrameBuffer, wait until 2 retraces since the
+#                           # last flip (interval set once at boot by 803DD080), VIFlush, VIWaitForRetrace
+# 8037BC54 vi_wait_retrace  # VIWaitForRetrace
