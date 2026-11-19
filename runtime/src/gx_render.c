@@ -1,0 +1,1591 @@
+﻿/* Guest side of the renderer: decodes draws and EFB copies from the GX command stream into the
+ * current frame's command list (gx_render.h). Runs on the guest thread that writes the FIFO. */
+#include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <threads.h>
+
+#include "gx.h"
+#include "ppc.h"
+#include "game_addrs.h"
+#include "gx_render.h"
+#include "settings.h"
+#include "overlay.h"
+#include "runtime.h"
+
+void gx_texture_load_tlut(void);
+int gx_texture_lookup(int map);
+int gx_texture_copy_target(uint32_t addr, uint32_t w, uint32_t h);
+int gx_texture_is_copy(uint32_t addr);
+int gx_texture_live(void);
+void gx_texture_decode_stats(unsigned long long* count, unsigned long long* bytes);
+void gx_texture_new_frame(void);
+
+static GxFrame* g_frame;
+static int g_state_dirty = 1;
+static unsigned long long g_frames;
+
+void gx_state_dirty(void) { g_state_dirty = 1; }
+
+static void* grow(void* p, uint32_t* cap, uint32_t need, size_t elem) {
+    if (need <= *cap) return p;
+    uint32_t n = *cap ? *cap : 256;
+    while (n < need) n *= 2;
+    p = realloc(p, n * elem);
+    if (!p) rt_fatal("out of memory (frame)");
+    *cap = n;
+    return p;
+}
+
+/* host time (timebase ticks) for the [perf] breakdown */
+static uint64_t g_wait_ticks, g_tex_ticks;
+static uint64_t g_wait_total, g_tex_total;  /* never reset ([hitch] deltas) */
+uint64_t gx_render_wait_total(void) { return g_wait_total; }  /* read by the GP thread itself (gx_fifo.c) */
+static unsigned long long g_verts_total;  /* vertices emitted (after primitive expansion) */
+static uint64_t g_draw_total;              /* time in gx_draw (decode, state, lookups) */
+static uint64_t g_decode_ticks, g_state_ticks;  /* parts of it: vertex decode, state snapshots ([perf]) */
+static unsigned g_state_pushes;
+static unsigned long long g_feat_ind, g_feat_fog, g_feat_ztex;  /* draws using unimplemented features */
+static unsigned long long g_feat_copies, g_feat_copy_z;            /* EFB copies to textures, from depth */
+static uint32_t g_feat_copy_fmts;                                   /* their target formats seen (bit per code) */
+
+volatile int g_render_counts_fps;
+static uint32_t g_nanch;  /* 2D draws of this frame remembered for wide_anchor */
+static GxFrame* frame(void) {
+    if (!g_frame) {
+        uint64_t t = rt_ticks();
+        g_frame = render_take_free_frame();
+        { uint64_t d = rt_ticks() - t; g_wait_ticks += d; g_wait_total += d; }
+        g_frame->ncmds = g_frame->nverts = g_frame->nunis = g_frame->nretired = g_frame->nxchunks = g_frame->nxtabs = 0;
+        g_frame->nidx = 0;
+        /* the wide screen modes (gx_render.h GX_XR_WIDE_K): one factor for the whole frame */
+        float k = settings_wide_k();
+        g_frame->wide_k = k;
+        memcpy(&g_gx.xf_reg[GX_XR_WIDE_K], &k, 4);
+        /* fit window: the race HUD at the screen edges; menus stay 4:3 in the middle (their rows of
+         * text and icons would come apart) */
+        /* the menu flag blips to 1 for single frames during races: the HUD leaves the edges only after
+         * 8 menu frames in a row */
+        static unsigned menu_frames;
+        /* after the finish line (results screen: menu flag 0) the rank/name/time rows must stay together */
+        menu_frames = ld32(GAME_MENU_FLAG) || ld32(GAME_RACE_PHASE) == GAME_RACE_FINISHED ? menu_frames + 1 : 0;
+        int racing = ld32(GAME_TOP_MODE) == GAME_TOP_MODE_RACE && menu_frames < 8;
+        /* bloom: races only. Mode 8 alone stays on in menus (character select / Player Entry after a race,
+         * notes/game-addresses.md), so also the menu flag, 8 frames in a row to leave (it blips in races);
+         * the results screen (menu flag 0) keeps it */
+        static unsigned bloom_menu_frames;
+        bloom_menu_frames = ld32(GAME_MENU_FLAG) ? bloom_menu_frames + 1 : 0;
+        g_frame->in_race = ld32(GAME_TOP_MODE) == GAME_TOP_MODE_RACE && bloom_menu_frames < 8;
+        /* the HUD goes to the edges whenever the picture is wide: Fit to screen, or an online session or recording
+         * whose (host's) camera is wide on a machine set to 4:3 (the joiner's HUD stayed in the middle, 2026-11-14) */
+        int fit = g_settings.screen == SCREEN_FIT || (settings_wide_k_fixed() && k > 1.0f);
+        g_gx.xf_reg[GX_XR_WIDE_FLAGS] =
+            fit ? GX_WIDE_HUD_43 | (racing ? GX_WIDE_HUD_EDGES : 0u) : g_settings.hud_stretch ? 0u : GX_WIDE_HUD_43;
+        {
+            static uint32_t last_fl = ~0u;
+            if (g_gx.xf_reg[GX_XR_WIDE_FLAGS] != last_fl && k > 1.0f)
+                rt_log("[wide] frame %llu: game mode %u, menu flag %u, race phase %X, HUD flags %u", g_frames,
+                       ld32(GAME_TOP_MODE), ld32(GAME_MENU_FLAG), ld32(GAME_RACE_PHASE), g_gx.xf_reg[GX_XR_WIDE_FLAGS]);
+            last_fl = g_gx.xf_reg[GX_XR_WIDE_FLAGS];
+        }
+        float fov = (float)g_fov_scale;
+        memcpy(&g_gx.xf_reg[GX_XR_FOV], &fov, 4);
+        float asp = settings_game_k() / k;  /* online: the room's camera wider than this screen */
+        memcpy(&g_gx.xf_reg[GX_XR_ASPECT], &asp, 4);
+        g_gx.regs_dirty = 1;
+        g_gx.xfm_dirty = ~0u;  /* every chunk is copied into this frame's pool once */
+        g_state_dirty = 1;
+        gx_texture_new_frame();
+        g_nanch = 0;
+    }
+    return g_frame;
+}
+
+void gx_frame_retire(int id) {
+    GxFrame* f = frame();
+    f->retired = grow(f->retired, &f->cap_retired, f->nretired + 1, sizeof(int));
+    f->retired[f->nretired++] = id;
+}
+
+static GxCmd* push_cmd(int type) {
+    GxFrame* f = frame();
+    f->cmds = grow(f->cmds, &f->cap_cmds, f->ncmds + 1, sizeof(GxCmd));
+    GxCmd* c = &f->cmds[f->ncmds++];
+    memset(c, 0, sizeof *c);
+    c->type = (uint8_t)type;
+    return c;
+}
+
+/* Online play, each player's own view (docs/ONLINE.md): which halves of a two-player split screen this
+ * frame drew 3D into: bit 0 the top, bit 1 the bottom (a full-width, half-height viewport with a
+ * perspective projection). Read and cleared at the frame's XFB copy. */
+static unsigned g_split_seen;
+static void note_split_view(void) {
+    const uint32_t* xr = g_gx.xf_reg;
+    if (xr[0x26] != 0) return;  /* orthographic: 2D (the HUD) */
+    float xs, ys, yo;
+    memcpy(&xs, &xr[0x1A], 4); memcpy(&ys, &xr[0x1B], 4); memcpy(&yo, &xr[0x1E], 4);
+    if (xs < 0) xs = -xs;
+    if (ys < 0) ys = -ys;
+    if (xs != 320.0f || ys != 120.0f) return;
+    float vy = yo - ys - (float)(((g_gx.bp[0x59] >> 10) & 0x3FF) * 2);
+    if (vy > -1.0f && vy < 1.0f) g_split_seen |= 1;
+    else if (vy > 239.0f && vy < 241.0f) g_split_seen |= 2;
+}
+
+/* a state snapshot: copies of the XF memory chunks changed since the last one, a new chunk table
+ * when any did, and a new register block only when a BP or XF register was written and differs.
+ * A STATE command is pushed only when either changed. */
+static void push_state(void) {
+    GxFrame* f = frame();
+    static uint32_t xtab[32];
+    uint32_t dirty = g_gx.xfm_dirty & ((1u << GX_XFM_CHUNKS) - 1);
+    for (int i = 0; i < GX_XFM_CHUNKS; i++) {
+        if (!(dirty & (1u << i))) continue;
+        f->xchunks = grow(f->xchunks, &f->cap_xchunks, (f->nxchunks + 1) * GX_XFM_CHUNK, sizeof(uint32_t));
+        memcpy(f->xchunks + (size_t)f->nxchunks * GX_XFM_CHUNK, g_gx.xf_mem + i * GX_XFM_CHUNK, GX_XFM_CHUNK * 4);
+        xtab[i] = f->nxchunks++;
+    }
+    g_gx.xfm_dirty = 0;
+    g_state_dirty = 0;
+    int new_tab = dirty || !f->nxtabs;
+    if (new_tab) {
+        f->xtabs = grow(f->xtabs, &f->cap_xtabs, f->nxtabs + 1, sizeof(GxXTab));
+        memcpy(f->xtabs[f->nxtabs++].xtab, xtab, sizeof xtab);
+    }
+    int new_regs = 0;
+    if (g_gx.regs_dirty) {
+        g_gx.regs_dirty = 0;
+        const GxUniforms* p = f->nunis ? &f->unis[f->nunis - 1] : NULL;
+        if (!p || memcmp(p->bp, g_gx.bp, sizeof p->bp) || memcmp(p->xfr, g_gx.xf_reg, sizeof p->xfr) ||
+            memcmp(p->konst, g_gx.konst, sizeof p->konst)) {
+            f->unis = grow(f->unis, &f->cap_unis, f->nunis + 1, sizeof(GxUniforms));
+            GxUniforms* u = &f->unis[f->nunis++];
+            memcpy(u->bp, g_gx.bp, sizeof u->bp);
+            memcpy(u->xfr, g_gx.xf_reg, sizeof u->xfr);
+            memcpy(u->konst, g_gx.konst, sizeof u->konst);
+            new_regs = 1;
+            note_split_view();
+        }
+    }
+    if (!new_tab && !new_regs) return;
+    GxCmd* c = push_cmd(GXC_STATE);
+    c->a = f->nunis - 1;
+    c->b = f->nxtabs - 1;
+}
+
+/* ---- vertex decoding ---- */
+static inline uint16_t rd16(const uint8_t* p) { return (uint16_t)(p[0] << 8 | p[1]); }
+static inline uint32_t rd32(const uint8_t* p) { return (uint32_t)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3]; }
+
+static float comp(const uint8_t** pp, int fmt, float scale) {
+    const uint8_t* p = *pp;
+    float v;
+    switch (fmt) {
+    case 0: v = p[0]; *pp += 1; break;
+    case 1: v = (int8_t)p[0]; *pp += 1; break;
+    case 2: v = rd16(p); *pp += 2; break;
+    case 3: v = (int16_t)rd16(p); *pp += 2; break;
+    default: { uint32_t u = rd32(p); memcpy(&v, &u, 4); *pp += 4; return v; }
+    }
+    return v * scale;
+}
+
+static void color(const uint8_t* p, int fmt, float* o) {
+    uint32_t r, g, b, a = 255;
+    switch (fmt) {
+    case 0: { uint16_t v = rd16(p); r = (v >> 11) * 255 / 31; g = ((v >> 5) & 63) * 255 / 63; b = (v & 31) * 255 / 31; break; }
+    case 1: case 2: r = p[0]; g = p[1]; b = p[2]; break;
+    case 3: { uint16_t v = rd16(p); r = (v >> 12) * 17; g = ((v >> 8) & 15) * 17; b = ((v >> 4) & 15) * 17; a = (v & 15) * 17; break; }
+    case 4: { uint32_t v = (uint32_t)p[0] << 16 | p[1] << 8 | p[2];
+              r = ((v >> 18) & 63) * 255 / 63; g = ((v >> 12) & 63) * 255 / 63; b = ((v >> 6) & 63) * 255 / 63; a = (v & 63) * 255 / 63; break; }
+    default: r = p[0]; g = p[1]; b = p[2]; a = p[3]; break;
+    }
+    o[0] = r / 255.0f; o[1] = g / 255.0f; o[2] = b / 255.0f; o[3] = a / 255.0f;
+}
+
+static const int k_csize[8] = {1, 1, 2, 2, 4, 0, 0, 0};
+static const int k_colsize[8] = {2, 3, 4, 2, 3, 4, 0, 0};
+
+/* Vertex decoding: everything derived from the CP registers (VCD, VAT, array bases, matrix indices)
+ * is worked out once per draw, as it cannot change inside one; every output field is written
+ * explicitly. Attribute data is direct (in the stream) or indexed into an array. */
+typedef struct DAttr { int type, fmt, n; float scale; uint32_t base, stride; } DAttr;
+typedef struct DecodePlan {
+    float pnmtx, tmtx[8];       /* defaults from MATINDEX A/B */
+    int pnmtx_direct, tmtx_direct[8];
+    DAttr pos, nrm, col[2], tex[8];
+    int nrm_direct_size, nrm_idx_extra;  /* NBT: the binormal/tangent bytes to skip */
+} DecodePlan;
+
+static void dattr(DAttr* d, int type, int arr) {
+    d->type = type;
+    d->base = g_gx.cp[0xA0 + arr] & 0x03FFFFFF;
+    d->stride = g_gx.cp[0xB0 + arr] & 0xFF;
+}
+
+static void plan_init(DecodePlan* pl, int vat) {
+    uint32_t lo = g_gx.cp[0x50], hi = g_gx.cp[0x60];
+    uint32_t a = g_gx.cp[0x70 + vat], b = g_gx.cp[0x80 + vat], cc = g_gx.cp[0x90 + vat];
+    uint32_t mia = g_gx.cp[0x30], mib = g_gx.cp[0x40];
+    pl->pnmtx = (float)(mia & 63);
+    pl->pnmtx_direct = lo & 1;
+    for (int i = 0; i < 8; i++) {
+        pl->tmtx[i] = (float)(i < 4 ? (mia >> (6 + 6 * i)) & 63 : (mib >> (6 * (i - 4))) & 63);
+        pl->tmtx_direct[i] = (lo >> (1 + i)) & 1;
+    }
+    dattr(&pl->pos, (lo >> 9) & 3, 0);
+    pl->pos.fmt = (a >> 1) & 7;
+    pl->pos.n = (a & 1) ? 3 : 2;
+    pl->pos.scale = 1.0f / (float)(1u << ((a >> 4) & 31));
+    dattr(&pl->nrm, (lo >> 11) & 3, 1);
+    pl->nrm.fmt = (a >> 10) & 7;
+    pl->nrm.n = 3;
+    pl->nrm.scale = pl->nrm.fmt == 1 ? 1.0f / 64 : pl->nrm.fmt == 3 ? 1.0f / 16384 : 1.0f;
+    int nbt = (a >> 9) & 1, three_idx = nbt && ((a >> 31) & 1);
+    pl->nrm_direct_size = (nbt ? 9 : 3) * k_csize[pl->nrm.fmt];
+    pl->nrm_idx_extra = three_idx ? 2 * (pl->nrm.type == 2 ? 1 : 2) : 0;
+    for (int c = 0; c < 2; c++) {
+        dattr(&pl->col[c], (lo >> (13 + 2 * c)) & 3, 2 + c);
+        pl->col[c].fmt = c == 0 ? (a >> 14) & 7 : (a >> 18) & 7;
+    }
+    static const struct { int word, cnt, fmt, shft; } tex[8] = {
+        {0, 21, 22, 25}, {1, 0, 1, 4}, {1, 9, 10, 13}, {1, 18, 19, 22}, {1, 27, 28, -1}, {2, 5, 6, 9}, {2, 14, 15, 18}, {2, 23, 24, 27}};
+    for (int i = 0; i < 8; i++) {
+        dattr(&pl->tex[i], (hi >> (2 * i)) & 3, 4 + i);
+        uint32_t w = tex[i].word == 0 ? a : tex[i].word == 1 ? b : cc;
+        pl->tex[i].fmt = (w >> tex[i].fmt) & 7;
+        pl->tex[i].n = ((w >> tex[i].cnt) & 1) ? 2 : 1;
+        int shft = tex[i].shft >= 0 ? (int)((w >> tex[i].shft) & 31) : (int)(cc & 31);  /* TEX4SHFT is in VAT C */
+        pl->tex[i].scale = 1.0f / (float)(1u << shft);
+    }
+}
+
+static inline const uint8_t* pattr(const uint8_t** pp, const DAttr* d) {
+    if (d->type == 1) return *pp;
+    uint32_t idx = d->type == 2 ? (*pp)[0] : rd16(*pp);
+    *pp += d->type == 2 ? 1 : 2;
+    return mem_phys(d->base + idx * d->stride);
+}
+
+static void decode_planned(const uint8_t** pp, const DecodePlan* pl, GxVertex* v) {
+    const uint8_t* p = *pp;
+    v->pos[3] = pl->pnmtx_direct ? (float)*p++ : pl->pnmtx;
+    for (int i = 0; i < 8; i++) v->tmtx[i] = pl->tmtx_direct[i] ? (float)*p++ : pl->tmtx[i];
+    v->pos[0] = v->pos[1] = v->pos[2] = 0.0f;
+    if (pl->pos.type) {
+        const uint8_t* q = pattr(&p, &pl->pos);
+        for (int k = 0; k < pl->pos.n; k++) v->pos[k] = comp(&q, pl->pos.fmt, pl->pos.scale);
+        if (pl->pos.type == 1) p += pl->pos.n * k_csize[pl->pos.fmt];
+    }
+    v->nrm[0] = v->nrm[1] = v->nrm[2] = v->nrm[3] = 0.0f;
+    if (pl->nrm.type) {
+        const uint8_t* q = pattr(&p, &pl->nrm);
+        for (int k = 0; k < 3; k++) v->nrm[k] = comp(&q, pl->nrm.fmt, pl->nrm.scale);
+        if (pl->nrm.type == 1) p += pl->nrm_direct_size;
+        else p += pl->nrm_idx_extra;
+    }
+    for (int c = 0; c < 2; c++) {
+        if (!pl->col[c].type) { v->col[c][0] = v->col[c][1] = v->col[c][2] = v->col[c][3] = 1.0f; continue; }
+        const uint8_t* q = pattr(&p, &pl->col[c]);
+        color(q, pl->col[c].fmt, v->col[c]);
+        if (pl->col[c].type == 1) p += k_colsize[pl->col[c].fmt];
+    }
+    for (int i = 0; i < 8; i++) {
+        v->tex[i][0] = v->tex[i][1] = 0.0f;
+        const DAttr* d = &pl->tex[i];
+        if (!d->type) continue;
+        const uint8_t* q = pattr(&p, d);
+        for (int k = 0; k < d->n; k++) v->tex[i][k] = comp(&q, d->fmt, d->scale);
+        if (d->type == 1) p += d->n * k_csize[d->fmt];
+    }
+    *pp = p;
+}
+
+/* ---- fast vertex decoding ----
+ * The same results as decode_planned (bit for bit; SR_DECODECHECK=1 runs both and compares), with
+ * the per-component format switches resolved once per draw: each attribute gets a reader for its
+ * format and component count, colours convert through tables, and only the texture coordinates a
+ * draw has are decoded. */
+typedef void (*CompRd)(const uint8_t* q, float scale, float* o);
+#define RD_FN(name, n, expr)                                                     \
+    static void name(const uint8_t* q, float scale, float* o) {                 \
+        (void)scale;                                                             \
+        for (int k = 0; k < n; k++) o[k] = expr;                                 \
+    }
+RD_FN(rd_u8_1, 1, (float)q[k] * scale)
+RD_FN(rd_u8_2, 2, (float)q[k] * scale)
+RD_FN(rd_u8_3, 3, (float)q[k] * scale)
+RD_FN(rd_s8_1, 1, (float)(int8_t)q[k] * scale)
+RD_FN(rd_s8_2, 2, (float)(int8_t)q[k] * scale)
+RD_FN(rd_s8_3, 3, (float)(int8_t)q[k] * scale)
+RD_FN(rd_u16_1, 1, (float)rd16(q + 2 * k) * scale)
+RD_FN(rd_u16_2, 2, (float)rd16(q + 2 * k) * scale)
+RD_FN(rd_u16_3, 3, (float)rd16(q + 2 * k) * scale)
+RD_FN(rd_s16_1, 1, (float)(int16_t)rd16(q + 2 * k) * scale)
+RD_FN(rd_s16_2, 2, (float)(int16_t)rd16(q + 2 * k) * scale)
+RD_FN(rd_s16_3, 3, (float)(int16_t)rd16(q + 2 * k) * scale)
+static inline float rdf(const uint8_t* q) { uint32_t u = rd32(q); float f; memcpy(&f, &u, 4); return f; }
+RD_FN(rd_f_1, 1, rdf(q + 4 * k))
+RD_FN(rd_f_2, 2, rdf(q + 4 * k))
+RD_FN(rd_f_3, 3, rdf(q + 4 * k))
+static const CompRd k_rd[5][4] = {{NULL, rd_u8_1, rd_u8_2, rd_u8_3},     {NULL, rd_s8_1, rd_s8_2, rd_s8_3},
+                                  {NULL, rd_u16_1, rd_u16_2, rd_u16_3},  {NULL, rd_s16_1, rd_s16_2, rd_s16_3},
+                                  {NULL, rd_f_1, rd_f_2, rd_f_3}};  /* formats 4-7 read as float, as comp() does */
+static CompRd rd_for(int fmt, int n) { return k_rd[fmt > 4 ? 4 : fmt][n]; }
+
+/* colour channel tables: exactly color()'s integer expansion followed by / 255.0f */
+static float g_lut4[16], g_lut5[32], g_lut6[64], g_lut8[256];
+static void col_luts(void) {
+    for (int i = 0; i < 16; i++) g_lut4[i] = (float)(uint32_t)(i * 17) / 255.0f;
+    for (int i = 0; i < 32; i++) g_lut5[i] = (float)(uint32_t)(i * 255 / 31) / 255.0f;
+    for (int i = 0; i < 64; i++) g_lut6[i] = (float)(uint32_t)(i * 255 / 63) / 255.0f;
+    for (int i = 0; i < 256; i++) g_lut8[i] = (float)(uint32_t)i / 255.0f;
+}
+typedef void (*ColRd)(const uint8_t* p, float* o);
+static void col_565(const uint8_t* p, float* o) {
+    uint16_t v = rd16(p);
+    o[0] = g_lut5[v >> 11]; o[1] = g_lut6[(v >> 5) & 63]; o[2] = g_lut5[v & 31]; o[3] = 1.0f;
+}
+static void col_888(const uint8_t* p, float* o) { o[0] = g_lut8[p[0]]; o[1] = g_lut8[p[1]]; o[2] = g_lut8[p[2]]; o[3] = 1.0f; }
+static void col_4444(const uint8_t* p, float* o) {
+    uint16_t v = rd16(p);
+    o[0] = g_lut4[v >> 12]; o[1] = g_lut4[(v >> 8) & 15]; o[2] = g_lut4[(v >> 4) & 15]; o[3] = g_lut4[v & 15];
+}
+static void col_6666(const uint8_t* p, float* o) {
+    uint32_t v = (uint32_t)p[0] << 16 | p[1] << 8 | p[2];
+    o[0] = g_lut6[(v >> 18) & 63]; o[1] = g_lut6[(v >> 12) & 63]; o[2] = g_lut6[(v >> 6) & 63]; o[3] = g_lut6[v & 63];
+}
+static void col_8888(const uint8_t* p, float* o) { o[0] = g_lut8[p[0]]; o[1] = g_lut8[p[1]]; o[2] = g_lut8[p[2]]; o[3] = g_lut8[p[3]]; }
+static const ColRd k_col[8] = {col_565, col_888, col_888, col_4444, col_6666, col_8888, col_8888, col_8888};
+
+typedef struct FastAttr { int type, adv; float scale; uint32_t base, stride; CompRd rd; } FastAttr;
+typedef struct FastPlan {
+    float pnmtx, tmtx[8];
+    int pnmtx_direct, any_tmtx_direct, tmtx_direct[8];
+    FastAttr pos, nrm, tex[8];
+    int ntex, texi[8];  /* the texture coordinates present, in order */
+    int col_type[2], col_adv[2];
+    uint32_t col_base[2], col_stride[2];
+    ColRd col[2];
+    int nrm_skip;       /* bytes after the normal: NBT direct data or extra indices */
+} FastPlan;
+
+static void fast_attr(FastAttr* f, const DAttr* d, int n) {
+    f->type = d->type; f->scale = d->scale; f->base = d->base; f->stride = d->stride;
+    f->rd = rd_for(d->fmt, n);
+    f->adv = d->type == 1 ? n * k_csize[d->fmt] : d->type == 2 ? 1 : 2;  /* direct data, or the index */
+}
+
+static void fast_plan_init(FastPlan* fp, const DecodePlan* pl) {
+    static int luts;
+    if (!luts) { col_luts(); luts = 1; }
+    fp->pnmtx = pl->pnmtx;
+    fp->pnmtx_direct = pl->pnmtx_direct;
+    fp->any_tmtx_direct = 0;
+    for (int i = 0; i < 8; i++) {
+        fp->tmtx[i] = pl->tmtx[i];
+        fp->tmtx_direct[i] = pl->tmtx_direct[i];
+        fp->any_tmtx_direct |= pl->tmtx_direct[i];
+    }
+    fast_attr(&fp->pos, &pl->pos, pl->pos.n);
+    fast_attr(&fp->nrm, &pl->nrm, 3);
+    if (pl->nrm.type == 1) fp->nrm.adv = pl->nrm_direct_size;
+    fp->nrm_skip = pl->nrm.type >= 2 ? pl->nrm_idx_extra : 0;
+    for (int c = 0; c < 2; c++) {
+        fp->col_type[c] = pl->col[c].type;
+        fp->col_base[c] = pl->col[c].base;
+        fp->col_stride[c] = pl->col[c].stride;
+        fp->col[c] = k_col[pl->col[c].fmt & 7];
+        fp->col_adv[c] = pl->col[c].type == 1 ? k_colsize[pl->col[c].fmt] : pl->col[c].type == 2 ? 1 : 2;
+    }
+    fp->ntex = 0;
+    for (int i = 0; i < 8; i++) {
+        fast_attr(&fp->tex[i], &pl->tex[i], pl->tex[i].n);
+        if (pl->tex[i].type) fp->texi[fp->ntex++] = i;
+    }
+}
+
+/* the attribute's data: in the stream (direct) or in its array (indexed); p moves past it */
+static inline const uint8_t* fattr(const uint8_t** pp, int type, int adv, uint32_t base, uint32_t stride) {
+    const uint8_t* p = *pp;
+    *pp = p + adv;
+    if (type == 1) return p;
+    uint32_t idx = type == 2 ? p[0] : rd16(p);
+    return mem_phys(base + idx * stride);
+}
+
+static void decode_fast(const uint8_t** pp, const FastPlan* fp, GxVertex* v) {
+    const uint8_t* p = *pp;
+    v->pos[3] = fp->pnmtx_direct ? (float)*p++ : fp->pnmtx;
+    if (fp->any_tmtx_direct) {
+        for (int i = 0; i < 8; i++) v->tmtx[i] = fp->tmtx_direct[i] ? (float)*p++ : fp->tmtx[i];
+    } else {
+        memcpy(v->tmtx, fp->tmtx, sizeof v->tmtx);
+    }
+    v->pos[0] = v->pos[1] = v->pos[2] = 0.0f;
+    if (fp->pos.type) fp->pos.rd(fattr(&p, fp->pos.type, fp->pos.adv, fp->pos.base, fp->pos.stride), fp->pos.scale, v->pos);
+    v->nrm[0] = v->nrm[1] = v->nrm[2] = v->nrm[3] = 0.0f;
+    if (fp->nrm.type) {
+        fp->nrm.rd(fattr(&p, fp->nrm.type, fp->nrm.adv, fp->nrm.base, fp->nrm.stride), fp->nrm.scale, v->nrm);
+        p += fp->nrm_skip;
+    }
+    for (int c = 0; c < 2; c++) {
+        if (!fp->col_type[c]) { v->col[c][0] = v->col[c][1] = v->col[c][2] = v->col[c][3] = 1.0f; continue; }
+        fp->col[c](fattr(&p, fp->col_type[c], fp->col_adv[c], fp->col_base[c], fp->col_stride[c]), v->col[c]);
+    }
+    memset(v->tex, 0, sizeof v->tex);
+    for (int j = 0; j < fp->ntex; j++) {
+        const FastAttr* d = &fp->tex[fp->texi[j]];
+        d->rd(fattr(&p, d->type, d->adv, d->base, d->stride), d->scale, v->tex[fp->texi[j]]);
+    }
+    *pp = p;
+}
+
+/* ---- the vertex decode helper ----
+ * With the GP thread on (gx_async), a draw's vertices are decoded by a helper thread (on the render
+ * thread's core, below it in priority: that core idles while the render thread waits for the GPU)
+ * instead of on the GP thread, whose core was the limit in busy races. The draw's stream bytes are
+ * copied (the FIFO ring is reused), its FastPlan is kept, and its place in the frame's vertex array
+ * is reserved. Indexed attributes are read from guest RAM when decoded, so every job is finished
+ * (the GP thread takes the ones not started) before anything that lets the game reuse that memory or
+ * hands the frame on: draw done and tokens (gx_fifo.c), the frame's submission, and growing the
+ * vertex array. SR_DECODE_HELPER=0 decodes on the GP thread as before. */
+typedef struct DecJob { FastPlan fp; GxVertex* out; uint32_t count, src; } DecJob;
+#define DJ_MAX 4096
+#define DJ_BYTES (2u << 20)
+static DecJob* g_dj;
+static uint8_t* g_dj_bytes;
+static uint32_t g_dj_used;                         /* stream bytes queued (GP thread) */
+static _Atomic uint32_t g_dj_pub, g_dj_next, g_dj_done;  /* jobs published, claimed, finished */
+static _Atomic int g_dj_sleeping;
+static mtx_t g_dj_lock;
+static cnd_t g_dj_cv;
+static int g_dj_on = -1;
+static _Atomic uint64_t g_dj_helper_ticks;         /* decode time on the helper ([perf]) */
+
+static int dj_run_one(int helper) {
+    uint32_t i = atomic_load_explicit(&g_dj_next, memory_order_relaxed);
+    do {
+        if (i >= atomic_load_explicit(&g_dj_pub, memory_order_acquire)) return 0;
+    } while (!atomic_compare_exchange_weak_explicit(&g_dj_next, &i, i + 1, memory_order_acq_rel, memory_order_relaxed));
+    uint64_t t = helper ? rt_ticks() : 0;
+    const DecJob* j = &g_dj[i];
+    const uint8_t* p = g_dj_bytes + j->src;
+    for (uint32_t k = 0; k < j->count; k++) decode_fast(&p, &j->fp, j->out + k);
+    if (helper) atomic_fetch_add_explicit(&g_dj_helper_ticks, rt_ticks() - t, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_dj_done, 1, memory_order_release);
+    return 1;
+}
+
+static int dj_thread(void* arg) {
+    (void)arg;
+    rt_thread_pin(1);
+    rt_thread_lower_priority();
+    for (;;) {
+        if (dj_run_one(1)) continue;
+        mtx_lock(&g_dj_lock);
+        atomic_store(&g_dj_sleeping, 1);
+        if (atomic_load(&g_dj_next) >= atomic_load(&g_dj_pub)) {
+            struct timespec ts;
+            timespec_get(&ts, TIME_UTC);
+            ts.tv_nsec += 2000000;
+            if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+            cnd_timedwait(&g_dj_cv, &g_dj_lock, &ts);
+        }
+        atomic_store(&g_dj_sleeping, 0);
+        mtx_unlock(&g_dj_lock);
+    }
+    return 0;
+}
+
+/* every queued draw decoded (GP thread): the ones not started here, then wait for the helper's */
+void gx_decode_sync(void) {
+    uint32_t pub = atomic_load_explicit(&g_dj_pub, memory_order_relaxed);
+    if (!pub) return;
+    uint64_t t = rt_ticks();
+    while (dj_run_one(0)) {}
+    while (atomic_load_explicit(&g_dj_done, memory_order_acquire) != pub) {}  /* the helper's one job in progress: short */
+    g_decode_ticks += rt_ticks() - t;
+    atomic_store(&g_dj_pub, 0);
+    atomic_store(&g_dj_next, 0);
+    atomic_store(&g_dj_done, 0);
+    g_dj_used = 0;
+}
+
+static int dj_enabled(void) {
+    if (g_dj_on < 0) {
+        const char* e = getenv("SR_DECODE_HELPER");
+        g_dj_on = gx_async() && !(e && atoi(e) == 0);
+        if (g_dj_on) {
+            g_dj = malloc(sizeof(DecJob) * DJ_MAX);
+            g_dj_bytes = malloc(DJ_BYTES);
+            if (!g_dj || !g_dj_bytes) rt_fatal("out of memory (decode helper)");
+            mtx_init(&g_dj_lock, mtx_plain);
+            cnd_init(&g_dj_cv);
+            rt_thread_start(dj_thread, NULL);
+        }
+        rt_log("[gx] vertex decode helper thread %s", g_dj_on ? "on" : "off");
+    }
+    return g_dj_on;
+}
+
+/* queue a draw's decode; 0 when it must be decoded here (no room, or the helper is off) */
+static int dj_queue(const FastPlan* fp, GxVertex* out, uint32_t count, const uint8_t* vertices, uint32_t bytes) {
+    if (!dj_enabled() || bytes > DJ_BYTES / 4) return 0;
+    uint32_t n = atomic_load_explicit(&g_dj_pub, memory_order_relaxed);
+    if (n >= DJ_MAX || g_dj_used + bytes > DJ_BYTES) {
+        gx_decode_sync();
+        n = 0;
+    }
+    DecJob* j = &g_dj[n];
+    j->fp = *fp;
+    j->out = out;
+    j->count = count;
+    j->src = g_dj_used;
+    memcpy(g_dj_bytes + g_dj_used, vertices, bytes);
+    g_dj_used += (bytes + 7) & ~7u;
+    atomic_store_explicit(&g_dj_pub, n + 1, memory_order_release);
+    if (atomic_load_explicit(&g_dj_sleeping, memory_order_acquire)) {
+        mtx_lock(&g_dj_lock);
+        cnd_signal(&g_dj_cv);
+        mtx_unlock(&g_dj_lock);
+    }
+    return 1;
+}
+
+/* the texture bound to `map` for this draw (timed for [perf] and [hitch]) */
+static void lookup_map(GxCmd* c, int map) {
+    uint64_t t = rt_ticks();
+    c->tex[map] = gx_texture_lookup(map);
+    uint64_t d = rt_ticks() - t;
+    g_tex_ticks += d;
+    g_tex_total += d;
+}
+
+static void draw_impl(int prim, int vat, uint32_t count, const uint8_t* vertices, uint32_t vertex_size);
+static void draw(int prim, int vat, uint32_t count, const uint8_t* vertices, uint32_t vertex_size) {
+    if (gx_async()) {  /* on the GP thread: the profiler's variable is the game core's */
+        draw_impl(prim, vat, count, vertices, vertex_size);
+        return;
+    }
+    uint32_t prev = g_ppc_cur_fn;
+    g_ppc_cur_fn = PROF_DRAW;
+    draw_impl(prim, vat, count, vertices, vertex_size);
+    g_ppc_cur_fn = prev;
+}
+/* wide screen modes (gx_render.h GX_ANCHOR_*): where a 2D (orthographic) draw goes, decided once for
+ * the whole draw from its extent in clip space (X -1..1 = the game's 640 columns), so the pieces of
+ * one HUD element move together. Spanning the width: stretched (fades, backgrounds, the speed-blur
+ * copy, whose inner vertices must not move against its texture). With GX_WIDE_HUD_EDGES, a draw
+ * whose middle is left (right) of the dead zone moves with the left (right) screen edge.
+ * A band made of several pieces side by side (the title's top and bottom bands) is stretched as a
+ * whole: when the draws touching each other (X ranges meet, Y ranges overlap) cover the width, every
+ * one of them is stretched (they may be marked again after they were decoded: the frame is drawn
+ * only once it is complete). */
+#define ANCHOR_DEAD_ZONE 0.3f  /* clip units around the middle that stay in the middle (TIME, PRESS START) */
+#define ANCHOR_MAX 64          /* 2D draws of a frame remembered for the bands */
+#define ANCHOR_LETTER_W 0.15f  /* clip units: narrower draws may be letters of a text line */
+#define ANCHOR_LETTER_GAP 0.15f /* the widest gap between letters of one line (a word space) */
+typedef struct { uint32_t v0, n; float x0, x1, y0, y1; int code, full; } Anchored;
+static Anchored g_anch[ANCHOR_MAX];
+static void anchor_set(GxFrame* f, Anchored* a, int code) {
+    a->code = code;
+    for (uint32_t i = 0; i < a->n; i++) f->verts[a->v0 + i].nrm[3] = (float)code;
+}
+/* side by side: X ranges meet or overlap a little, Y ranges overlap by a good part (text on a band is not
+ * part of it); draws that span the width alone (backgrounds) and narrow ones (the letters of a line
+ * of text, side by side too) join nothing */
+#define ANCHOR_BAND_MIN_W 0.1f  /* clip units (32 of the 640 columns) */
+static int anchor_touch(const Anchored* a, const Anchored* b) {
+    if (a->full || b->full || a->x1 - a->x0 < ANCHOR_BAND_MIN_W || b->x1 - b->x0 < ANCHOR_BAND_MIN_W) return 0;
+    float yover = (a->y1 < b->y1 ? a->y1 : b->y1) - (a->y0 > b->y0 ? a->y0 : b->y0);
+    float ha = a->y1 - a->y0, hb = b->y1 - b->y0;
+    /* thin bars may be offset a little (the menus' dark bars: pieces 0.108 and 0.100 high, 43% shared);
+     * bigger pieces must share half their height (the round menu backgrounds must not join) */
+    float hmax = ha > hb ? ha : hb;
+    if (yover < (hmax < 0.15f ? 0.35f : 0.5f) * hmax) return 0;
+    /* bigger pieces of one bar have the same height; the Track Select row (panel 0.45, arrow panels 0.39,
+     * course pictures 0.35 high) is a frame with pictures, which stretching tore apart (v0.5.1, Fit window) */
+    if (hmax >= 0.15f && (ha < hb ? ha : hb) < 0.9f * hmax) return 0;
+    float over = (a->x1 < b->x1 ? a->x1 : b->x1) - (a->x0 > b->x0 ? a->x0 : b->x0);
+    float wa = a->x1 - a->x0, wb = b->x1 - b->x0;
+    return over >= -0.01f && over <= 0.5f * (wa < wb ? wa : wb);
+}
+/* SR_ANCHORLOG=<frame>: log that frame's 2D draws and their anchors (frames counted as SR_GXDEBUG) */
+static int anchor_log(void) {
+    static int at = -1;
+    if (at < 0) at = getenv("SR_ANCHORLOG") ? atoi(getenv("SR_ANCHORLOG")) : 0;
+    return at && g_frames + 1 == (unsigned)at;
+}
+/* The game's movie player draws each frame as one screen-sized quad, one TEV stage, from a 640x480 RGBA8
+ * texture in RAM (decoded by the CPU). Backgrounds use other formats/sizes; the speed blur and pause
+ * backgrounds are EFB copies, which must stay stretched (the EFB itself is wide). Not with "stretch HUD". */
+static int is_movie_draw(void) {
+    if (!(g_gx.xf_reg[GX_XR_WIDE_FLAGS] & GX_WIDE_HUD_43)) return 0;
+    if ((g_gx.bp[0x00] >> 10) & 15) return 0;               /* more than one TEV stage */
+    uint32_t order = g_gx.bp[0x28] & 0xFFF;
+    if (!(order & 0x40) || (order & 7) != 0) return 0;     /* stage 0 samples texture map 0 */
+    uint32_t i0 = g_gx.bp[0x88];
+    if ((i0 & 0x3FF) != 639 || ((i0 >> 10) & 0x3FF) != 479 || ((i0 >> 20) & 15) != 6) return 0;
+    return !gx_texture_is_copy((g_gx.bp[0x94] & 0xFFFFFF) << 5);
+}
+static void wide_anchor(GxFrame* f, uint32_t v0, uint32_t count) {
+    GxVertex* v = &f->verts[v0];
+    uint32_t fl = g_gx.xf_reg[GX_XR_WIDE_FLAGS];
+    float P0, P1, P2, P3, xs;
+    memcpy(&P0, &g_gx.xf_reg[0x20], 4);
+    memcpy(&P1, &g_gx.xf_reg[0x21], 4);
+    memcpy(&P2, &g_gx.xf_reg[0x22], 4);
+    memcpy(&P3, &g_gx.xf_reg[0x23], 4);
+    memcpy(&xs, &g_gx.xf_reg[0x1A], 4);
+    float lo = 1e30f, hi = -1e30f, ylo = 1e30f, yhi = -1e30f;
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t pm = ((uint32_t)v[i].pos[3] * 4) & 0xFFC;
+        float r[4];
+        memcpy(r, &g_gx.xf_mem[pm], sizeof r);
+        float x = P0 * (r[0] * v[i].pos[0] + r[1] * v[i].pos[1] + r[2] * v[i].pos[2] + r[3]) + P1;
+        if (xs < 0.0f) x = -x;  /* a mirrored viewport */
+        if (x < lo) lo = x;
+        if (x > hi) hi = x;
+        memcpy(r, &g_gx.xf_mem[pm + 4], sizeof r);
+        float y = P2 * (r[0] * v[i].pos[0] + r[1] * v[i].pos[1] + r[2] * v[i].pos[2] + r[3]) + P3;
+        if (y < ylo) ylo = y;
+        if (y > yhi) yhi = y;
+    }
+    int code = GX_ANCHOR_MIDDLE;
+    if (lo <= -0.99f && hi >= 0.99f && ylo <= -0.99f && yhi >= 0.99f && is_movie_draw()) {
+        /* a movie frame (story scenes, Theater, intro): kept 4:3 with black bars instead of stretched */
+        if (anchor_log()) rt_log("[anchor] draw %u: movie frame -> 4:3", g_nanch);
+        for (uint32_t i = 0; i < count; i++) v[i].nrm[3] = (float)GX_ANCHOR_MIDDLE;
+        return;
+    }
+    if (lo <= -0.99f && hi >= 0.99f) code = GX_ANCHOR_STRETCH;
+    else if (fl & GX_WIDE_HUD_EDGES) {
+        float mid = 0.5f * (lo + hi);
+        code = mid < -ANCHOR_DEAD_ZONE ? GX_ANCHOR_LEFT : mid > ANCHOR_DEAD_ZONE ? GX_ANCHOR_RIGHT : GX_ANCHOR_MIDDLE;
+    }
+    if (g_nanch == ANCHOR_MAX) {  /* keep the newer half */
+        memmove(g_anch, g_anch + ANCHOR_MAX / 2, sizeof g_anch[0] * (ANCHOR_MAX / 2));
+        g_nanch = ANCHOR_MAX / 2;
+    }
+    /* a line of text: the game draws each letter as its own draw, one after another on the same row.
+     * At the edges the letters left of the dead zone went left and the others right, tearing subtitles
+     * and dialog lines apart; the whole run of letters is anchored by the middle of the line instead */
+    if ((fl & GX_WIDE_HUD_EDGES) && code != GX_ANCHOR_STRETCH) {
+        static struct { GxFrame* f; unsigned long long frame; uint32_t v0, vend; float lo, hi, y0, y1; } run;
+        float h = yhi - ylo, gap = lo - run.hi;
+        int narrow = hi - lo < ANCHOR_LETTER_W && h > 0.0f;
+        if (narrow && run.f == f && run.frame == g_frames && run.vend == v0 && fabsf(ylo - run.y0) < 0.25f * h &&
+            fabsf(yhi - run.y1) < 0.25f * h && gap > -0.02f && gap < ANCHOR_LETTER_GAP) {
+            if (lo < run.lo) run.lo = lo;
+            if (hi > run.hi) run.hi = hi;
+            run.vend = v0 + count;
+            float mid = 0.5f * (run.lo + run.hi);
+            code = mid < -ANCHOR_DEAD_ZONE ? GX_ANCHOR_LEFT : mid > ANCHOR_DEAD_ZONE ? GX_ANCHOR_RIGHT : GX_ANCHOR_MIDDLE;
+            for (uint32_t i = run.v0; i < v0; i++) f->verts[i].nrm[3] = (float)code;
+        } else if (narrow) {
+            run.f = f; run.frame = g_frames; run.v0 = v0; run.vend = v0 + count;
+            run.lo = lo; run.hi = hi; run.y0 = ylo; run.y1 = yhi;
+        } else
+            run.f = NULL;
+    }
+    Anchored* me = &g_anch[g_nanch++];
+    if (anchor_log())
+        rt_log("[anchor] draw %u: %u verts x %.3f..%.3f y %.3f..%.3f -> %d", g_nanch - 1, count, lo, hi, ylo, yhi, code);
+    *me = (Anchored){v0, count, lo, hi, ylo, yhi, GX_ANCHOR_MIDDLE, code == GX_ANCHOR_STRETCH};
+    anchor_set(f, me, code);
+    if (code == GX_ANCHOR_STRETCH) return;
+    /* the band this draw belongs to: the draws connected to it */
+    uint64_t in = 1ull << (g_nanch - 1);
+    float b0 = lo, b1 = hi;
+    for (int grew = 1; grew;) {
+        grew = 0;
+        for (uint32_t j = 0; j + 1 < g_nanch; j++) {
+            if (in & (1ull << j)) continue;
+            for (uint32_t m = 0; m < g_nanch; m++)
+                if ((in & (1ull << m)) && anchor_touch(&g_anch[j], &g_anch[m])) {
+                    if (anchor_log()) rt_log("[anchor]   draw %u touches draw %u", j, m);
+                    in |= 1ull << j;
+                    if (g_anch[j].x0 < b0) b0 = g_anch[j].x0;
+                    if (g_anch[j].x1 > b1) b1 = g_anch[j].x1;
+                    grew = 1;
+                    break;
+                }
+        }
+    }
+    if (b0 <= -0.99f && b1 >= 0.99f)
+        for (uint32_t j = 0; j < g_nanch; j++)
+            if ((in & (1ull << j)) && g_anch[j].code != GX_ANCHOR_STRETCH) {
+                anchor_set(f, &g_anch[j], GX_ANCHOR_STRETCH);
+                if (anchor_log()) rt_log("[anchor]   draw %u joins a band: stretched", j);
+            }
+}
+
+static void draw_impl(int prim, int vat, uint32_t count, const uint8_t* vertices, uint32_t vertex_size) {
+    if (!count) return;
+    if (g_state_dirty) {
+        uint64_t ts = rt_ticks();
+        push_state();
+        g_state_ticks += rt_ticks() - ts;
+        g_state_pushes++;
+    }
+    GxFrame* f = frame();
+    /* decode each vertex once into the frame; quads, strips and fans become index lists */
+    uint32_t out_n, kind;
+    switch (prim) {
+    case 0: case 1: out_n = count / 4 * 6; kind = GXP_TRIANGLES; break;  /* quads */
+    case 2: out_n = count / 3 * 3; kind = GXP_TRIANGLES; break;
+    case 3: case 4: out_n = count >= 3 ? (count - 2) * 3 : 0; kind = GXP_TRIANGLES; break;
+    case 5: out_n = count / 2 * 2; kind = GXP_LINES; break;
+    case 6: out_n = count >= 2 ? (count - 1) * 2 : 0; kind = GXP_LINES; break;
+    default: out_n = count; kind = GXP_POINTS; break;
+    }
+    if (!out_n) return;
+    if (f->nverts + count > f->cap_verts) gx_decode_sync();  /* queued decodes write into the array */
+    f->verts = grow(f->verts, &f->cap_verts, f->nverts + count, sizeof(GxVertex));
+    const uint8_t* p = vertices;
+    DecodePlan plan;
+    plan_init(&plan, vat);
+    FastPlan fplan;
+    fast_plan_init(&fplan, &plan);
+    static int check = -1;
+    if (check < 0) check = getenv("SR_DECODECHECK") != NULL;
+    uint64_t td = rt_ticks();
+    /* 2D in a wide mode: decoded here, the anchor needs the positions (wide_anchor) */
+    int anchor = g_gx.xf_reg[0x26] != 0 && (g_gx.xf_reg[GX_XR_WIDE_FLAGS] & GX_WIDE_HUD_43) && f->wide_k > 1.0f;
+    if (!check) {
+        if (anchor || !dj_queue(&fplan, &f->verts[f->nverts], count, vertices, count * vertex_size))
+            for (uint32_t i = 0; i < count; i++) decode_fast(&p, &fplan, &f->verts[f->nverts + i]);
+    } else {  /* SR_DECODECHECK: the reference decoder too, compared bit for bit */
+        static unsigned long long checked, bad;
+        const uint8_t* q = vertices;
+        for (uint32_t i = 0; i < count; i++) {
+            GxVertex ref;
+            decode_planned(&q, &plan, &ref);
+            decode_fast(&p, &fplan, &f->verts[f->nverts + i]);
+            checked++;
+            if (memcmp(&ref, &f->verts[f->nverts + i], sizeof ref) || p != q) {
+                if (bad++ < 10)
+                    rt_log("[decodecheck] mismatch: vat %d vcd %08X %08X vat %08X %08X %08X, vertex %u (stream %+d)", vat,
+                           g_gx.cp[0x50], g_gx.cp[0x60], g_gx.cp[0x70 + vat], g_gx.cp[0x80 + vat], g_gx.cp[0x90 + vat], i,
+                           (int)(p - q));
+                p = q;
+            }
+        }
+        if ((checked & ~0xFFFFFull) != ((checked - count) & ~0xFFFFFull))
+            rt_log("[decodecheck] %llu vertices compared, %llu mismatches", checked, bad);
+    }
+    if (anchor) wide_anchor(f, f->nverts, count);
+    g_decode_ticks += rt_ticks() - td;
+    f->idx = grow(f->idx, &f->cap_idx, f->nidx + out_n, sizeof(uint32_t));
+    uint32_t* o = f->idx + f->nidx;
+    const uint32_t v0 = f->nverts;
+    uint32_t k = 0;
+    switch (prim) {
+    case 0: case 1:
+        for (uint32_t i = 0; i + 3 < count; i += 4) {
+            o[k++] = v0 + i; o[k++] = v0 + i + 1; o[k++] = v0 + i + 2;
+            o[k++] = v0 + i; o[k++] = v0 + i + 2; o[k++] = v0 + i + 3;
+        }
+        break;
+    case 3:
+        for (uint32_t i = 2; i < count; i++) {
+            if (i & 1) { o[k++] = v0 + i - 1; o[k++] = v0 + i - 2; o[k++] = v0 + i; }
+            else { o[k++] = v0 + i - 2; o[k++] = v0 + i - 1; o[k++] = v0 + i; }
+        }
+        break;
+    case 4:
+        for (uint32_t i = 2; i < count; i++) { o[k++] = v0; o[k++] = v0 + i - 1; o[k++] = v0 + i; }
+        break;
+    case 6:
+        for (uint32_t i = 1; i < count; i++) { o[k++] = v0 + i - 1; o[k++] = v0 + i; }
+        break;
+    default:
+        for (uint32_t i = 0; i < out_n; i++) o[k++] = v0 + i;
+        break;
+    }
+    /* unimplemented features in use, for the [perf] line: indirect stages (genmode bits 16-18),
+     * fog (BP 0xF1 bits 21-23, the fog type), Z textures (BP 0xF4 bits 2-3) */
+    if ((g_gx.bp[0x00] >> 16) & 7) g_feat_ind++;
+    if ((g_gx.bp[0xF1] >> 21) & 7) g_feat_fog++;
+    if ((g_gx.bp[0xF4] >> 2) & 3) g_feat_ztex++;
+    /* textures used by the enabled TEV stages, looked up first: a lookup may queue a texture blit,
+     * which must come before the draw */
+    GxCmd tc;
+    for (int i = 0; i < 8; i++) tc.tex[i] = -1;
+    int stages = (int)((g_gx.bp[0x00] >> 10) & 15) + 1;
+    for (int s = 0; s < stages; s++) {
+        uint32_t order = g_gx.bp[0x28 + s / 2] >> ((s & 1) ? 12 : 0);
+        int map = (int)(order & 7);
+        if ((order >> 6) & 1 && tc.tex[map] < 0) lookup_map(&tc, map);
+    }
+    /* the indirect stages' textures (RAS1_IREF) */
+    for (int n = 0; n < (int)((g_gx.bp[0x00] >> 16) & 7) && n < 4; n++) {
+        int map = (int)((g_gx.bp[0x27] >> (6 * n)) & 7);
+        if (tc.tex[map] < 0) lookup_map(&tc, map);
+    }
+    {
+        int bs, bd;
+        uint32_t bw, bh;
+        int gx_texture_take_blit(int* src, int* dst, uint32_t* w, uint32_t* h);
+        while (gx_texture_take_blit(&bs, &bd, &bw, &bh)) {
+            GxCmd* b = push_cmd(GXC_TEXBLIT);
+            b->copy[0] = (uint32_t)bs; b->copy[1] = (uint32_t)bd; b->copy[2] = bw; b->copy[3] = bh;
+        }
+    }
+    GxCmd* c = push_cmd(GXC_DRAW);
+    c->prim = (uint8_t)kind;
+    c->a = f->nidx;
+    c->b = k;
+    memcpy(c->tex, tc.tex, sizeof c->tex);
+    f->nverts += count;
+    f->nidx += k;
+    g_verts_total += count;
+}
+
+/* BP 0x52: copy the EFB (or a part) to an XFB or a texture, optionally clearing it */
+/* draws: decoded on the thread writing the GX FIFO (the game's), timed for [hitch] and [perf] */
+void gx_draw(int prim, int vat, uint32_t count, const uint8_t* vertices, uint32_t vertex_size) {
+    uint64_t t = rt_ticks();
+    draw(prim, vat, count, vertices, vertex_size);
+    g_draw_total += rt_ticks() - t;
+}
+
+/* Online play, each player's own view, full screen (docs/ONLINE.md "Own view"). A two-player race is a split
+ * screen: player 1's 3D in the top half (a 640x240 viewport), player 2's in the bottom half, then one
+ * full-screen 2D pass with both HUDs and the track map across the middle. Every machine must still compute
+ * both views (the game state), so only the finished frame's states are changed before it is drawn, never
+ * game memory:
+ *  - this player's half viewports become the full screen; the 3D sees more above and below
+ *    (SR_OWNVIEW=1, default) or is zoomed in with the sides cut (SR_OWNVIEW=2); 0 = the old half picture;
+ *  - the other player's half draws nothing (empty scissor), and its EFB copies clear nothing;
+ *  - EFB copies of this player's half (screen effects) take the whole screen;
+ *  - the HUD: each 2D draw of this player's half keeps its size and moves whole to the top or bottom of the
+ *    screen (by which part of the half it is in); the other player's HUD is hidden; the map (draws across the
+ *    middle and everything inside them) stays; player 1's timer (top middle) is shown to player 2 too.
+ * Per-draw moves are new copies of the draw's register block with the orthographic projection changed
+ * (clip' = s * clip + o), so the shaders and backends need nothing new. */
+static int ownview_mode(void) {
+    static int m = -1;
+    if (m < 0) m = getenv("SR_OWNVIEW") ? atoi(getenv("SR_OWNVIEW")) : 1;
+    return m;
+}
+static float fbits(uint32_t u) { float f; memcpy(&f, &u, 4); return f; }
+static uint32_t ubits(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
+/* the viewport of a register block: 0 top half, 1 bottom half, 2 full screen, -1 other */
+static int ov_viewport(const GxUniforms* u) {
+    float xs = fabsf(fbits(u->xfr[0x1A])), ys = fabsf(fbits(u->xfr[0x1B])), yo = fbits(u->xfr[0x1E]);
+    float vy = yo - ys - (float)(((u->bp[0x59] >> 10) & 0x3FF) * 2);
+    if (xs != 320.0f) return -1;
+    if (ys == 120.0f) return vy > -1.0f && vy < 1.0f ? 0 : vy > 239.0f && vy < 241.0f ? 1 : -1;
+    return ys == 240.0f && vy > -1.0f && vy < 1.0f ? 2 : -1;
+}
+/* clip' = s * clip + o; hide: nothing drawn; tm >= 0: the texture matrix at that XF word address gets its t row
+ * as ts * t + to (the speed blur's picture coordinates) */
+typedef struct { float sx, ox, sy, oy; int hide, tm; float ts, to; } OvXform;
+#define OV_NONE ((OvXform){1.0f, 0.0f, 1.0f, 0.0f, 0, -1, 1.0f, 0.0f})
+typedef struct { int src, xt, idx, xidx; OvXform t; } OvCached;
+static int ov_identity(const OvXform* t) {
+    return !t->hide && t->tm < 0 && t->sx == 1.0f && t->ox == 0.0f && t->sy == 1.0f && t->oy == 0.0f;
+}
+static void ov_no_scissor(GxUniforms* u) { u->bp[0x21] = (u->bp[0x21] & ~0x7FFu) | ((u->bp[0x20] & 0x7FFu) - 1u); }
+/* a draw's extent in clip space (orthographic register block u, XF chunk table t): x0 x1 y0 y1, +y = up */
+static void ov_bbox(const GxFrame* f, const GxCmd* d, const GxUniforms* u, const GxXTab* t, float b[4]) {
+    float P0 = fbits(u->xfr[0x20]), P1 = fbits(u->xfr[0x21]), P2 = fbits(u->xfr[0x22]), P3 = fbits(u->xfr[0x23]);
+    b[0] = b[2] = 1e30f;
+    b[1] = b[3] = -1e30f;
+    for (uint32_t i = 0; i < d->b; i++) {
+        const GxVertex* v = &f->verts[f->idx[d->a + i]];
+        uint32_t pm = ((uint32_t)v->pos[3] * 4) & 0xFFC;
+        float r[8];
+        for (uint32_t k = 0; k < 8; k++) {
+            uint32_t w = pm + k;
+            r[k] = w / GX_XFM_CHUNK < GX_XFM_CHUNKS
+                       ? fbits(f->xchunks[(size_t)t->xtab[w / GX_XFM_CHUNK] * GX_XFM_CHUNK + w % GX_XFM_CHUNK]) : 0.0f;
+        }
+        float x = P0 * (r[0] * v->pos[0] + r[1] * v->pos[1] + r[2] * v->pos[2] + r[3]) + P1;
+        float y = P2 * (r[4] * v->pos[0] + r[5] * v->pos[1] + r[6] * v->pos[2] + r[7]) + P3;
+        if (fbits(u->xfr[0x1A]) < 0.0f) x = -x;
+        if (x < b[0]) b[0] = x;
+        if (x > b[1]) b[1] = x;
+        if (y < b[2]) b[2] = y;
+        if (y > b[3]) b[3] = y;
+    }
+}
+/* Local split-screen HUD. The perspective viewports establish ownership; the HUD itself is drawn
+ * later in one full-screen ortho pass. Work on the completed frame so neither letter runs nor bands
+ * can join players. Projection copies translate whole groups; the existing shader preserves size.
+ * No guest memory, perspective registers, scissors, copies or online own-view state are changed. */
+typedef struct { float cx, cy, hx, hy; } HudView;
+typedef struct {
+    uint32_t cmd, uni, group, layer;
+    float b[4], move;
+    HudView source;
+    int owner, tex, cover;
+} HudDraw;
+
+static HudView hud_viewport(const GxUniforms* u) {
+    float xs = fabsf(fbits(u->xfr[0x1A])), ys = fabsf(fbits(u->xfr[0x1B]));
+    float x = fbits(u->xfr[0x1D]) - (float)((u->bp[0x59] & 0x3FF) * 2);
+    float y = fbits(u->xfr[0x1E]) - (float)(((u->bp[0x59] >> 10) & 0x3FF) * 2);
+    return (HudView){x / 320.0f - 1.0f, 1.0f - y / 240.0f, xs / 320.0f, ys / 240.0f};
+}
+static int hud_near(float a, float b) { return fabsf(a - b) < 0.005f; }
+static int hud_view_id(HudView v, int quad) {
+    if (!hud_near(v.hy, 0.5f) || !hud_near(v.hx, quad ? 0.5f : 1.0f) ||
+        !hud_near(fabsf(v.cy), 0.5f) || !hud_near(quad ? fabsf(v.cx) : v.cx, quad ? 0.5f : 0.0f)) return -1;
+    return (v.cy < 0.0f ? (quad ? 2 : 1) : 0) + (quad && v.cx > 0.0f);
+}
+static HudView hud_player_view(int owner, int quad) {
+    return (HudView){quad ? (owner & 1 ? 0.5f : -0.5f) : 0.0f,
+                     owner >= (quad ? 2 : 1) ? -0.5f : 0.5f, quad ? 0.5f : 1.0f, 0.5f};
+}
+static int hud_contains(const float a[4], const float b[4], float eps) {
+    return b[0] >= a[0] - eps && b[1] <= a[1] + eps && b[2] >= a[2] - eps && b[3] <= a[3] + eps;
+}
+static int hud_owner(const float b[4], unsigned mask, int quad) {
+    for (int j = 0; j < (quad ? 4 : 2); j++) {
+        if (!(mask & (1u << j))) continue;
+        HudView v = hud_player_view(j, quad);
+        float rect[4] = {v.cx - v.hx, v.cx + v.hx, v.cy - v.hy, v.cy + v.hy};
+        if (hud_contains(rect, b, 0.002f)) return j;
+    }
+    return -1;
+}
+static int hud_cover(const float b[4], int quad) {
+    for (int j = 0; j < (quad ? 4 : 2); j++) {
+        HudView v = hud_player_view(j, quad);
+        if (b[0] <= v.cx - v.hx + 0.015f && b[1] >= v.cx + v.hx - 0.015f &&
+            b[2] <= v.cy - v.hy + 0.015f && b[3] >= v.cy + v.hy - 0.015f &&
+            fabsf(0.5f * (b[0] + b[1]) - v.cx) < 0.04f &&
+            fabsf(0.5f * (b[2] + b[3]) - v.cy) < 0.04f) return 1;
+    }
+    return 0;
+}
+static float hud_group_anchor(float lo, float hi, float height, HudView v) {
+    /* A group centred in its own view stays centred, including player-specific notifications.
+     * The complete compact HUD has unequal edge margins even when its individual digits cross
+     * the old global dead zone. This tolerance is relative to the view, never a resolution offset. */
+    float mid = (0.5f * (lo + hi) - v.cx) / v.hx;
+    float dead = height > v.hy ? 0.15f : 0.5f;
+    return v.cx + (mid < -dead ? -v.hx : mid > dead ? v.hx : 0.0f);
+}
+static uint32_t hud_root(HudDraw* d, uint32_t i) {
+    while (d[i].group != i) { d[i].group = d[d[i].group].group; i = d[i].group; }
+    return i;
+}
+static int hud_join(const float a[4], const float b[4], int quad) {
+    float xo = fminf(a[1], b[1]) - fmaxf(a[0], b[0]);
+    float yo = fminf(a[3], b[3]) - fmaxf(a[2], b[2]);
+    float ha = a[3] - a[2], hb = b[3] - b[2];
+    if (xo >= 0 && yo >= 0) return 1;
+    /* Original HUD artwork has small gaps between its backing, gauge and lap digits. These are
+     * tolerances in source clip space, independent of output resolution/aspect. A short text line
+     * beside a tall gauge is a separate group unless their pictures actually overlap. */
+    if (xo >= 0.25f * fminf(a[1] - a[0], b[1] - b[0]) && yo >= -0.05f) return 1;
+    return xo >= -0.04f && yo >= 0.35f * fminf(ha, hb) &&
+           /* The halves boost backing is shallow and has a small gap from its ring panel.
+            * Join that complete panel even when their heights differ; retain quarter tolerances. */
+           (xo >= (quad ? -0.006f : -0.0125f) || fminf(ha, hb) >= 0.5f * fmaxf(ha, hb));
+}
+static void local_hud_frame(GxFrame* f) {
+    if (!(f->wide_k > 1.0f)) return;
+    uint32_t mode = ld32(GAME_TOP_MODE);
+    if ((mode != GAME_TOP_MODE_RACE && mode != GAME_TOP_MODE_MULTIPLAYER) ||
+        ld32(GAME_RACE_PHASE) == GAME_RACE_FINISHED) return;
+    /* Respect original 4:3, menus/results, and the online picture-aspect policy. */
+    if (g_settings.screen != SCREEN_FIT && !settings_wide_k_fixed()) return;
+    unsigned halves = 0, quarters = 0;
+    for (uint32_t i = 0; i < f->nunis; i++) {
+        const GxUniforms* u = &f->unis[i];
+        if (u->xfr[0x26]) continue;
+        int h = hud_view_id(hud_viewport(u), 0), q = hud_view_id(hud_viewport(u), 1);
+        if (h >= 0) halves |= 1u << h;
+        if (q >= 0) quarters |= 1u << q;
+    }
+    int quad = quarters == 7 || quarters == 15;
+    unsigned mask = quad ? quarters : halves;
+    if (!quad && halves != 3) return;
+    HudDraw* draws = NULL;
+    uint32_t n = 0, cap = 0;
+    int cu = -1, ct = -1;
+    for (uint32_t i = 0; i < f->ncmds; i++) {
+        const GxCmd* c = &f->cmds[i];
+        if (c->type == GXC_STATE) { cu = (int)c->a; ct = (int)c->b; continue; }
+        if (c->type != GXC_DRAW || cu < 0 || ct < 0 || !f->unis[cu].xfr[0x26]) continue;
+        const GxUniforms* u = &f->unis[cu];
+        if (!(u->xfr[GX_XR_WIDE_FLAGS] & GX_WIDE_HUD_43)) continue;
+        HudView vp = hud_viewport(u);
+        int full = hud_near(vp.cx, 0) && hud_near(vp.cy, 0) && hud_near(vp.hx, 1) && hud_near(vp.hy, 1);
+        if (!full && hud_view_id(vp, quad) < 0) continue;
+        draws = grow(draws, &cap, n + 1, sizeof *draws);
+        HudDraw* d = &draws[n++];
+        *d = (HudDraw){.cmd = i, .uni = (uint32_t)cu, .group = n - 1, .source = vp, .tex = c->tex[0]};
+        ov_bbox(f, c, u, &f->xtabs[ct], d->b);
+        d->b[0] = vp.cx + vp.hx * d->b[0]; d->b[1] = vp.cx + vp.hx * d->b[1];
+        d->b[2] = vp.cy + vp.hy * d->b[2]; d->b[3] = vp.cy + vp.hy * d->b[3];
+        d->cover = hud_cover(d->b, quad);
+        d->owner = d->cover ? -1 : hud_owner(d->b, mask, quad);
+    }
+    /* In halves the shared clock fits entirely inside P1, so containment alone gives it the wrong
+     * owner. Seed its centred, shallow upper backing as shared before reserving its digit run.
+     * Use original clip bounds, independent of output aspect; quarter layouts already straddle it.
+     * Neighbouring P1 art overlaps this backing, but extends outside its horizontal bounds. */
+    if (!quad) for (uint32_t i = 0; i < n; i++) {
+        HudDraw* d = &draws[i];
+        float height = d->b[3] - d->b[2];
+        if (d->owner == 0 && !d->cover && hud_near(d->source.hy, 1.0f) &&
+            fabsf(d->b[0] + d->b[1]) < 0.03f && d->b[0] < -0.2f && d->b[1] > 0.2f &&
+            d->b[2] > 0.7f && d->b[3] < 0.95f && height > 0 && height < 0.12f)
+            d->owner = -1;
+    }
+    /* Map/fade draws straddle splits. Reserve the whole map, including marker draws, and the global
+     * timer's line below its centred backing. Only horizontally contained neighbours join a shared
+     * line: the timer backing overlaps the edge of the adjacent player's boost label. */
+    for (uint32_t i = 0; i < n; i++) {
+        HudDraw* seed = &draws[i];
+        if (seed->owner >= 0 || seed->cover || seed->b[1] - seed->b[0] >= 1.5f ||
+            seed->b[3] - seed->b[2] >= 1.8f) continue;
+        float b[4]; memcpy(b, seed->b, sizeof b);
+        for (int grew = 1; grew;) {
+            grew = 0;
+            for (uint32_t j = 0; j < n; j++) {
+                HudDraw* d = &draws[j];
+                if (d->cover || d->b[0] < b[0] - 0.002f || d->b[1] > b[1] + 0.002f ||
+                    d->b[2] > b[3] + 0.006f || d->b[3] < b[2] - 0.006f) continue;
+                d->owner = -1;
+                if (d->b[2] < b[2]) b[2] = d->b[2], grew = 1;
+                if (d->b[3] > b[3]) b[3] = d->b[3], grew = 1;
+            }
+        }
+    }
+    /* Notifications after the shared map may overlap a gauge and reuse its atlas. Shared/global
+     * layers separate their components from the earlier HUD; late gauge pieces before the map still join.
+     * Compact messages retain the inner half of their view about its centre, rather than snapping a
+     * slightly offset text run to an edge. Tall HUD columns use their complete group's edge margins. */
+    uint32_t layer = 0;
+    int owned = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if (draws[i].owner < 0) { if (owned) layer++; owned = 0; }
+        else { draws[i].layer = layer; owned = 1; }
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        if (draws[i].owner < 0) continue;
+        for (uint32_t j = 0; j < i; j++)
+            if (draws[i].owner == draws[j].owner && draws[i].layer == draws[j].layer &&
+                draws[i].tex == draws[j].tex && hud_join(draws[i].b, draws[j].b, quad))
+                draws[hud_root(draws, i)].group = hud_root(draws, j);
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        if (draws[i].owner < 0) continue;
+        uint32_t root = hud_root(draws, i);
+        float lo = draws[i].b[0], hi = draws[i].b[1], ylo = draws[i].b[2], yhi = draws[i].b[3];
+        for (uint32_t j = 0; j < n; j++)
+            if (draws[j].owner >= 0 && hud_root(draws, j) == root) {
+                lo = fminf(lo, draws[j].b[0]); hi = fmaxf(hi, draws[j].b[1]);
+                ylo = fminf(ylo, draws[j].b[2]); yhi = fmaxf(yhi, draws[j].b[3]);
+            }
+        float anchor = hud_group_anchor(lo, hi, yhi - ylo, hud_player_view(draws[i].owner, quad));
+        draws[i].move = (f->wide_k - 1.0f) * (anchor - draws[i].source.cx) / draws[i].source.hx;
+    }
+    const char* at = getenv("SR_LOCALHUDLOG");
+    int log = at && g_frames + 1 == (unsigned)atoi(at);
+    if (log) rt_log("[localhud] layout %s active %X draws %u wide %.4f", quad ? "quarters" : "halves", mask, n, f->wide_k);
+    /* Insert projection-only state copies, cached by source and translation. Keep every copy/present
+     * command in place; vertices, texture matrices, depth and scissor retain their original meanings. */
+    GxCmd* out = malloc(sizeof *out * ((size_t)f->ncmds + 2 * (size_t)n + 1));
+    if (!out) { free(draws); return; }
+    struct { uint32_t src, dst; float move; } cache[64];
+    unsigned nc = 0;
+    uint32_t no = 0, di = 0;
+    cu = ct = -1;
+    int emitted = -1;
+    for (uint32_t i = 0; i < f->ncmds; i++) {
+        GxCmd c = f->cmds[i];
+        if (c.type == GXC_STATE) { cu = (int)c.a; ct = (int)c.b; emitted = cu; out[no++] = c; continue; }
+        if (c.type != GXC_DRAW) { out[no++] = c; continue; }
+        int want = cu;
+        if (di < n && draws[di].cmd == i) {
+            HudDraw* d = &draws[di++];
+            if (log) rt_log("[localhud] cmd %u owner %d tex %d x %.4f %.4f y %.4f %.4f move %.4f cover %d",
+                i, d->owner, d->tex, d->b[0], d->b[1], d->b[2], d->b[3], d->move, d->cover);
+            if (d->owner >= 0 || d->cover) {
+                for (uint32_t j = 0; j < c.b; j++)
+                    f->verts[f->idx[c.a + j]].nrm[3] = d->cover ? GX_ANCHOR_STRETCH : GX_ANCHOR_MIDDLE;
+            } else if (d->b[1] - d->b[0] < 1.5f && d->b[3] - d->b[2] < 1.8f) {
+                for (uint32_t j = 0; j < c.b; j++) f->verts[f->idx[c.a + j]].nrm[3] = GX_ANCHOR_MIDDLE;
+            }
+            if (d->move != 0.0f) {
+                unsigned j = 0;
+                while (j < nc && !(cache[j].src == d->uni && cache[j].move == d->move)) j++;
+                if (j < nc) want = (int)cache[j].dst;
+                else {
+                    GxUniforms u = f->unis[d->uni];
+                    float sign = fbits(u.xfr[0x1A]) < 0 ? -1.0f : 1.0f;
+                    u.xfr[0x21] = ubits(fbits(u.xfr[0x21]) + sign * d->move);
+                    want = (int)f->nunis;
+                    f->unis = grow(f->unis, &f->cap_unis, f->nunis + 1, sizeof *f->unis);
+                    f->unis[f->nunis++] = u;
+                    if (nc < 64) { cache[nc].src = d->uni; cache[nc].dst = (uint32_t)want; cache[nc++].move = d->move; }
+                }
+            }
+        }
+        if (want != emitted && want >= 0 && ct >= 0) {
+            GxCmd state = {.type = GXC_STATE, .a = (uint32_t)want, .b = (uint32_t)ct};
+            out[no++] = state; emitted = want;
+        }
+        out[no++] = c;
+    }
+    f->cmds = grow(f->cmds, &f->cap_cmds, no, sizeof *f->cmds);
+    memcpy(f->cmds, out, no * sizeof *out); f->ncmds = no;
+    free(out); free(draws);
+}
+
+static void ownview_frame(GxFrame* f, int me) {
+    int mode = ownview_mode();
+    uint32_t nu0 = f->nunis, nd = 0;
+    for (uint32_t i = 0; i < f->ncmds; i++) nd += f->cmds[i].type == GXC_DRAW;
+    int8_t* vp = malloc(nu0 + 1);
+    OvXform* tx = calloc(nd + 1, sizeof *tx);
+    float(*bb)[4] = calloc(nd + 1, sizeof *bb);
+    GxCmd* out = malloc(sizeof(GxCmd) * (2 * (size_t)f->ncmds + 1));
+    if (!vp || !tx || !bb || !out) { free(vp); free(tx); free(bb); free(out); return; }
+    for (uint32_t i = 0; i < nu0; i++) vp[i] = (int8_t)ov_viewport(&f->unis[i]);
+    /* 1: the 2D draws' extents (original registers) and the map's (draws across the middle, not the width) */
+    float map[4] = {1e30f, -1e30f, 1e30f, -1e30f};
+    int cu = -1, ct = -1;
+    uint32_t di = 0;
+    for (uint32_t i = 0; i < f->ncmds; i++) {
+        const GxCmd* c = &f->cmds[i];
+        if (c->type == GXC_STATE) { cu = (int)c->a; ct = (int)c->b; continue; }
+        if (c->type != GXC_DRAW) continue;
+        float* b = bb[di];
+        tx[di++] = OV_NONE;
+        if (cu < 0 || ct < 0 || f->unis[cu].xfr[0x26] == 0 || (vp[cu] != 2 && vp[cu] != me)) continue;
+        ov_bbox(f, c, &f->unis[cu], &f->xtabs[ct], b);
+        if (vp[cu] == 2 && b[2] < -0.02f && b[3] > 0.02f && b[1] - b[0] < 1.0f) {
+            if (b[0] < map[0]) map[0] = b[0];
+            if (b[1] > map[1]) map[1] = b[1];
+            if (b[2] < map[2]) map[2] = b[2];
+            if (b[3] > map[3]) map[3] = b[3];
+        }
+    }
+    /* 2: each 2D draw's move */
+    cu = ct = -1;
+    di = 0;
+    for (uint32_t i = 0; i < f->ncmds; i++) {
+        const GxCmd* c = &f->cmds[i];
+        if (c->type == GXC_STATE) { cu = (int)c->a; ct = (int)c->b; continue; }
+        if (c->type != GXC_DRAW) continue;
+        OvXform* t = &tx[di];
+        const float* b = bb[di++];
+        if (cu < 0 || f->unis[cu].xfr[0x26] == 0) continue;  /* 3D: its register block changes in step 3 */
+        float cx = 0.5f * (b[0] + b[1]), cy = 0.5f * (b[2] + b[3]);
+        if (vp[cu] == me) {  /* 2D in this player's half viewport (made the whole screen): follows the 3D */
+            if (b[2] <= -0.99f && b[3] >= 0.99f) continue;  /* covers the view (a screen effect): stays covering */
+            t->sy = 0.5f;
+            if (mode == 2) t->ox = cx, t->oy = 0.5f * cy;
+            continue;
+        }
+        if (vp[cu] != 2) continue;
+        /* a screen effect over one half (the speed blur: copies of the view, some a little enlarged, so they reach
+         * past the middle): full width, about a half high, centred on a half; this view's covers the whole screen */
+        if (b[0] <= -0.99f && b[1] >= 0.99f && b[3] - b[2] > 0.95f && b[3] - b[2] < 1.6f && fabsf(fabsf(cy) - 0.5f) < 0.15f) {
+            if ((cy >= 0.0f ? 0 : 1) != me) { t->hide = 1; continue; }
+            t->sy = 2.0f, t->oy = me == 0 ? -1.0f : 1.0f;
+            /* its picture is a copy of the whole screen (now all this player's), of which it shows its half: the
+             * picture coordinates (t, through texture matrix 0) are stretched to the whole copy too, the half's
+             * outer edge kept (player 1: t0 stays, t1 -> 2 t1 - t0; player 2 the other way) */
+            const GxVertex* v0 = &f->verts[f->idx[c->a]];
+            uint32_t a = ((uint32_t)v0->tmtx[0] * 4u) & 0xFFC;
+            uint32_t info = f->unis[cu].xfr[0x40];
+            if (ct < 0 || ((info >> 4) & 7) != 0 || a + 8 > GX_XFM_CHUNKS * GX_XFM_CHUNK || (a + 4) / GX_XFM_CHUNK != (a + 7) / GX_XFM_CHUNK)
+                continue;
+            float r[4], lo = 1e30f, hi = -1e30f;
+            for (uint32_t k = 0; k < 4; k++) {
+                uint32_t w = a + 4 + k;
+                r[k] = fbits(f->xchunks[(size_t)f->xtabs[ct].xtab[w / GX_XFM_CHUNK] * GX_XFM_CHUNK + w % GX_XFM_CHUNK]);
+            }
+            for (uint32_t k = 0; k < c->b; k++) {
+                const GxVertex* v = &f->verts[f->idx[c->a + k]];
+                float tt = r[0] * v->tex[0][0] + r[1] * v->tex[0][1] + r[2] + r[3];
+                if (tt < lo) lo = tt;
+                if (tt > hi) hi = tt;
+            }
+            if (!(hi > lo)) continue;
+            t->tm = (int)a;
+            t->ts = 2.0f;
+            t->to = me == 0 ? -lo : -hi;
+            continue;
+        }
+        if (b[2] < -0.02f && b[3] > 0.02f) continue;  /* across the middle: the map, fades, backgrounds */
+        if (b[0] >= map[0] - 0.02f && b[1] <= map[1] + 0.02f && b[2] >= map[2] - 0.02f && b[3] <= map[3] + 0.02f)
+            continue;  /* on the map: the racers' marks */
+        int half = cy >= 0.0f ? 0 : 1;
+        if (half != me) {
+            if (!(me == 1 && cy > 0.5f && fabsf(cx) < 0.3f)) t->hide = 1;  /* player 1's timer: shown to both */
+            continue;
+        }
+        if (me == 0 && cy < 0.5f) t->oy = -1.0f;  /* the half's inner part goes to the other screen edge */
+        if (me == 1 && cy >= -0.5f) t->oy = 1.0f;
+    }
+    /* a tall HUD piece (the speed gauge, most of the half high) and every piece in its column move together,
+     * to the bottom of the screen; split by the rule above, its top stayed up while the rest moved down */
+    {
+        cu = -1;
+        di = 0;
+        uint8_t* own = calloc(nd + 1, 1);
+        if (own) {
+            for (uint32_t i = 0; i < f->ncmds; i++) {
+                const GxCmd* c = &f->cmds[i];
+                if (c->type == GXC_STATE) { cu = (int)c->a; continue; }
+                if (c->type != GXC_DRAW) continue;
+                const float* b = bb[di];
+                own[di] = cu >= 0 && f->unis[cu].xfr[0x26] != 0 && vp[cu] == 2 && !tx[di].hide && tx[di].sy == 1.0f && b[3] - b[2] < 1.0f && b[1] - b[0] < 1.0f &&
+                          (me == 0 ? b[2] >= -0.02f : b[3] <= 0.02f) &&
+                          !(b[0] >= map[0] - 0.02f && b[1] <= map[1] + 0.02f && b[2] >= map[2] - 0.02f && b[3] <= map[3] + 0.02f);
+                di++;
+            }
+            for (uint32_t a = 0; a < nd; a++) {
+                if (!own[a] || bb[a][3] - bb[a][2] < 0.4f || bb[a][1] - bb[a][0] > 0.5f) continue;  /* tall and narrow: over 40% of the half */
+                for (uint32_t j = 0; j < nd; j++) {
+                    if (!own[j]) continue;
+                    float ov = (bb[a][1] < bb[j][1] ? bb[a][1] : bb[j][1]) - (bb[a][0] > bb[j][0] ? bb[a][0] : bb[j][0]);
+                    if (ov < 0.5f * (bb[j][1] - bb[j][0])) continue;
+                    if (bb[j][2] < bb[a][2] - 0.15f || bb[j][3] > bb[a][3] + 0.15f) continue;
+                    tx[j].oy = me == 0 ? -1.0f : 0.0f;
+                }
+            }
+            free(own);
+        }
+    }
+    {   /* SR_OVLOG=<frame>: that frame's 2D draws, their extents and moves (frames counted as SR_GXDEBUG) */
+        static int at = -1;
+        if (at < 0) at = getenv("SR_OVLOG") ? atoi(getenv("SR_OVLOG")) : 0;
+        if (at && g_frames + 1 == (unsigned)at) {
+            cu = -1;
+            di = 0;
+            for (uint32_t i = 0; i < f->ncmds; i++) {
+                const GxCmd* c = &f->cmds[i];
+                if (c->type == GXC_STATE) { cu = (int)c->a; continue; }
+                if (c->type != GXC_DRAW) continue;
+                const float* b = bb[di];
+                const OvXform* t = &tx[di++];
+                if (cu < 0 || f->unis[cu].xfr[0x26] == 0) continue;
+                rt_log("[ownview] draw %u vp %d tex %d x %.3f..%.3f y %.3f..%.3f -> s %.2f %.2f o %.2f %.2f hide %d", di - 1,
+                       vp[cu], c->tex[0], b[0], b[1], b[2], b[3], t->sx, t->sy, t->ox, t->oy, t->hide);
+            }
+        }
+    }
+    /* 3: the half viewports' register blocks, in place (each is used by its own view only) */
+    for (uint32_t i = 0; i < nu0; i++) {
+        GxUniforms* u = &f->unis[i];
+        if (vp[i] != 0 && vp[i] != 1) continue;
+        if (vp[i] != me) { ov_no_scissor(u); continue; }  /* the other player's view: nothing drawn */
+        uint32_t off = ((u->bp[0x59] >> 10) & 0x3FF) * 2;
+        u->xfr[0x1B] = ubits(2.0f * fbits(u->xfr[0x1B]));
+        u->xfr[0x1E] = ubits((float)off + 240.0f);
+        u->bp[0x20] = (u->bp[0x20] & ~0x7FFu) | off;
+        u->bp[0x21] = (u->bp[0x21] & ~0x7FFu) | (off + 479u);
+        if (u->xfr[0x26] != 0) continue;
+        if (mode == 2) {  /* zoomed in: twice as wide, the sides cut */
+            u->xfr[0x20] = ubits(2.0f * fbits(u->xfr[0x20]));
+            u->xfr[0x21] = ubits(2.0f * fbits(u->xfr[0x21]));
+        } else {  /* twice as tall: more above and below */
+            u->xfr[0x22] = ubits(0.5f * fbits(u->xfr[0x22]));
+            u->xfr[0x23] = ubits(0.5f * fbits(u->xfr[0x23]));
+        }
+    }
+    /* 4: the command list again, a moved copy of the register block before each moved draw */
+    OvCached cache[64];
+    int ncache = 0, emitted_u = -1, emitted_t = -1;
+    uint32_t no = 0;
+    cu = ct = -1;
+    di = 0;
+    for (uint32_t i = 0; i < f->ncmds; i++) {
+        const GxCmd* c = &f->cmds[i];
+        if (c->type == GXC_STATE) {
+            cu = (int)c->a; ct = (int)c->b;
+            out[no++] = *c;
+            emitted_u = cu; emitted_t = ct;
+            continue;
+        }
+        if (c->type == GXC_COPY && !c->copy[4] && c->copy[0] == 0 && c->copy[2] == 640 && c->copy[3] == 240 &&
+            (c->copy[1] == 0 || c->copy[1] == 240)) {
+            GxCmd cc = *c;
+            if (c->copy[1] == (uint32_t)me * 240) cc.copy[1] = 0, cc.copy[3] = 480;  /* this view: the whole screen */
+            else cc.copy[5] = 0;  /* the other view's: no clear (it would clear this player's picture) */
+            out[no++] = cc;
+            continue;
+        }
+        if (c->type != GXC_DRAW) { out[no++] = *c; continue; }
+        OvXform t = tx[di++];
+        if (cu < 0 || ct < 0) { out[no++] = *c; continue; }
+        int want = cu, want_t = ct;
+        if (!ov_identity(&t)) {
+            int k = 0;
+            while (k < ncache && !(cache[k].src == cu && cache[k].xt == ct && !memcmp(&cache[k].t, &t, sizeof t))) k++;
+            if (k < ncache) want = cache[k].idx, want_t = cache[k].xidx;
+            else {
+                if (t.tm >= 0) {  /* a copy of the chunk holding the texture matrix's t row, in a new chunk table */
+                    uint32_t ch = ((uint32_t)t.tm + 4) / GX_XFM_CHUNK;
+                    f->xchunks = grow(f->xchunks, &f->cap_xchunks, (f->nxchunks + 1) * GX_XFM_CHUNK, sizeof(uint32_t));
+                    uint32_t* nc = f->xchunks + (size_t)f->nxchunks * GX_XFM_CHUNK;
+                    memcpy(nc, f->xchunks + (size_t)f->xtabs[ct].xtab[ch] * GX_XFM_CHUNK, GX_XFM_CHUNK * 4);
+                    uint32_t o = ((uint32_t)t.tm + 4) % GX_XFM_CHUNK;
+                    for (int q = 0; q < 4; q++) nc[o + q] = ubits(t.ts * fbits(nc[o + q]));
+                    nc[o + 3] = ubits(fbits(nc[o + 3]) + t.to);
+                    f->xtabs = grow(f->xtabs, &f->cap_xtabs, f->nxtabs + 1, sizeof(GxXTab));
+                    f->xtabs[f->nxtabs] = f->xtabs[ct];
+                    f->xtabs[f->nxtabs].xtab[ch] = f->nxchunks++;
+                    want_t = (int)f->nxtabs++;
+                }
+                f->unis = grow(f->unis, &f->cap_unis, f->nunis + 1, sizeof(GxUniforms));
+                GxUniforms* u = &f->unis[f->nunis];
+                *u = f->unis[cu];
+                if (t.hide) ov_no_scissor(u);
+                u->xfr[0x20] = ubits(t.sx * fbits(u->xfr[0x20]));
+                u->xfr[0x21] = ubits(t.sx * fbits(u->xfr[0x21]) + t.ox);
+                u->xfr[0x22] = ubits(t.sy * fbits(u->xfr[0x22]));
+                u->xfr[0x23] = ubits(t.sy * fbits(u->xfr[0x23]) + t.oy);
+                want = (int)f->nunis++;
+                if (ncache < 64) cache[ncache++] = (OvCached){cu, ct, want, want_t, t};
+            }
+        }
+        if (want != emitted_u || want_t != emitted_t) {
+            GxCmd s;
+            memset(&s, 0, sizeof s);
+            s.type = GXC_STATE;
+            s.a = (uint32_t)want;
+            s.b = (uint32_t)want_t;
+            out[no++] = s;
+            emitted_u = want;
+            emitted_t = want_t;
+        }
+        out[no++] = *c;
+    }
+    f->cmds = grow(f->cmds, &f->cap_cmds, no, sizeof(GxCmd));
+    memcpy(f->cmds, out, sizeof(GxCmd) * no);
+    f->ncmds = no;
+    free(vp); free(tx); free(bb); free(out);
+}
+
+static void efb_copy(uint32_t v) {
+    uint32_t tl = g_gx.bp[0x49], wh = g_gx.bp[0x4A];
+    uint32_t x = tl & 0x3FF, y = (tl >> 10) & 0x3FF, w = (wh & 0x3FF) + 1, h = ((wh >> 10) & 0x3FF) + 1;
+    uint32_t dest = ((g_gx.bp[0x4B] & 0xFFFFFF) << 5) & GX_PHYS_MASK;
+    int to_xfb = (v >> 14) & 1, clear = (v >> 11) & 1, half = (v >> 9) & 1;
+    if (!to_xfb) {  /* render-to-texture copies, for the [perf] line: from depth, and target formats */
+        g_feat_copies++;
+        if ((g_gx.bp[0x43] & 7) == 3) g_feat_copy_z++;
+        g_feat_copy_fmts |= 1u << (((v >> 4) & 7) | ((v >> 3) & 1) << 3);
+    }
+    if (g_state_dirty) push_state();
+    GxCmd* c = push_cmd(GXC_COPY);
+    c->copy[0] = x; c->copy[1] = y; c->copy[2] = w; c->copy[3] = h;
+    c->copy[4] = to_xfb; c->copy[5] = clear;
+    c->copy[6] = (g_gx.bp[0x4F] & 0xFFFF) << 16 | (g_gx.bp[0x50] & 0xFFFF);  /* A R G B */
+    c->copy[7] = g_gx.bp[0x51] & 0xFFFFFF;
+    c->copy[8] = to_xfb ? 0xFFFFFFFFu
+                        : (uint32_t)gx_texture_copy_target(dest, half ? w / 2 : w, half ? h / 2 : h);
+    c->copy[9] = v;
+    c->copy[10] = dest;
+    if (to_xfb) {
+        /* online: show only this machine's player's half of a two-player split screen (copy[11] = the
+         * rows shown: first << 16 | count; the backend scales the picture uniformly) */
+        int netplay_view_player(void);
+        int p = netplay_view_player();
+        int own = p >= 0 && p < 2 && g_split_seen == 3 && x == 0 && y == 0 && w == 640 && h == 480;
+        if (own && ownview_mode() <= 0)
+            c->copy[11] = (uint32_t)(p * 240) << 16 | 240;
+        own = own && ownview_mode() > 0;  /* the whole frame re-laid for this player (ownview_frame) */
+        g_split_seen = 0;
+        /* SR_DUMPRAM=FRAME[,FRAME...]: guest RAM to build/ram.bin (one frame) or build/ram_<frame>.bin (a list) at
+         * those presented frames (debugging, desktop) */
+        {
+            static const char* dl = (const char*)-1;
+            if (dl == (const char*)-1) dl = getenv("SR_DUMPRAM");
+            for (const char* q = dl; q && *q; q = strchr(q, ',') ? strchr(q, ',') + 1 : NULL) {
+                if (g_frames + 1 != (unsigned)atoi(q)) continue;
+                char fn[64];
+                if (strchr(dl, ',')) snprintf(fn, sizeof fn, "build/ram_%u.bin", (unsigned)atoi(q));
+                else snprintf(fn, sizeof fn, "build/ram.bin");
+                FILE* df = fopen(fn, "wb");
+                if (df) { fwrite(mem_phys(0), 1, GUEST_RAM_SIZE, df); fclose(df); rt_log("[gx] guest RAM dumped to %s", fn); }
+            }
+        }
+        game_mods_frame();
+        push_cmd(GXC_PRESENT);
+        gx_decode_sync();
+        if (p < 0) local_hud_frame(g_frame);
+        if (own) ownview_frame(g_frame, p);
+        uint32_t ndraws = 0;
+        for (uint32_t i = 0; i < g_frame->ncmds; i++) ndraws += g_frame->cmds[i].type == GXC_DRAW;
+        uint64_t ts = rt_ticks();
+        render_submit(g_frame);
+        { uint64_t d = rt_ticks() - ts; g_wait_ticks += d; g_wait_total += d; }
+        g_frame = NULL;
+        g_frames++;
+        { void gx_dff_frame_end(unsigned frames); gx_dff_frame_end((unsigned)g_frames); }
+        /* [hitch]: a presented frame that took over 50 ms, and what the game thread spent it on */
+        {
+            static uint64_t last, tex0, wait0, disc_t0, draw0, idle0;
+            static unsigned long long disc_b0, dec0, decb0;
+            static unsigned card0;
+            uint64_t now = rt_ticks();
+            unsigned long long dec, decb;
+            gx_texture_decode_stats(&dec, &decb);
+            if (last && now - last > 40500000ull / 20) {
+                double ms = 1000.0 / 40500000.0;
+                double total = (now - last) * ms, disc = (di_read_ticks() - disc_t0) * ms, tex = (g_tex_total - tex0) * ms;
+                double wait = (g_wait_total - wait0) * ms;
+                double drw = (g_draw_total - draw0) * ms - tex, idle = (sched_idle_total() - idle0) * ms;
+                rt_log("[hitch] frame %u took %.0f ms: game code %.0f ms, guest idle %.0f ms, GX draws %.1f ms, disc %.1f ms "
+                       "(%llu KB), %llu new textures (%llu KB RGBA, lookups %.1f ms), waiting for the render thread %.1f ms, "
+                       "card file writes %u", g_frames, total, total - disc - tex - wait - drw - idle, idle, drw, disc,
+                       (di_bytes_read() - disc_b0) >> 10, dec - dec0, (decb - decb0) >> 10, tex, wait,
+                       exi_card_file_writes() - card0);
+            }
+            last = now;
+            tex0 = g_tex_total;
+            wait0 = g_wait_total;
+            draw0 = g_draw_total;
+            idle0 = sched_idle_total();
+            disc_t0 = di_read_ticks();
+            disc_b0 = di_bytes_read();
+            dec0 = dec;
+            decb0 = decb;
+            card0 = exi_card_file_writes();
+        }
+        if (g_frames % 30 == 0) {  /* the overlay's FPS counter */
+            static uint64_t t30;
+            uint64_t now = rt_ticks();
+            if (t30 && !g_render_counts_fps) overlay_set_fps((float)(30.0 * 40500000.0 / (double)(now - t30)));
+            t30 = now;
+        }
+        /* performance line every 120 frames: presented frames and VI fields per second */
+        static uint64_t t0;
+        static uint32_t f0;
+        static unsigned long long draws_acc, disc0;
+        draws_acc += ndraws;
+        if (g_frames % 120 == 0) {
+            uint64_t t = rt_ticks();
+            uint32_t f = vi_field_count();
+            if (t0) {
+                double secs = (double)(t - t0) / 40500000.0;
+                rt_log("[perf] %.1f fps, %.1f retraces/s, %llu draws/frame, %llu MB disc, %llu AX frames, %d textures", 120 / secs,
+                       (f - f0) / secs, draws_acc / 120, di_bytes_read() >> 20, ax_list_count(), gx_texture_live());
+                /* where the guest thread's time went (ms per frame): textures decoded/hashed,
+                 * blocked on the render thread, reading the disc image */
+                double ms = 1000.0 / 40500000.0 / 120;
+                uint64_t idle, late_avg, late_max;
+                sched_stats(&idle, &late_avg, &late_max);
+                rt_log("[perf]   draws/frame using indirect textures %llu (dynamic matrices not implemented), fog %llu (not implemented), Z textures %llu (not implemented)",
+                       g_feat_ind / 120, g_feat_fog / 120, g_feat_ztex / 120);
+                extern unsigned long long g_pipe_stores, g_pipe_bytes;
+                static unsigned long long st0, by0;
+                static uint64_t draw_t0;
+                static unsigned long long verts0;
+                uint64_t gx_gp_busy_ticks(void); uint64_t gx_gp_wait_ticks(void);
+                rt_log("[perf]   GX pipe: %llu stores/frame (%llu KB); draw processing %.2f ms/frame (lookups included), "
+                       "%llu vertices/frame; GP thread busy %.2f ms/frame (+ %.2f waiting for the render thread)", (g_pipe_stores - st0) / 120,
+                       (g_pipe_bytes - by0) / 120 >> 10, (g_draw_total - draw_t0) * 1000.0 / 40500000.0 / 120,
+                       (g_verts_total - verts0) / 120, gx_gp_busy_ticks() * 1000.0 / 40500000.0 / 120, gx_gp_wait_ticks() * 1000.0 / 40500000.0 / 120);
+                draw_t0 = g_draw_total;
+                verts0 = g_verts_total;
+                st0 = g_pipe_stores;
+                by0 = g_pipe_bytes;
+                {
+                    extern unsigned long long g_tsnap_used, g_tsnap_missed;
+                    static unsigned long long u0, m0;
+                    rt_log("[perf]   palette loads/frame: from the game-time copy %.1f, read late from RAM %.1f",
+                           (g_tsnap_used - u0) / 120.0, (g_tsnap_missed - m0) / 120.0);
+                    u0 = g_tsnap_used; m0 = g_tsnap_missed;
+                }
+                rt_log("[perf]   draw processing parts: vertex decode %.2f ms/frame (+ %.2f on the helper thread), state snapshots %.2f ms/frame (%u/frame)",
+                       g_decode_ticks * 1000.0 / 40500000.0 / 120,
+                       atomic_exchange(&g_dj_helper_ticks, 0) * 1000.0 / 40500000.0 / 120, g_state_ticks * 1000.0 / 40500000.0 / 120, g_state_pushes / 120);
+                g_decode_ticks = g_state_ticks = 0;
+                g_state_pushes = 0;
+                rt_log("[perf]   EFB copies to textures/frame %.1f, from depth %.1f, target format codes seen %04X",
+                       g_feat_copies / 120.0, g_feat_copy_z / 120.0, g_feat_copy_fmts);
+                g_feat_ind = g_feat_fog = g_feat_ztex = g_feat_copies = g_feat_copy_z = 0;
+                g_feat_copy_fmts = 0;
+                rt_log("[perf]   ms/frame: textures %.2f, render wait %.2f, disc %.2f, guest idle %.2f; timer late avg %.3f max %.3f ms",
+                       g_tex_ticks * ms, g_wait_ticks * ms, (di_read_ticks() - disc0) * ms, idle * ms, late_avg * ms * 120,
+                       late_max * ms * 120);
+                {
+                    void sched_idle_split(uint64_t* idle, uint64_t* waiting_gp);
+                    uint64_t sidle, sgp;
+                    sched_idle_split(&sidle, &sgp);
+                    extern unsigned g_cp_reads, g_pe_reads;
+                    rt_log("[perf]   game core: no ready thread %.2f ms/frame, of it with GP work queued %.2f; CP reads %u, PE reads %u per frame",
+                           sidle * ms, sgp * ms, g_cp_reads / 120, g_pe_reads / 120);
+                    void gx_drawdone_stats(uint64_t*, uint64_t*, uint64_t*);
+                    uint64_t ddt, ddm, ddn;
+                    gx_drawdone_stats(&ddt, &ddm, &ddn);
+                    rt_log("[perf]   draw done reached by the GP thread %.2f ms after the game issued it (avg of %llu, max %.2f)",
+                           ddn ? ddt * 1000.0 / 40500000.0 / ddn : 0.0, (unsigned long long)ddn, ddm * 1000.0 / 40500000.0);
+                    g_cp_reads = g_pe_reads = 0;
+                }
+                {
+                    /* SR_PEEK=ADDR,LEN (hex): dump guest memory with each [perf] block (debugging) */
+                    static int peek_init;
+                    static uint32_t peek_addr, peek_len;
+                    if (!peek_init++) {
+                        const char* pk = getenv("SR_PEEK");
+                        if (pk) sscanf(pk, "%x,%x", &peek_addr, &peek_len);
+                    }
+                    /* SR_POKE=ADDR,BYTE (hex): keep a guest byte set (debugging) */
+                    static int poke_init;
+                    static uint32_t poke_addr, poke_val;
+                    if (!poke_init++) {
+                        const char* pk = getenv("SR_POKE");
+                        if (pk) sscanf(pk, "%x,%x", &poke_addr, &poke_val);
+                    }
+                    if (poke_addr) *mem_phys(poke_addr & 0x3FFFFFFF) = (uint8_t)poke_val;
+                    for (uint32_t o = 0; o < peek_len; o += 32) {
+                        char line[128];
+                        int n = snprintf(line, sizeof line, "[peek] %08X:", peek_addr + o);
+                        for (uint32_t k = o; k < o + 32 && k < peek_len; k++)
+                            n += snprintf(line + n, sizeof line - n, "%s%02X", (k & 3) ? "" : " ", *mem_phys((peek_addr + k) & 0x3FFFFFFF));
+                        rt_log("%s", line);
+                    }
+                }
+                {
+                    void dsp_aram_stats(uint64_t*, uint64_t*);
+                    void dsp_ax_stats(uint64_t*);
+                    uint64_t axt;
+                    dsp_ax_stats(&axt);
+                    void di_late_stats(uint64_t*, uint64_t*, uint64_t*);
+                    uint64_t ab, at, da, dm, dn;
+                    dsp_aram_stats(&ab, &at);
+                    di_late_stats(&da, &dm, &dn);
+                    void dsp_ax_late_stats(unsigned*, uint64_t*);
+                    unsigned axl;
+                    uint64_t axw;
+                    dsp_ax_late_stats(&axl, &axw);
+                    rt_log("[perf]   devices: ARAM DMA %llu KB in %.1f ms (game thread); %llu disc completions, late avg %.2f max %.2f ms; "
+                           "audio mixing %.2f ms/frame, %u mixes started late (longest wait %.1f ms)",
+                           (unsigned long long)(ab >> 10), at * ms * 120, (unsigned long long)dn, da * ms * 120, dm * ms * 120, axt * ms,
+                           axl, axw * 1000.0 / 40500000.0);
+                }
+            }
+            t0 = t;
+            f0 = f;
+            draws_acc = 0;
+            g_tex_ticks = g_wait_ticks = 0;
+            disc0 = di_read_ticks();
+        }
+    }
+}
+
+void gx_bp_written(uint32_t reg, uint32_t value) {
+    g_state_dirty = 1;
+    if (reg == 0x52) efb_copy(value);
+    else if (reg == 0x65) gx_texture_load_tlut();
+}
+
+unsigned long long gx_frames_presented(void) { return g_frames; }

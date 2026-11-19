@@ -1,0 +1,159 @@
+/* Shared declarations of the native runtime. */
+#pragma once
+#include <stddef.h>
+#include <stdint.h>
+#include "ppc.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* platform layer (platform/<target>/platform_*.c) */
+void platform_init(void);                   /* logging, file system, clocks */
+const char* platform_disc_path(void);       /* default location of the game's disc image */
+const char* platform_save_path(void);       /* memory card image for slot A */
+const char* platform_settings_path(void);   /* settings.ini (settings.c) */
+const char* platform_mods_dir(void);        /* the mods folder (mods.c, docs/MODDING.md) */
+void platform_set_handheld_gpu(int on);  /* Switch: the 384 MHz handheld GPU configuration on/off; elsewhere nothing */
+double platform_gpu_frame_ms(void);  /* GPU time of recent frames (Switch: timestamps, render_deko.c); < 0: unknown */
+void platform_local_time(int* year, int* month, int* day, int* hour, int* minute, int* second);  /* local wall clock */
+uint64_t platform_now_ns(void);  /* monotonic, cheap (called thousands of times a frame) */
+void platform_sleep_ns(uint64_t ns);  /* a precise sleep (sub-millisecond) */
+void rt_host_pause(int on);  /* frame_pacing.c: hold the game thread at its next frame end (iOS background) */
+void platform_audio_pause(int on);  /* audio_sdl.c: stop the output and drop what is queued */
+void platform_audio_shutdown(void);  /* SDL hosts: close once, prevent later producer calls into SDL */
+#ifdef __ANDROID__
+void platform_game_step_work(uint64_t work_ns);  /* the game thread's work for one step (ADPF hint) */
+#endif
+void rt_thread_start(int (*fn)(void*), void* arg);  /* a host thread with a large stack (guest code is deep) */
+void platform_sample_threads(void);  /* debugging: log where every other host thread is (desktop) */
+void rt_thread_pin(int core);  /* run the calling thread on CPU core `core` (Switch: 0 guest, 1 render, 2 timers) */
+void rt_thread_lower_priority(void);
+void rt_thread_raise_priority(void);  /* one step above the other threads: short, deadline-bound work (the audio mixer) */
+void game_mods_linked(void);  /* game_mods.c: _Main.rel is linked; apply the gameplay options */
+void game_mods_apply(void);   /* after a settings change */
+void game_mods_frame(void);   /* once a presented frame (gx_render.c) */  /* below the device threads sharing its core (Switch); no-op elsewhere */
+
+/* log.c */
+void rt_log(const char* fmt, ...);
+_Noreturn void rt_fatal(const char* fmt, ...);
+/* Application-owned persistent-data handlers; Android runs these before process termination. */
+int rt_atexit(void (*handler)(void));
+_Noreturn void rt_exit(int status);
+
+/* memory.c: the guest physical window (see ppc.h) */
+#define MEM1_SIZE 0x01800000u        /* what the game sees */
+#define GUEST_RAM_SIZE 0x01C00000u   /* backed: MEM1 + room above it for the REL (see gcrecomp.py) */
+#define LOCKED_CACHE_PHYS 0x20000000u
+#define LOCKED_CACHE_SIZE 0x4000u
+void mem_init(void);
+static inline uint8_t* mem_phys(uint32_t pa) { return ppc_mem_base_var + (pa & PPC_PHYS_MASK); }
+void mem_write_bytes(uint32_t ea, const void* src, size_t n);
+void mem_read_bytes(uint32_t ea, void* dst, size_t n);
+static inline uint32_t mem_r32(uint32_t ea) { return ld32(ea); }
+static inline void mem_w32(uint32_t ea, uint32_t v) { st32(ea, v); }
+
+/* disc.c: a GameCube disc image (GCM/ISO) */
+int disc_open(const char* path);
+size_t disc_read(uint64_t offset, void* dst, size_t n);
+const uint8_t* disc_header(void);   /* first 0x440 bytes */
+int disc_find(const char* path, uint32_t* offset, uint32_t* size);  /* FST lookup, 1 if found */
+const char* disc_name_at(uint64_t off, uint32_t* rel);  /* the file at a disc offset (logs) */
+const uint8_t* disc_fst(uint32_t* size);
+
+/* loader.c */
+void load_game(void);   /* DOL sections, boot info, FST, the REL module linked at g_rel_base */
+
+/* cpu.c */
+void cpu_init(Cpu* c);
+uint64_t rt_ticks(void);  /* guest timebase ticks since boot (40.5 MHz) */
+void rt_clock_hold(int on);  /* cpu.c: stop/restart the time base (host pause) */
+
+/* sched.c: guest threads and interrupts */
+#define RT_IRQ_DEC    1u   /* decrementer: OSAlarm */
+#define RT_IRQ_NATIVE 2u   /* native device callbacks queued with rt_irq_post */
+void sched_init(void);
+void sched_enter_boot_thread(void);
+void rt_irq_raise(uint32_t bits);
+void rt_irq_post(void (*fn)(Cpu* c, void* arg), void* arg);  /* run fn in interrupt context */
+void guest_call(Cpu* c, uint32_t addr);                       /* call a guest function on c */
+void sched_interrupts_enabled(Cpu* c);
+void sched_set_decrementer(uint32_t v);
+uint32_t sched_get_decrementer(void);
+
+/* os_irq.c: raise __OS_INTERRUPT_<id> (runs the game's registered handler in interrupt context) */
+void os_raise_interrupt(int id);
+void os_irq_retry(void);
+
+/* vi.c: Video Interface register model and retrace timer */
+void vi_init(void);
+uint32_t vi_read(uint32_t ea, int size);
+void vi_write(uint32_t ea, uint32_t v, int size);
+uint32_t vi_xfb_address(void);
+uint32_t vi_field_count(void);
+
+/* di.c: DVD Interface (drive) model */
+uint32_t di_read(uint32_t ea, int size);
+void di_write(uint32_t ea, uint32_t v, int size);
+unsigned long long di_bytes_read(void);
+unsigned long long di_read_ticks(void);
+void sched_stats(uint64_t* idle, uint64_t* late_avg, uint64_t* late_max);  /* ticks; resets */
+uint64_t sched_idle_total(void);  /* ticks the guest spent idle, since start */  /* host time spent reading the disc image (timebase ticks) */
+
+/* dsp.c: DSP mailboxes + boot ROM, ARAM and its DMA, AI DMA clock; ai_*: Audio Interface */
+void dsp_init(void);
+void di_init(void);
+/* sampling profiler (desktop only, SR_PROFILE=1: platform/host/profile_win.c) */
+void profile_register_thread(void);  /* a thread that runs guest code */
+void profile_start(void);
+void profile_dump(void);
+/* g_ppc_cur_fn tags for runtime work on the game thread, named in the Switch profiler report */
+#define PROF_IDLE 0xF0000000u  /* no ready guest thread */
+#define PROF_DRAW 0xF0000001u  /* gx_render draw(): vertex decode, state, texture lookups */
+#define PROF_PIPE 0xF0000002u  /* the GX FIFO: write-gather pipe stores and command parsing */
+#define PROF_SWITCH 0xF0000003u  /* handing the CPU to another guest thread (host thread switch) */
+#define PROF_RESUMED 0xF0000004u  /* a resumed guest thread, until it enters a function (lr = its caller) */
+void dbg_event(int kind, uint32_t a, uint32_t b);  /* hang-dump event ring (sched.c) */
+unsigned exi_card_file_writes(void);   /* memory card file writes so far (exi.c) */   /* the DVD drive's completion timer */
+uint32_t dsp_read(uint32_t ea, int size);
+void dsp_write(uint32_t ea, uint32_t v, int size);
+uint32_t ai_read(uint32_t ea, int size);
+void ai_write(uint32_t ea, uint32_t v, int size);
+uint8_t* aram_ptr(uint32_t addr);
+
+/* si.c: Serial Interface (controller ports) */
+uint32_t si_read(uint32_t ea, int size);
+void si_write(uint32_t ea, uint32_t v, int size);
+
+/* input (platform): the state of GameCube controller `chan`, from the host's keyboard/gamepads */
+typedef struct GcPad {
+    uint16_t buttons;            /* PAD_BUTTON_* bits: LEFT 0x1 RIGHT 0x2 DOWN 0x4 UP 0x8 Z 0x10 R 0x20 L 0x40
+                                    A 0x100 B 0x200 X 0x400 Y 0x800 START 0x1000 */
+    uint8_t stick_x, stick_y;    /* 0x80 = centre */
+    uint8_t c_x, c_y;
+    uint8_t trig_l, trig_r;
+} GcPad;
+void input_get_pad(int chan, GcPad* out);
+int input_connected(int chan);  /* GameCube port 0-3 has a controller (port 0 always does) */
+/* SDL builds: row i of the button map (GameCube input, key, controller button); 0 past the end */
+int input_map_row(int i, const char** gc, const char** key, const char** pad);
+void input_set_rumble(int chan, int motor);
+void input_script_init(void);                    /* SR_INPUT (input_script.c) */
+void input_script_apply(int chan, GcPad* out);
+unsigned input_script_menu(void);                 /* SR_INPUT "M." steps: settings-menu buttons held (OV_*) */
+
+/* exi.c: EXI bus: memory card (slot A), IPL SRAM/RTC */
+void exi_init(const char* card_path);
+uint32_t exi_read(uint32_t ea, int size);
+void exi_write(uint32_t ea, uint32_t v, int size);
+
+/* ax.c: AX microcode stand-in and host audio output */
+void ax_process_command_list(uint32_t addr, uint32_t size);
+void audio_submit(uint32_t addr, uint32_t bytes);
+void platform_audio_push(const int16_t* lr, unsigned frames);  /* 32 kHz stereo (left, right) to the host device */
+unsigned long long ax_list_count(void);
+void audio_frame(const int16_t* lr, unsigned frames);  /* a mixed AX frame (32 kHz, left/right) for the host */
+
+#ifdef __cplusplus
+}
+#endif

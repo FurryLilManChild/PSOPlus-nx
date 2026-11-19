@@ -1,0 +1,459 @@
+#!/usr/bin/env python3
+"""Generate build.ninja for the port.
+
+usage: python configure.py [--target host|switch|android]
+
+Pipeline (everything under build/ is derived from the game and never committed):
+  1. dtk analysis       baserom/main.dol + _Main.rel -> config/GXEE8P/{,_Main/}symbols.txt
+                        (run once by hand: build/tools/dtk.exe dol split config/GXEE8P/config.yml build/GXEE8P)
+  2. recompile          tools/recomp/gcrecomp.py -> build/gen/*.c
+  3. compile + link     build/gen/*.c + runtime/src/* -> build/<target>/sonicriders(.exe|.nro)
+
+host: --toolchain msvc (default): clang with the MSVC/SDK headers (run `. tools/host/env.ps1` first)
+      --toolchain mingw: llvm-mingw (--llvm-mingw DIR) with SDL2's MinGW build (--sdl DIR); the setup
+      tool (setup/setup.ps1) uses this one
+      --toolchain linux: Linux / Steam Deck -> build/host-linux/sonicriders; compiler from --cc/--cxx, $CC/$CXX,
+      clang or gcc (SonicRidersSetup.sh passes "zig cc" where there is none); SDL2 headers from sdl2-config
+      or --sdl DIR (include/SDL2); links against the system's libSDL2-2.0.so.0, so no -dev package is needed
+switch: devkitA64 + libnx + deko3d (devkitPro: $DEVKITPRO, --devkitpro DIR, or C:/devkitPro)
+android: NDK + SDK build-tools + JDK 17 + SDL2 source (the setup downloads them); written by
+      tools/android_build.py (docs/ANDROID_PLAN.md); --android-app probe builds the milestone 1 test APK instead.
+"""
+import argparse
+import glob
+import os
+import shutil
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "tools"))
+from ninja_syntax import Writer  # noqa: E402
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--target", choices=["host", "switch", "android", "ios"], default="host")
+ap.add_argument("--toolchain", choices=["msvc", "mingw", "linux"],
+                default="linux" if sys.platform.startswith("linux") else "msvc", help="host compiler setup")
+ap.add_argument("--cc", default="", help="C compiler command (host, --toolchain linux), e.g. clang or \"zig cc\"")
+ap.add_argument("--shared-cxx-runtime", action="store_true",
+                help="host, --toolchain linux: link the system's shared libstdc++ (when libstdc++.a, e.g. Fedora's "
+                     "libstdc++-static, is not installed)")
+ap.add_argument("--cxx", default="", help="C++ compiler command (host, --toolchain linux), e.g. clang++ or \"zig c++\"")
+ap.add_argument("--llvm-mingw", default="", help="llvm-mingw folder (host, --toolchain mingw)")
+ap.add_argument("--sdl", default="", help="SDL2 development folder (host; default: build/ext/SDL2-*)")
+ap.add_argument("--devkitpro", default="", help="devkitPro folder (switch)")
+ap.add_argument("--imgui", default="", help="Dear ImGui v1.92.9b source folder (default: build/ext/imgui-1.92.9b; the setup downloads it)")
+ap.add_argument("--trace-loads", action="store_true", help="debug: build with the guest load tracer (SR_TRACE_LOADS, trace_loads.c) into build/<target>-trace")
+ap.add_argument("--no-base-reg", action="store_true", help="switch: keep the guest memory base out of x28 (for comparisons)")
+ap.add_argument("--android-sdk", default="", help="android: SDK folder (build-tools, platforms; default $ANDROID_HOME)")
+ap.add_argument("--ndk", default="", help="android: NDK folder (default: the newest in <sdk>/ndk)")
+ap.add_argument("--jdk", default="", help="android: JDK 17+ folder (default $JAVA_HOME)")
+ap.add_argument("--sdl-src", default="", help="android: SDL2 2.32.10 source folder")
+ap.add_argument("--team", default="", help="ios: Apple Team ID (default: the Mac's Apple Development certificate, else the Apple ID in Xcode > Settings > Accounts); none = an unsigned .ipa for Sideloadly / AltStore")
+ap.add_argument("--ipa-dir", default="~/Desktop/Sonic Riders iOS",
+                help="ios: after each build copy SonicRiders.ipa here for Sideloadly/AltStore (default: a folder on the "
+                "Desktop; the copy before it is kept as SonicRiders-prev.ipa; 'none' = only build/ios/SonicRiders.ipa). "
+                "It holds recompiled game code: never share it")
+ap.add_argument("--bundle-id", default="", help="ios: app bundle ID (default: net.srnative.sonicriders.<team ID>, the one ID every install should use; ios_run.py install moves an older one onto it)")
+ap.add_argument("--moltenvk", default="", help="ios: MoltenVK folder holding include/ and static/ (default build/ext/MoltenVK/MoltenVK)")
+ap.add_argument("--abi", choices=["arm64-v8a", "x86_64", "both"], default="arm64-v8a", help="android: phone (arm64-v8a) or emulator (x86_64)")
+ap.add_argument("--keystore", default="", help="android: local signing key (made if missing; default next to the SDK)")
+ap.add_argument("--icon", default="", help="your own program icon (.ico; android and ios also .png) instead of the fan-made icon in "
+                "setup/icon.png. Keep it out of git unless it is your own art")
+ap.add_argument("--android-app", choices=["game", "probe"], default="game", help="android: the game, or the milestone 1 probe APK")
+args = ap.parse_args()
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
+if args.target == "android":
+    import android_build  # noqa: E402
+    if args.android_app == "probe":
+        _py = sys.executable.replace("\\", "/")
+        android_build.write_probe_ninja(args, ROOT, Writer, '"%s"' % _py if " " in _py else _py)
+        sys.exit(0)
+    if args.abi == "both":
+        sys.exit("configure: the game is built for one ABI at a time (--abi arm64-v8a or x86_64)")
+    atools = android_build.Tools(args)
+if args.target == "ios":
+    import ios_build  # noqa: E402
+    itools = ios_build.Tools(args, ROOT)
+GEN = "build/gen"
+OUT = "build/%s" % ("host-" + args.toolchain if args.target == "host" and args.toolchain in ("mingw", "linux") else
+                    "android-" + args.abi if args.target == "android" else args.target)
+if args.trace_loads:
+    OUT += "-trace"
+py = sys.executable.replace("\\", "/")
+if " " in py:
+    py = '"%s"' % py  # a Python installed under a folder with spaces
+
+gen_c = sorted(glob.glob(os.path.join(ROOT, GEN, "code_*.c")))
+if not gen_c:
+    # the list of generated files is needed to write build.ninja: recompile once now
+    import subprocess
+    print("build/gen is empty: recompiling first", flush=True)
+    subprocess.check_call([sys.executable, "tools/recomp/gcrecomp.py", "config/GXEE8P", "baserom", GEN], cwd=ROOT)
+    gen_c = sorted(glob.glob(os.path.join(ROOT, GEN, "code_*.c")))
+gen_c = [os.path.relpath(p, ROOT).replace("\\", "/") for p in gen_c] + [GEN + "/table.c"]
+rt_c = sorted(os.path.relpath(p, ROOT).replace("\\", "/") for p in glob.glob(os.path.join(ROOT, "runtime/src/*.c")))
+rt_cpp = sorted(os.path.relpath(p, ROOT).replace("\\", "/") for p in glob.glob(os.path.join(ROOT, "runtime/src/*.cpp")))
+plats = ["runtime/src/platform/%s" % args.target]
+if args.target in ("android", "ios"):
+    # the desktop's SDL2 layer (paths, threads, audio, input) plus Android's own renderer; not the GL one
+    # (iOS: the same, the Vulkan renderer on MoltenVK; docs/notes/ios.md)
+    plats = ["runtime/src/platform/host", "runtime/src/platform/android"]
+for plat in plats:
+    rt_c += sorted(os.path.relpath(p, ROOT).replace("\\", "/") for p in glob.glob(os.path.join(ROOT, plat, "*.c")))
+    rt_cpp += sorted(os.path.relpath(p, ROOT).replace("\\", "/") for p in glob.glob(os.path.join(ROOT, plat, "*.cpp")))
+if args.target in ("android", "ios"):
+    rt_c = [p for p in rt_c if not p.endswith("/render_gl.c")]
+# iOS: Objective-C glue (UIKit scene), compiled with ARC
+rt_m = sorted(os.path.relpath(p, ROOT).replace("\\", "/") for p in glob.glob(os.path.join(ROOT, "runtime/src/platform/ios/*.m"))) \
+    if args.target == "ios" else []
+
+from write_version import build_version, write as write_version  # noqa: E402
+
+# the build id for the log's first line; build.ninja refreshes it before every build (tools/write_version.py)
+version_c = OUT + "/gen/version.c"
+write_version(version_c)
+rt_c.append(version_c)
+
+# Dear ImGui (MIT, the settings menu): not in the repository (too big for the game-data guard); the
+# setup downloads the pinned release (setup/toolchain.json "imgui")
+IMGUI_FILES = ("LICENSE.txt", "imconfig.h", "imgui.cpp", "imgui.h", "imgui_draw.cpp", "imgui_internal.h", "imgui_tables.cpp",
+               "imgui_widgets.cpp", "imstb_rectpack.h", "imstb_textedit.h", "imstb_truetype.h")
+_imgui_src = args.imgui or os.path.join(ROOT, "build", "ext", "imgui-1.92.9b")
+if not os.path.isfile(os.path.join(_imgui_src, "imgui.h")):
+    sys.exit("Dear ImGui v1.92.9b not found (--imgui DIR): https://github.com/ocornut/imgui/archive/refs/tags/v1.92.9b.zip "
+             "extracted to build/ext/imgui-1.92.9b, or run the setup")
+IMGUI = "build/ext/imgui-1.92.9b"  # always built from here: a path inside the repository (no spaces in ninja paths)
+if os.path.normcase(os.path.abspath(_imgui_src)) != os.path.normcase(os.path.join(ROOT, IMGUI)):
+    import shutil
+    os.makedirs(os.path.join(ROOT, IMGUI), exist_ok=True)
+    for name in IMGUI_FILES:
+        src, dst = os.path.join(_imgui_src, name), os.path.join(ROOT, IMGUI, name)
+        if not os.path.exists(dst) or open(src, "rb").read() != open(dst, "rb").read():
+            shutil.copyfile(src, dst)
+inc = "-Iruntime/include -Iruntime/src -I%s -DIMGUI_DISABLE_DEMO_WINDOWS -DIMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS -I%s -I%s/gen" % (IMGUI, GEN, OUT)
+if args.trace_loads:
+    inc += " -DPPC_TRACE_LOADS"
+# generated code: no FMA contraction (Gekko rounds the product of fmadds; ppc.h models it exactly)
+gen_flags = "-O2 -ffp-contract=off -fno-strict-aliasing -fwrapv -w"
+
+def shader_key_files():
+    """the specialized-shader keys: the shipped list (config/GXEE8P/shader_keys.txt) plus any local extras
+    (build/shaderkeys/*.txt, e.g. keys a console reported that the list lacks)"""
+    files = ["config/GXEE8P/shader_keys.txt"] if os.path.exists(os.path.join(ROOT, "config/GXEE8P/shader_keys.txt")) else []
+    return files + sorted(os.path.relpath(p, ROOT).replace("\\", "/") for p in glob.glob(os.path.join(ROOT, "build/shaderkeys/*.txt")))
+
+
+def default_pc_icon():
+    """build/icon_default.ico from setup/icon.png (16-256 px PNGs in one .ico), or "" if the picture is missing"""
+    src, dst = os.path.join(ROOT, "setup", "icon.png"), os.path.join(ROOT, "build", "icon_default.ico")
+    if not os.path.isfile(src):
+        return ""
+    if not os.path.isfile(dst) or os.path.getmtime(dst) < os.path.getmtime(src):
+        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        import android_icon
+        import make_icon
+        px = android_icon.load(src)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        with open(dst, "wb") as f:
+            f.write(make_icon.ico([android_icon.resample(px, n) for n in (16, 32, 48, 64, 128, 256)]))
+    return "build/icon_default.ico"
+
+
+def cmd_path(p, program=False):
+    """A path for a build command: relative to the repository when it can be (no spaces from the
+    folders above it), backslashes for a program, quoted if it still has spaces."""
+    # the shorter of the absolute and relative forms that has no spaces: Windows resolves a relative
+    # path against the build folder before shortening it, so a deep install folder plus many ".."
+    # went over the 260-character limit ("CreateProcess: The filename or extension is too long")
+    a = os.path.abspath(p)
+    try:
+        r = os.path.relpath(p, ROOT)
+    except ValueError:  # another drive
+        r = a
+    # ASCII first: ninja hands commands to Windows in its 8-bit code page, where letters outside
+    # English (a user name in the path) are lost
+    spaceless = [x for x in (a, r) if " " not in x and x.isascii()] or [x for x in (a, r) if " " not in x]
+    p = min(spaceless, key=len) if spaceless else r
+    p = os.path.normpath(p) if program else p.replace("\\", "/")
+    return '"%s"' % p if " " in p else p
+
+
+def linux_sdl():
+    """SDL2 for --toolchain linux: (include folder, link arguments). Headers from --sdl DIR or sdl2-config;
+    the library: the runtime libSDL2-2.0.so.0 itself (SteamOS has no development link libSDL2.so)."""
+    import subprocess
+    inc = ""
+    if args.sdl:
+        for d in (os.path.join(args.sdl, "include", "SDL2"), os.path.join(args.sdl, "include")):
+            if os.path.isfile(os.path.join(d, "SDL.h")):
+                inc = d
+    elif shutil.which("sdl2-config"):
+        flags = subprocess.run(["sdl2-config", "--cflags"], capture_output=True, text=True).stdout.split()
+        inc = next((f[2:] for f in flags if f.startswith("-I") and os.path.isfile(os.path.join(f[2:], "SDL.h"))), "")
+    if not inc and os.path.isfile("/usr/include/SDL2/SDL.h"):
+        inc = "/usr/include/SDL2"
+    if not inc:
+        sys.exit("configure: SDL2 headers not found (install libsdl2-dev, or --sdl DIR with include/SDL2/SDL.h)")
+    libdirs = [os.path.join(args.sdl, "lib")] if args.sdl else []
+    libdirs += ["/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/usr/lib", "/usr/local/lib", "/usr/lib/aarch64-linux-gnu"]
+
+    def find(names, what):
+        for d in libdirs:
+            for name in names:
+                if os.path.exists(os.path.join(d, name)):
+                    return os.path.join(d, name)
+        sys.exit("configure: the %s library (%s) was not found; install it (SteamOS has it)" % (what, names[0]))
+    # OpenGL 1.1 calls are linked (the rest is loaded through SDL_GL_GetProcAddress): libglvnd's libGL
+    return inc, "%s %s" % (find(("libSDL2-2.0.so.0", "libSDL2.so"), "SDL2"), find(("libGL.so.1", "libGL.so"), "OpenGL"))
+
+
+with open(os.path.join(ROOT, "build.ninja"), "w") as f:
+    n = Writer(f)
+    n.variable("ninja_required_version", "1.10")
+    if args.target == "host":
+        # SDL2 (window, GL context, input, audio): downloaded, not committed
+        def pick_sdl(pred):
+            for d in sorted(glob.glob(os.path.join(ROOT, "build/ext/SDL2-*")), reverse=True):
+                if pred(d):
+                    return d
+            return ""
+        if args.toolchain == "linux":
+            sdl_inc, sdl_lib = linux_sdl()
+            cc = args.cc or os.environ.get("CC") or ("clang" if shutil.which("clang") else "gcc")
+            cxx = args.cxx or os.environ.get("CXX") or {"clang": "clang++", "gcc": "g++"}.get(cc, "")
+            if not cxx and cc.split()[-1:] == ["cc"]:
+                cxx = cc[:-2] + "c++"  # "zig cc" -> "zig c++"
+            if not cxx:
+                sys.exit("configure: say which C++ compiler goes with %s (--cxx)" % cc)
+            n.variable("cc", cc)
+            n.variable("cxx", cxx)
+            hostinc = "%s -I%s -DSDL_MAIN_HANDLED -D_GNU_SOURCE -pthread" % (inc, sdl_inc)
+            n.variable("cflags", "-std=gnu11 -g " + hostinc)
+            n.variable("cxxflags", "-std=c++20 -g " + hostinc)
+            # the program finds libSDL2 in the system (or next to itself: $ORIGIN); static C++ runtime
+            # so a Steam Deck needs nothing besides SDL2 and OpenGL, which SteamOS has
+            # zig's linker takes no -Map (and links its own libc++ statically anyway)
+            is_zig = "zig" in os.path.basename(cxx.split()[0]) or cxx.split()[0] == "zig"
+            static_rt = "" if args.shared_cxx_runtime else "-static-libstdc++ -static-libgcc "
+            n.variable("ldflags", "-g -pthread %s -ldl -lm -Wl,-rpath,'$$ORIGIN' %s" % (sdl_lib, "" if is_zig else
+                       "%s-Wl,-Map=%s/sonicriders.map" % (static_rt, OUT)))
+            sdl_dll = ""
+        elif args.toolchain == "mingw":
+            lm = args.llvm_mingw.replace("\\", "/")
+            if not os.path.isfile(os.path.join(lm, "bin", "x86_64-w64-mingw32-clang.exe")):
+                sys.exit("llvm-mingw not found (--llvm-mingw DIR)")
+            sdl_root = args.sdl or pick_sdl(lambda d: glob.glob(os.path.join(d, "*", "x86_64-w64-mingw32")))
+            sdl_m = glob.glob(os.path.join(sdl_root, "*", "x86_64-w64-mingw32")) + glob.glob(os.path.join(sdl_root, "x86_64-w64-mingw32"))
+            if not sdl_m:
+                sys.exit("SDL2 MinGW development files not found (--sdl DIR: SDL2-devel-2.32.10-mingw.zip extracted)")
+            sdl = cmd_path(sdl_m[0])
+            # the program path in backslashes: Windows' process creation does not resolve a relative
+            # path with forward slashes
+            n.variable("cc", cmd_path(os.path.join(lm, "bin", "x86_64-w64-mingw32-clang.exe"), program=True))
+            n.variable("cxx", cmd_path(os.path.join(lm, "bin", "x86_64-w64-mingw32-clang++.exe"), program=True))
+            hostinc = "%s -Iruntime/include/compat -I%s/include/SDL2 -DSDL_MAIN_HANDLED -D_WIN32_WINNT=0x0A00" % (inc, sdl)
+            n.variable("cflags", "-std=gnu11 -g " + hostinc)
+            n.variable("cxxflags", "-std=c++20 -g " + hostinc)
+            # a windowed program (no console window); the log goes to sonicriders.log then (platform_host.c)
+            n.variable("ldflags", "-g -static-libstdc++ -static-libgcc -L%s/lib -lSDL2 -lopengl32 -lwinmm -lws2_32 -lwinhttp -Wl,--subsystem,windows -Wl,-Map=%s/sonicriders.map" % (sdl, OUT))
+            sdl_dll = sdl + "/bin/SDL2.dll"
+        else:
+            sdl = args.sdl or pick_sdl(lambda d: os.path.isdir(os.path.join(d, "lib", "x64")))
+            if not sdl:
+                sys.exit("SDL2 not found: extract SDL2-devel-2.32.10-VC.zip into build/ext (see NOTES.md)")
+            sdl = os.path.relpath(sdl, ROOT).replace("\\", "/")
+            n.variable("cc", "clang")
+            n.variable("cxx", "clang++")
+            n.variable("cflags", "-std=gnu11 -g %s -I%s/include -DSDL_MAIN_HANDLED -D_CRT_SECURE_NO_WARNINGS" % (inc, sdl))
+            n.variable("cxxflags", "-std=c++20 -g %s -I%s/include -DSDL_MAIN_HANDLED -D_CRT_SECURE_NO_WARNINGS" % (inc, sdl))
+            n.variable("ldflags", "-g -fuse-ld=lld -L%s/lib/x64 -lSDL2 -lopengl32 -lwinmm -lws2_32 -lwinhttp -Wl,/MAP:%s/sonicriders.map" % (sdl, OUT))
+            sdl_dll = sdl + "/lib/x64/SDL2.dll"
+        exe = OUT + ("/sonicriders" if args.toolchain == "linux" else "/sonicriders.exe")
+    elif args.target == "android":
+        t = atools
+        sdl_inc, sdl_link = android_build.sdl_flags(t, args.abi)
+        # a shared library loaded by SDLActivity; PIC for everything (the generated code too)
+        andinc = "%s %s -fPIC -ffunction-sections -fdata-sections" % (inc, sdl_inc)
+        n.variable("cc", "%s %s" % (t.clang, t.target(args.abi)))
+        n.variable("cxx", "%s %s" % (t.clangxx, t.target(args.abi)))
+        n.variable("cflags", "-std=gnu11 -g " + andinc)
+        n.variable("cxxflags", "-std=c++20 -g -fno-exceptions -fno-rtti " + andinc)
+        n.variable("ldflags", "-shared -g -Wl,-soname,libmain.so -Wl,--no-undefined -Wl,-z,max-page-size=16384 "
+                   "-Wl,--build-id=sha1 -Wl,--gc-sections -Wl,-Map=%s/sonicriders.map %s -lvulkan -landroid -llog -ldl -lm" % (OUT, sdl_link))
+        exe = OUT + "/libmain.so"
+    elif args.target == "ios":
+        t = itools
+        iosinc = "%s %s" % (inc, t.inc())
+        n.variable("cc", t.cc())
+        n.variable("cxx", t.cc(cxx=True))
+        n.variable("cflags", "-std=gnu11 -g " + iosinc)
+        n.variable("cxxflags", "-std=c++20 -g -fno-exceptions -fno-rtti " + iosinc)
+        n.variable("ldflags", "")
+        exe = None  # a static library, linked and signed by Xcode (tools/ios_build.py)
+    else:
+        dkp =(args.devkitpro or os.environ.get("DEVKITPRO", "")).replace("\\", "/")
+        if not os.path.isdir(os.path.join(dkp, "devkitA64")):  # msys-style /opt/devkitpro from a Windows shell
+            dkp = "C:/devkitPro"
+        if not os.path.isdir(os.path.join(dkp, "devkitA64")):
+            sys.exit("devkitPro not found (--devkitpro DIR, $DEVKITPRO or C:/devkitPro)")
+        if " " in dkp:
+            sys.exit("the devkitPro folder must not contain spaces (libnx's switch.specs reads $DEVKITPRO): %s" % dkp)
+        arch = "-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE"
+        if not args.no_base_reg:
+            # the guest memory base stays in x28 (runtime/include/ppc.h): nothing we compile may use it
+            arch += " -ffixed-x28 -DPPC_FIXED_X28"
+            gen_flags += " -DPPC_GEN_CODE -DPPC_BASE_X28"
+        n.variable("cc", dkp + "/devkitA64/bin/aarch64-none-elf-gcc")
+        n.variable("cxx", dkp + "/devkitA64/bin/aarch64-none-elf-g++")
+        n.variable("cflags", "-std=gnu11 -g %s %s -D__SWITCH__ -I%s/libnx/include -ffunction-sections" % (arch, inc, dkp))
+        n.variable("cxxflags", "-std=gnu++20 -g %s %s -D__SWITCH__ -I%s/libnx/include -ffunction-sections -fno-rtti -fno-exceptions" % (arch, inc, dkp))
+        n.variable("ldflags", "-specs=%s/libnx/switch.specs -g %s -L%s/libnx/lib -Wl,-Map,%s/sonicriders.map -ldeko3d -lnx -lm"
+                   % (dkp, arch, dkp, OUT))
+        exe = OUT + "/sonicriders.elf"
+
+    n.rule("cc", "$cc -MMD -MF $out.d $cflags $extra -c $in -o $out", depfile="$out.d", deps="gcc",
+           description="CC $in")
+    n.rule("cxx", "$cxx -MMD -MF $out.d $cxxflags $extra -c $in -o $out", depfile="$out.d", deps="gcc",
+           description="CXX $in")
+    n.rule("link", "$cxx $in -o $out $ldflags", description="LINK $out")
+    n.rule("recomp", "%s tools/recomp/gcrecomp.py config/GXEE8P baserom %s" % (py, GEN),
+           description="RECOMP", restat=True, pool="console",
+           generator=True)  # no ninja log yet (first build) must not mean "recompile again": mtimes decide
+
+    # always runs (the phony input has no inputs); restat: an unchanged id rebuilds nothing
+    n.rule("version", "%s tools/write_version.py $out" % py, description="VERSION", restat=True)
+    n.build("version_always", "phony")
+    n.build(version_c, "version", implicit=["version_always"])
+
+    recomp_inputs = ["tools/recomp/gcrecomp.py", "tools/recomp/ppc2c.py", "tools/recomp/crlive.py",
+                     "tools/recomp/leaflocal.py", "tools/recomp/singleflow.py", "tools/gcbin.py", "config/GXEE8P/symbols.txt",
+                     "config/GXEE8P/_Main/symbols.txt"] + [p for p in ("config/GXEE8P/hle.txt", "config/GXEE8P/patches.txt", "config/GXEE8P/hot_functions.txt")
+                                                           if os.path.exists(os.path.join(ROOT, p))]
+    n.build(gen_c + [GEN + "/funcs.h"], "recomp", recomp_inputs)
+
+    # shaders: GL strings (host) or uam-compiled deko3d binaries (Switch)
+    shader_src = ["runtime/shaders/gx_common.glsl", "runtime/shaders/gx_light.glsl", "runtime/shaders/gx.vert", "runtime/shaders/gx.frag",
+                  "runtime/shaders/overlay.vert", "runtime/shaders/overlay.frag", "tools/embed_shaders.py"]
+    if args.target in ("android", "ios"):
+        glslc = atools.glslc if args.target == "android" else itools.glslc
+        # SPIR-V for the Vulkan backend (platform/android/render_vk.c), compiled with the NDK's glslc (iOS: shaderc's)
+        shader_h = OUT + "/gen/gx_shaders_spv.h"
+        shader_src += ["runtime/shaders/vk_quad.vert", "runtime/shaders/vk_tex.frag", "runtime/shaders/vk_fill.frag",
+                       "runtime/shaders/vk_touch.frag", "runtime/shaders/vk_bright.frag", "runtime/shaders/vk_blur.frag",
+                       "runtime/shaders/vk_grade.frag", "runtime/shaders/vk_easu.frag", "runtime/shaders/vk_rcas.frag"]
+        n.rule("shaders", "%s tools/embed_shaders.py spv $out %s %s/shaders" % (py, glslc, OUT), description="GLSLC $out")
+        # the touch controls' pictures (android/touch_icons; order = TOUCH_IMG_* in touch_android.h)
+        icons = ["android/touch_icons/%s.png" % k for k in ("stick_base", "stick_knob", "jump_a", "boost_b", "drift_r", "tornado_lr")]
+        icons_h = OUT + "/gen/touch_icons.h"
+        n.rule("icons", "%s tools/embed_icons.py $out $in" % py, description="ICONS $out")
+        # optional: kept out of git (binary); missing -> drawn icons
+        icons = [p for p in icons if os.path.isfile(os.path.join(ROOT, p))] if all(os.path.isfile(os.path.join(ROOT, p)) for p in icons) else []
+        n.build(icons_h, "icons", icons, implicit=["tools/embed_icons.py"])
+    elif args.target == "host":
+        shader_h = OUT + "/gen/gx_shaders_gl.h"
+        n.rule("shaders", "%s tools/embed_shaders.py gl $out" % py, description="SHADERS $out")
+    else:
+        shader_h = OUT + "/gen/gx_shaders_dksh.h"
+        # the picture options' passes share the Vulkan quad shaders (QUAD_DK)
+        shader_src += ["runtime/shaders/vk_quad.vert", "runtime/shaders/vk_bright.frag", "runtime/shaders/vk_blur.frag",
+                       "runtime/shaders/vk_grade.frag", "runtime/shaders/vk_easu.frag", "runtime/shaders/vk_rcas.frag"]
+        n.rule("shaders", "%s tools/embed_shaders.py dksh $out %s/tools/bin/uam.exe %s/shaders" % (py, dkp, OUT),
+               description="UAM $out")
+    if shader_h:
+        n.build(shader_h, "shaders", shader_src)
+    if args.target == "switch":
+        # specialized fragment shaders from config/GXEE8P/shader_keys.txt (+ local extras in build/shaderkeys/)
+        key_files = shader_key_files()
+        spec_h = OUT + "/gen/gx_spec_dksh.h"
+        n.rule("specshaders", "%s tools/gen_shaders.py $out %s/tools/bin/uam.exe %s/spec $in_keys" % (py, dkp, OUT),
+               description="SPEC $out")
+        n.build(spec_h, "specshaders", ["tools/gen_shaders.py", "tools/embed_shaders.py", "runtime/shaders/gx.frag",
+                                        "runtime/shaders/gx_common.glsl", "runtime/shaders/gx_light.glsl"] + key_files,
+                variables={"in_keys": " ".join(key_files)})
+        shader_h = [shader_h, spec_h]
+    elif args.target in ("android", "ios"):
+        # the same specialized fragment shaders as SPIR-V (keys: config/GXEE8P/shader_keys.txt + build/shaderkeys/)
+        key_files = shader_key_files()
+        spec_h = OUT + "/gen/gx_spec_spv.h"
+        n.rule("specshaders", "%s tools/gen_shaders.py --vk $out %s %s/spec $in_keys" % (py, glslc, OUT),
+               description="SPEC $out")
+        n.build(spec_h, "specshaders", ["tools/gen_shaders.py", "tools/embed_shaders.py", "runtime/shaders/gx.frag",
+                                        "runtime/shaders/gx_common.glsl", "runtime/shaders/gx_light.glsl"] + key_files,
+                variables={"in_keys": " ".join(key_files)})
+        shader_h = [shader_h, spec_h, icons_h]
+    else:
+        shader_h = [shader_h] if shader_h else []
+
+    objs = []
+    for src in gen_c:
+        o = "%s/obj/%s.o" % (OUT, src.replace("/", "_"))
+        n.build(o, "cc", src, variables={"extra": gen_flags})
+        objs.append(o)
+    for src in rt_c:
+        o = "%s/obj/%s.o" % (OUT, src.replace("/", "_"))
+        n.build(o, "cc", src, implicit=[GEN + "/funcs.h"] + shader_h, variables={"extra": "-O2 -Wall"})
+        objs.append(o)
+    for src in rt_m:
+        o = "%s/obj/%s.o" % (OUT, src.replace("/", "_"))
+        n.build(o, "cc", src, variables={"extra": "-O2 -Wall -fobjc-arc"})
+        objs.append(o)
+    for src in rt_cpp:
+        o = "%s/obj/%s.o" % (OUT, src.replace("/", "_"))
+        n.build(o, "cxx", src, implicit=[GEN + "/funcs.h"] + shader_h, variables={"extra": "-O2 -Wall"})
+        objs.append(o)
+    # Dear ImGui (MIT, --imgui): the settings menu (runtime/src/menu.cpp)
+    for src in ("imgui.cpp", "imgui_draw.cpp", "imgui_tables.cpp", "imgui_widgets.cpp"):
+        o = "%s/obj/imgui_%s.o" % (OUT, src)
+        n.build(o, "cxx", IMGUI + "/" + src, variables={"extra": "-O2 -w"})
+        objs.append(o)
+    # program icon (PC, llvm-mingw): your own .ico (--icon), else build/icon_default.ico, made here from the
+    # fan-made icon in setup/icon.png (by cedry2kio, README credits)
+    icon = os.path.abspath(args.icon).replace("\\", "/") if args.icon else default_pc_icon()
+    if args.target == "host" and args.toolchain == "mingw" and os.path.isfile(os.path.join(ROOT, icon)):
+        rc = OUT + "/gen/icon.rc"
+        with open(os.path.join(ROOT, rc), "w", encoding="utf-8") as f:
+            f.write('1 ICON "%s"\n' % os.path.abspath(os.path.join(ROOT, icon)).replace("\\", "/"))
+        n.rule("rc", "%s -O coff -i $in -o $out" % cmd_path(os.path.join(lm, "bin", "x86_64-w64-mingw32-windres.exe"), program=True),
+               description="RC $out")
+        n.build(OUT + "/obj/icon.res.o", "rc", rc, implicit=[icon])
+        objs.append(OUT + "/obj/icon.res.o")
+    # Android: libSDL2.so comes from the SDL2 step; without the dependency a fresh build could link first
+    if args.target == "ios":
+        exe = ios_build.add_build(n, itools, objs, OUT, py)  # libsonicriders.a, SDL2, the signed .app
+    else:
+        n.build(exe, "link", objs, implicit=[android_build.sdl_lib(args.abi)] if args.target == "android" else None)
+    if args.target == "switch":
+        n.rule("nacp", "%s/tools/bin/nacptool.exe --create \"Sonic Riders\" \"native port (own disc image required)\" 0.1.0 $out" % dkp,
+               description="NACP $out")
+        n.build(OUT + "/sonicriders.nacp", "nacp")
+        # the Homebrew Menu icon: setup/icon_256.jpg (256 x 256 JPEG; the fan-made icon by cedry2kio, README credits)
+        nro_icon = "setup/icon_256.jpg" if os.path.isfile(os.path.join(ROOT, "setup/icon_256.jpg")) else ""
+        n.rule("nro", "%s/tools/bin/elf2nro.exe $in $out --nacp=%s/sonicriders.nacp%s" % (dkp, OUT, " --icon=" + nro_icon if nro_icon else ""),
+               description="NRO $out")
+        n.build(OUT + "/sonicriders.nro", "nro", exe, implicit=[OUT + "/sonicriders.nacp"] + ([nro_icon] if nro_icon else []))
+        n.default(OUT + "/sonicriders.nro")
+    if args.target == "host" and sdl_dll:
+        n.rule("copy", "%s -c \"import shutil,sys; shutil.copy(sys.argv[1], sys.argv[2])\" $in $out" % py, description="COPY $out")
+        n.build(OUT + "/SDL2.dll", "copy", sdl_dll)
+        n.default(OUT + "/SDL2.dll")
+    if args.target == "android":
+        dex, sdl_libs = android_build.add_common(n, atools, py, ROOT, [args.abi])
+        apk = "build/android/sonicriders-%s.apk" % args.abi
+        # the app icon: your own (--icon), else the fan-made icon in setup/icon.png
+        app_icon = os.path.abspath(args.icon).replace("\\", "/") if args.icon else "setup/icon.png"
+        if not os.path.isfile(os.path.join(ROOT, app_icon)):
+            print("configure: no app icon (%s not found); the APK gets Android's default icon" % app_icon)
+            app_icon = ""
+        android_build.add_apk(n, atools, args.abi, apk, exe, sdl_libs[args.abi], dex, "net.srnative.sonicriders",
+                              "Sonic Riders", "1", build_version()[:40], icon=app_icon)
+        n.default(apk)
+    n.build("gen_objs", "phony", objs[:len(gen_c)])
+    n.default(exe)
+with open(os.path.join(ROOT, "build.ninja"), encoding="utf-8", errors="replace") as f:
+    bad = sorted({line.strip()[:120] for line in f if not line.isascii()})
+if bad:
+    os.remove(os.path.join(ROOT, "build.ninja"))
+    sys.exit("configure: a path in the build has letters outside English, which the build tools can't use:\n  %s\n"
+             "Move the folder (and the tools folder) to a path with only English letters and digits, e.g. C:\\SonicRiders."
+             % bad[0])
+print("wrote build.ninja (%s): %d generated + %d runtime sources" % (args.target, len(gen_c), len(rt_c) + len(rt_cpp)))

@@ -1,0 +1,107 @@
+/* Renderer interface: the guest side (gx_render.c, on whichever thread writes the GX FIFO) turns the
+ * GX command stream into per-frame command lists; a backend (render_gl.c on the desktop, deko3d on the
+ * Switch) executes them on its own render thread. Shading is done by one "ubershader" pair that reads
+ * the raw XF/BP register state (GxUniforms), so the backend stays thin and the GLSL is shared. */
+#pragma once
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define EFB_WIDTH 640
+#define EFB_HEIGHT 528
+
+/* Wide screen modes (settings_wide_k): two unused XF registers of each state carry the frame's EFB
+ * width factor k (float bits; 0 or 1 = the original 640) and flags, for the backends (viewport,
+ * scissor and copy X times k) and the vertex shader (gx.vert: 2D kept at 4:3 in the middle). A third
+ * carries the field of view setting. The game's writes to them are ignored (gx_fifo.c). */
+#define GX_XR_ASPECT 0x7C     /* game camera k / this screen's k (float bits; 0 or 1 = none): gx.vert narrows the
+                               * perspective views when the room's camera is wider than this screen (online) */
+#define GX_XR_FOV 0x7D        /* field of view scale (float bits; 0 or 1 = the game's): gx.vert */
+#define GX_XR_WIDE_K 0x7E
+#define GX_XR_WIDE_FLAGS 0x7F
+#define GX_WIDE_HUD_43 1u     /* orthographic draws placed per draw (gx_render.c wide_anchor), not stretched */
+#define GX_WIDE_HUD_EDGES 2u  /* ... and those left or right of the middle moved to that screen edge */
+/* per draw, in every vertex's nrm[3] (gx.vert): 4:3 in the middle, moved to the left / right edge, or
+ * stretched to the width (draws spanning the whole width: fades, backgrounds, screen effects) */
+enum { GX_ANCHOR_MIDDLE, GX_ANCHOR_LEFT, GX_ANCHOR_RIGHT, GX_ANCHOR_STRETCH };
+
+/* one decoded vertex: raw attributes as floats (the XF stage runs in the vertex shader) */
+typedef struct GxVertex {
+    float pos[4];      /* xyz, w = position/normal matrix index (row address / 4... see gx_render.c) */
+    float nrm[4];      /* xyz, w unused */
+    float col[2][4];   /* color0, color1 (RGBA 0..1); white when the vertex has none */
+    float tex[8][2];   /* texture coordinates 0..7 */
+    float tmtx[8];     /* texture matrix index per coordinate */
+} GxVertex;
+
+/* XF memory 0x000-0x67F (matrices, lights) as chunks of 64 words: each frame keeps a pool of chunk
+ * copies (GxFrame.xchunks); a state names the pool entry of each chunk (GxUniforms.xtab), so a state
+ * change copies only the chunks the game rewrote. */
+#define GX_XFM_CHUNK 64
+#define GX_XFM_CHUNKS 26
+
+/* the register state the shaders read, std140-compatible (uniform buffer binding 0); a new one only
+ * when a BP or XF register changed */
+typedef struct GxUniforms {
+    uint32_t bp[256];         /* BP registers */
+    uint32_t xfr[128];        /* XF registers 0x1000-0x107F */
+    uint32_t konst[8];        /* TEV konstant colors (raw BP values) */
+} GxUniforms;
+
+/* the XF memory chunk table (uniform buffer binding 1, vertex stage): pool index of chunk i; a new one
+ * whenever the game loaded matrices or lights, typically once per object */
+typedef struct GxXTab {
+    uint32_t xtab[32];        /* GX_XFM_CHUNKS used */
+} GxXTab;
+
+/* GXC_TEXBLIT: copy[0] source texture (an EFB copy), copy[1] destination (an EFB-copy texture of the size
+ * the game samples it at), copy[2]/copy[3] the source's size in EFB pixels: into the destination's top
+ * left corner (gx_texture.c gx_texture_lookup) */
+enum { GXC_STATE, GXC_DRAW, GXC_COPY, GXC_PRESENT, GXC_TEXBLIT };
+enum { GXP_TRIANGLES, GXP_LINES, GXP_POINTS };
+
+typedef struct GxCmd {
+    uint8_t type;
+    uint8_t prim;             /* GXC_DRAW: GXP_* */
+    uint16_t pad;
+    uint32_t a, b;            /* DRAW: first index, index count. STATE: uniforms index, chunk table index */
+    int32_t tex[8];           /* DRAW: texture ids per texmap (-1: none) */
+    uint32_t copy[12];        /* COPY: see gx_render.c efb_copy */
+} GxCmd;
+
+/* a decoded texture, created on the guest side, uploaded by the backend */
+typedef struct GxTexture {
+    int id;
+    uint32_t width, height;
+    uint8_t* rgba;            /* width*height*4, owned by the cache; NULL for EFB-copy targets */
+    int is_copy;              /* render target filled by an EFB copy */
+    uint32_t gen;             /* bumped when the pixels change (backend re-uploads) */
+} GxTexture;
+
+typedef struct GxFrame {
+    GxCmd* cmds; uint32_t ncmds, cap_cmds;
+    GxVertex* verts; uint32_t nverts, cap_verts;     /* each decoded vertex once */
+    uint32_t* idx; uint32_t nidx, cap_idx;           /* triangle/line/point lists (quads, strips, fans expanded) */
+    GxUniforms* unis; uint32_t nunis, cap_unis;
+    uint32_t* xchunks; uint32_t nxchunks, cap_xchunks;  /* XF memory chunk copies (GX_XFM_CHUNK words) */
+    GxXTab* xtabs; uint32_t nxtabs, cap_xtabs;
+    int* retired; uint32_t nretired, cap_retired;  /* texture ids to free after this frame */
+    float wide_k;                                  /* EFB width factor of this frame (settings_wide_k) */
+    int in_race;                                   /* the game is in a race (PC bloom: races only) */
+} GxFrame;
+
+/* backend (render_gl.c / render_deko.c) */
+extern volatile int g_render_counts_fps;      /* the backend shows the presented rate (PC in-between pictures) */
+void render_start(void);                      /* creates the window and the render thread */
+void render_submit(GxFrame* f);               /* hands a finished frame over; blocks while the
+                                                 previous one is still being drawn */
+GxFrame* render_take_free_frame(void);        /* an empty frame to fill */
+GxTexture* gx_texture_get(int id);            /* backend side lookup */
+void gx_texture_free(int id);                 /* backend: a retired texture is no longer in use */
+int render_poll_quit(void);
+
+#ifdef __cplusplus
+}
+#endif

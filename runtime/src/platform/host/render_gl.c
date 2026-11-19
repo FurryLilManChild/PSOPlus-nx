@@ -1,0 +1,1687 @@
+/* Desktop backend: SDL2 window + OpenGL 3.3 core on a render thread, executing the frames built by
+ * gx_render.c. The EFB is an FBO at EFB_SCALE x the native 640x528, stored top row first (the GX
+ * y axis is flipped in the vertex shader), so EFB copies and texture memory share one orientation.
+ *
+ * SR_HEADLESS=1: no window (frames are recycled at once). SR_SCREENSHOT=N: save the Nth presented
+ * frame as build/shot_N.png. */
+#include <SDL.h>
+#include <SDL_opengl.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <threads.h>
+
+#include "gx.h"
+#include "gx_render.h"
+#include "gx_shader_key.h"
+#include "gx_shaders_gl.h"  /* generated: tools/embed_shaders.py */
+#include "overlay.h"
+#include "runtime.h"
+#include "settings.h"
+#include "fsr1_gl.h"  /* AMD FSR 1 shaders (MIT) */
+
+void input_init(void);
+void input_pump(void);
+
+/* internal resolution: g_sc x the native 640x528 (setting pc_scale, F1 menu; applied between frames, efb_config) */
+static int g_sc = 2;
+#define EFB_SCALE g_sc
+/* anti-aliasing (setting msaa): with g_samples > 1 the game draws into multisampled renderbuffers (g_ms_fbo),
+ * resolved into the EFB textures (g_fbo) before a copy reads them (efb_resolve) */
+static int g_samples = 1, g_max_samples = 1;
+static unsigned g_ms_fbo, g_ms_rb[2];
+#define DRAW_FBO (g_samples > 1 ? g_ms_fbo : g_fbo)
+#define EFB_H (EFB_HEIGHT * EFB_SCALE)
+/* the wide screen modes (gx_render.h GX_XR_WIDE_K): the EFB is 640 x k wide (in GX units), k from the
+ * frame; X of viewports, scissors and copies is scaled by it */
+static float g_wide_k = 1.0f;     /* this frame's */
+static int g_in_race;             /* this frame's: bloom only in races (menus with lit models went white) */
+static float g_efb_k = 0.0f;      /* the EFB textures' */
+static int efb_w(float k) { return (int)(EFB_WIDTH * k + 0.5f) * EFB_SCALE; }
+static int wx(int x) { return (int)((float)x * g_wide_k + 0.5f) * EFB_SCALE; }  /* GX X -> EFB pixels */
+
+/* ---- GL functions beyond 1.1 ---- */
+#define GLFUNCS(X) \
+    X(PFNGLGENBUFFERSPROC, glGenBuffers) X(PFNGLBINDBUFFERPROC, glBindBuffer) X(PFNGLBUFFERDATAPROC, glBufferData) \
+    X(PFNGLBUFFERSUBDATAPROC, glBufferSubData) X(PFNGLBINDBUFFERRANGEPROC, glBindBufferRange) \
+    X(PFNGLGENVERTEXARRAYSPROC, glGenVertexArrays) X(PFNGLBINDVERTEXARRAYPROC, glBindVertexArray) \
+    X(PFNGLENABLEVERTEXATTRIBARRAYPROC, glEnableVertexAttribArray) X(PFNGLVERTEXATTRIBPOINTERPROC, glVertexAttribPointer) \
+    X(PFNGLCREATESHADERPROC, glCreateShader) X(PFNGLSHADERSOURCEPROC, glShaderSource) X(PFNGLCOMPILESHADERPROC, glCompileShader) \
+    X(PFNGLGETSHADERIVPROC, glGetShaderiv) X(PFNGLGETSHADERINFOLOGPROC, glGetShaderInfoLog) X(PFNGLCREATEPROGRAMPROC, glCreateProgram) \
+    X(PFNGLATTACHSHADERPROC, glAttachShader) X(PFNGLBINDATTRIBLOCATIONPROC, glBindAttribLocation) X(PFNGLLINKPROGRAMPROC, glLinkProgram) \
+    X(PFNGLGETPROGRAMIVPROC, glGetProgramiv) X(PFNGLGETPROGRAMINFOLOGPROC, glGetProgramInfoLog) X(PFNGLUSEPROGRAMPROC, glUseProgram) \
+    X(PFNGLGETUNIFORMLOCATIONPROC, glGetUniformLocation) X(PFNGLUNIFORM1IPROC, glUniform1i) \
+    X(PFNGLGETUNIFORMBLOCKINDEXPROC, glGetUniformBlockIndex) X(PFNGLUNIFORMBLOCKBINDINGPROC, glUniformBlockBinding) \
+    X(PFNGLGENFRAMEBUFFERSPROC, glGenFramebuffers) X(PFNGLBINDFRAMEBUFFERPROC, glBindFramebuffer) \
+    X(PFNGLFRAMEBUFFERTEXTURE2DPROC, glFramebufferTexture2D) X(PFNGLCHECKFRAMEBUFFERSTATUSPROC, glCheckFramebufferStatus) \
+    X(PFNGLBLITFRAMEBUFFERPROC, glBlitFramebuffer) X(PFNGLACTIVETEXTUREPROC, glActiveTexture) \
+    X(PFNGLBLENDFUNCSEPARATEPROC, glBlendFuncSeparate) X(PFNGLBLENDEQUATIONPROC, glBlendEquation)     X(PFNGLTEXBUFFERPROC, glTexBuffer) \
+    X(PFNGLGENRENDERBUFFERSPROC, glGenRenderbuffers) X(PFNGLBINDRENDERBUFFERPROC, glBindRenderbuffer) \
+    X(PFNGLRENDERBUFFERSTORAGEMULTISAMPLEPROC, glRenderbufferStorageMultisample) \
+    X(PFNGLFRAMEBUFFERRENDERBUFFERPROC, glFramebufferRenderbuffer) \
+    X(PFNGLUNIFORM1FPROC, glUniform1f) X(PFNGLUNIFORM2FPROC, glUniform2f) X(PFNGLUNIFORM2IPROC, glUniform2i) X(PFNGLUNIFORM4FPROC, glUniform4f) \
+    X(PFNGLGENERATEMIPMAPPROC, glGenerateMipmap)
+#define DECL(t, n) static t p_##n;
+GLFUNCS(DECL)
+#undef DECL
+
+static SDL_Window* g_win;
+#define XFM_UNIT 8  /* texture unit of the XF memory chunk pool (a buffer texture) */
+static GLuint g_xfm_buf, g_xfm_tex;
+static uint8_t* g_ubo_staging;
+static size_t g_ubo_staging_cap;
+static GLuint g_ubo_xt;  /* the XF chunk tables (GxXTab), uniform block binding 1 */
+static GLuint g_ibo;     /* the frame's index lists */
+/* the presented picture at window size: screenshots read it, then it is copied to the window (whose
+ * own framebuffer has no contents while minimized) */
+static GLuint g_pres_fbo, g_pres_tex;
+static int g_pres_w, g_pres_h;
+
+static void pres_target(int w, int h) {
+    if (!g_pres_fbo) {
+        p_glGenFramebuffers(1, &g_pres_fbo);
+        glGenTextures(1, &g_pres_tex);
+    }
+    if (w != g_pres_w || h != g_pres_h) {
+        glBindTexture(GL_TEXTURE_2D, g_pres_tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_pres_fbo);
+        p_glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_pres_tex, 0);
+        g_pres_w = w; g_pres_h = h;
+    }
+    p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_pres_fbo);
+}
+static GLuint g_prog, g_vao, g_vbo, g_ubo, g_fbo, g_efb_color, g_efb_depth, g_copy_fbo;
+static GLint g_ubo_align = 256;
+static GLuint* g_gltex;
+static uint32_t* g_gltex_gen;
+static int g_gltex_cap;
+
+static mtx_t g_lock;
+static cnd_t g_cv;
+static GxFrame g_frames[4];
+static GxFrame* g_free[4];
+static int g_nfree;
+static GxFrame* g_pending;
+static volatile int g_quit;
+static int g_headless;
+static int g_shot_at;
+static int g_shot_list[512 + 32], g_nshots;  /* SR_SCREENSHOT list (up to 512), + SR_SKIPSCAN's 32 */
+/* SR_SKIPSCAN=FRAME,STEP: from presented frame FRAME on, frame FRAME+k leaves out draws k*STEP up to
+ * (k+1)*STEP and is saved as a screenshot (finding the draws behind a visual problem; debugging) */
+static int g_scan_at, g_scan_step;  /* SR_SCREENSHOT=N[,N...]: the presented frames to save */
+/* SR_SKIPSAME=N,STEP[,FIRST] (debugging): frame N is drawn again once per block of STEP draws, without that
+ * block, each saved as build/same_N_<block>.png: which draws make a difference, on one exact frame */
+static int g_same_at, g_same_step, g_same_first, g_same_k = -1;  /* ,FIRST: start at draw FIRST */
+static unsigned g_presented;
+
+static GLuint compile(GLenum type, const char* src) {
+    const char* parts[2] = {"#version 330 core\n", src};
+    GLuint s = p_glCreateShader(type);
+    p_glShaderSource(s, 2, parts, NULL);
+    p_glCompileShader(s);
+    GLint ok;
+    p_glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        char log[4096];
+        p_glGetShaderInfoLog(s, sizeof log, NULL, log);
+        rt_fatal("shader compile error:\n%s", log);
+    }
+    return s;
+}
+
+static const char* const k_attrs[10] = {"a_pos", "a_nrm", "a_col0", "a_col1", "a_tex01", "a_tex23", "a_tex45", "a_tex67", "a_tm0", "a_tm1"};
+
+/* (re)creates the EFB at 640 x k (wide screen modes); its contents are lost (cleared) */
+static void efb_resize(float k) {
+    int w = efb_w(k);
+    glBindTexture(GL_TEXTURE_2D, g_efb_color);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, EFB_H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glBindTexture(GL_TEXTURE_2D, g_efb_depth);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, w, EFB_H, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, NULL);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
+    p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_efb_color, 0);
+    p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, g_efb_depth, 0);
+    if (p_glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) rt_fatal("EFB framebuffer incomplete");
+    glDisable(GL_SCISSOR_TEST);
+    glColorMask(1, 1, 1, 1);
+    glDepthMask(GL_TRUE);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    if (g_samples > 1) {
+        if (!g_ms_fbo) { p_glGenFramebuffers(1, &g_ms_fbo); p_glGenRenderbuffers(2, g_ms_rb); }
+        p_glBindRenderbuffer(GL_RENDERBUFFER, g_ms_rb[0]);
+        p_glRenderbufferStorageMultisample(GL_RENDERBUFFER, g_samples, GL_RGBA8, w, EFB_H);
+        p_glBindRenderbuffer(GL_RENDERBUFFER, g_ms_rb[1]);
+        p_glRenderbufferStorageMultisample(GL_RENDERBUFFER, g_samples, GL_DEPTH_COMPONENT24, w, EFB_H);
+        p_glBindFramebuffer(GL_FRAMEBUFFER, g_ms_fbo);
+        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, g_ms_rb[0]);
+        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, g_ms_rb[1]);
+        if (p_glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            rt_log("[gl] %dx anti-aliasing not supported here: off", g_samples);
+            g_samples = g_max_samples = 1;  /* not tried again this run */
+        } else
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    }
+    p_glBindFramebuffer(GL_FRAMEBUFFER, DRAW_FBO);
+    rt_log("[gl] EFB %d x %d (wide x%.3f, %dx resolution, MSAA %dx)", w, EFB_H, k, g_sc, g_samples);
+    g_efb_k = k;
+}
+
+/* the multisampled EFB into the EFB textures (copies and the picture read those) */
+static void efb_resolve(void) {
+    if (g_samples <= 1) return;
+    int w = efb_w(g_efb_k);
+    p_glBindFramebuffer(GL_READ_FRAMEBUFFER, g_ms_fbo);
+    p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_fbo);
+    glDisable(GL_SCISSOR_TEST);
+    p_glBlitFramebuffer(0, 0, w, EFB_H, 0, 0, w, EFB_H, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+}
+
+/* a new internal resolution: the copy textures (made at the old one) are scaled into new ones, so a picture
+ * the game copied once (menus) stays */
+static void rescale_copies(int sc) {
+    static GLuint read_fbo;
+    if (!read_fbo) p_glGenFramebuffers(1, &read_fbo);
+    glDisable(GL_SCISSOR_TEST);
+    glColorMask(1, 1, 1, 1);
+    for (int id = 0; id < g_gltex_cap; id++) {
+        GxTexture* t = g_gltex[id] ? gx_texture_get(id) : NULL;
+        if (!t || !t->is_copy) continue;
+        GLuint n;
+        glGenTextures(1, &n);
+        glBindTexture(GL_TEXTURE_2D, n);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)(t->width * sc), (GLsizei)(t->height * sc), 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, NULL);
+        p_glBindFramebuffer(GL_READ_FRAMEBUFFER, read_fbo);
+        p_glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_gltex[id], 0);
+        p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_copy_fbo);
+        p_glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, n, 0);
+        p_glBlitFramebuffer(0, 0, (GLint)(t->width * g_sc), (GLint)(t->height * g_sc), 0, 0, (GLint)(t->width * sc),
+                            (GLint)(t->height * sc), GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        glDeleteTextures(1, &g_gltex[id]);
+        g_gltex[id] = n;
+    }
+}
+
+/* the F1 menu's resolution / anti-aliasing: applied at the start of a frame (the EFB is made again) */
+static void efb_config(void) {
+    int sc = g_settings.pc_scale, ms = g_settings.msaa;
+    if (sc < PC_SCALE_MIN) sc = 2;
+    if (sc > PC_SCALE_MAX) sc = PC_SCALE_MAX;
+    if (ms > g_max_samples) ms = g_max_samples;
+    if (ms < 1) ms = 1;
+    if (sc == g_sc && ms == g_samples) return;
+    if (sc != g_sc) rescale_copies(sc);
+    g_sc = sc;
+    g_samples = ms;
+    g_efb_k = 0.0f;  /* efb_resize next */
+}
+
+static void gl_setup(void) {
+#define LOAD(t, n) if (!(p_##n = (t)SDL_GL_GetProcAddress(#n))) rt_fatal("missing GL function " #n);
+    GLFUNCS(LOAD)
+#undef LOAD
+    rt_log("[gl] %s / %s", glGetString(GL_RENDERER), glGetString(GL_VERSION));
+    GLuint vs = compile(GL_VERTEX_SHADER, k_gx_vert_glsl), fs = compile(GL_FRAGMENT_SHADER, k_gx_frag_glsl);
+    g_prog = p_glCreateProgram();
+    p_glAttachShader(g_prog, vs);
+    p_glAttachShader(g_prog, fs);
+    for (int i = 0; i < 10; i++) p_glBindAttribLocation(g_prog, (GLuint)i, k_attrs[i]);
+    p_glLinkProgram(g_prog);
+    GLint ok;
+    p_glGetProgramiv(g_prog, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[4096];
+        p_glGetProgramInfoLog(g_prog, sizeof log, NULL, log);
+        rt_fatal("shader link error:\n%s", log);
+    }
+    p_glUseProgram(g_prog);
+    p_glUniformBlockBinding(g_prog, p_glGetUniformBlockIndex(g_prog, "GX"), 0);
+    p_glUniformBlockBinding(g_prog, p_glGetUniformBlockIndex(g_prog, "GXT"), 1);
+    for (int i = 0; i < 8; i++) {
+        char n[16];
+        snprintf(n, sizeof n, "u_tex%d", i);
+        p_glUniform1i(p_glGetUniformLocation(g_prog, n), i);
+    }
+    p_glUniform1i(p_glGetUniformLocation(g_prog, "u_xfm"), XFM_UNIT);
+    /* SR_SHOWALPHA: every pixel shows the TEV alpha as gray (debugging see-through surfaces) */
+    p_glUniform1i(p_glGetUniformLocation(g_prog, "u_show_alpha"), getenv("SR_SHOWALPHA") != NULL);
+    /* SR_TEVDEBUG: 1 = lit colour 0 only, 2 = stage 1's texture sample only, 3 = stage 0 only, 6 = stage 1 coordinates as colour, 7 = old specular direction, 8 = lit colour 1 only, 9 = no fog, 10 = fog amount, 11 = fog inputs (depth, B, A), cycle[:a,b..] = by frame (debugging) */
+    p_glUniform1i(p_glGetUniformLocation(g_prog, "u_tev_debug"), getenv("SR_TEVDEBUG") ? atoi(getenv("SR_TEVDEBUG")) : 0);
+    p_glGenBuffers(1, &g_xfm_buf);
+    glGenTextures(1, &g_xfm_tex);
+    glGetIntegerv(0x8A34 /* GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT */, &g_ubo_align);
+    p_glGenVertexArrays(1, &g_vao);
+    p_glBindVertexArray(g_vao);
+    p_glGenBuffers(1, &g_vbo);
+    p_glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
+    const struct { int n; size_t off; } layout[10] = {
+        {4, offsetof(GxVertex, pos)}, {4, offsetof(GxVertex, nrm)}, {4, offsetof(GxVertex, col[0])},
+        {4, offsetof(GxVertex, col[1])}, {4, offsetof(GxVertex, tex[0])}, {4, offsetof(GxVertex, tex[2])},
+        {4, offsetof(GxVertex, tex[4])}, {4, offsetof(GxVertex, tex[6])}, {4, offsetof(GxVertex, tmtx[0])},
+        {4, offsetof(GxVertex, tmtx[4])}};
+    for (int i = 0; i < 10; i++) {
+        p_glEnableVertexAttribArray((GLuint)i);
+        p_glVertexAttribPointer((GLuint)i, layout[i].n, GL_FLOAT, GL_FALSE, sizeof(GxVertex), (void*)layout[i].off);
+    }
+    p_glGenBuffers(1, &g_ubo);
+    p_glGenBuffers(1, &g_ubo_xt);
+    p_glGenBuffers(1, &g_ibo);
+    /* the EFB */
+    glGenTextures(1, &g_efb_color);
+    glGenTextures(1, &g_efb_depth);
+    p_glGenFramebuffers(1, &g_fbo);
+    glGetIntegerv(GL_MAX_SAMPLES, &g_max_samples);
+    if (g_max_samples < 1) g_max_samples = 1;
+    const char* e;
+    if ((e = getenv("SR_SCALE")) && *e) g_settings.pc_scale = atoi(e);  /* tests: internal resolution */
+    if ((e = getenv("SR_MSAA")) && *e) g_settings.msaa = atoi(e);      /* tests: anti-aliasing samples */
+    if ((e = getenv("SR_CHARLIGHT")) && *e) g_settings.char_light = atoi(e) != 0;  /* tests: per-pixel lighting */
+    efb_config();
+    efb_resize(1.0f);
+    p_glGenFramebuffers(1, &g_copy_fbo);
+}
+
+/* ---- textures ---- */
+static GLuint gl_texture(int id) {
+    GxTexture* t = gx_texture_get(id);
+    if (!t) return 0;
+    if (id >= g_gltex_cap) {
+        int n = g_gltex_cap ? g_gltex_cap : 1024;
+        while (n <= id) n *= 2;
+        g_gltex = realloc(g_gltex, n * sizeof *g_gltex);
+        g_gltex_gen = realloc(g_gltex_gen, n * sizeof *g_gltex_gen);
+        memset(g_gltex + g_gltex_cap, 0, (n - g_gltex_cap) * sizeof *g_gltex);
+        memset(g_gltex_gen + g_gltex_cap, 0xFF, (n - g_gltex_cap) * sizeof *g_gltex_gen);
+        g_gltex_cap = n;
+    }
+    if (!g_gltex[id]) {
+        glGenTextures(1, &g_gltex[id]);
+        glBindTexture(GL_TEXTURE_2D, g_gltex[id]);
+        if (t->is_copy)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)(t->width * EFB_SCALE), (GLsizei)(t->height * EFB_SCALE), 0,
+                         GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        g_gltex_gen[id] = t->is_copy ? t->gen : 0xFFFFFFFFu;
+    }
+    if (!t->is_copy && g_gltex_gen[id] != t->gen) {
+        glBindTexture(GL_TEXTURE_2D, g_gltex[id]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)t->width, (GLsizei)t->height, 0, GL_RGBA, GL_UNSIGNED_BYTE, t->rgba);
+        g_gltex_gen[id] = t->gen;
+    }
+    return g_gltex[id];
+}
+
+static GLint wrap_mode(uint32_t w) { return w == 0 ? GL_CLAMP_TO_EDGE : w == 2 ? GL_MIRRORED_REPEAT : GL_REPEAT; }
+
+static void bind_textures(const GxCmd* c, const GxUniforms* u) {
+    for (int m = 0; m < 8; m++) {
+        p_glActiveTexture(GL_TEXTURE0 + m);
+        GLuint t = c->tex[m] >= 0 ? gl_texture(c->tex[m]) : 0;
+        glBindTexture(GL_TEXTURE_2D, t);
+        if (!t) continue;
+        uint32_t mode0 = u->bp[(m >= 4 ? 0xA0 : 0x80) + (m & 3)];
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap_mode(mode0 & 3));
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap_mode((mode0 >> 2) & 3));
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (mode0 >> 4) & 1 ? GL_LINEAR : GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, ((mode0 >> 5) & 7) >= 4 ? GL_LINEAR : GL_NEAREST);
+    }
+    p_glActiveTexture(GL_TEXTURE0);
+}
+
+/* ---- pipeline state from BP/XF ---- */
+static float f32(uint32_t u) { float f; memcpy(&f, &u, 4); return f; }
+
+static int g_debug_frame;
+
+static void apply_state(const GxUniforms* u) {
+    /* viewport (XF) and scissor (BP), relative to the scissor offset */
+    float xs = f32(u->xfr[0x1A]), ys = f32(u->xfr[0x1B]), xo = f32(u->xfr[0x1D]), yo = f32(u->xfr[0x1E]);
+    int sox = (int)(u->bp[0x59] & 0x3FF) * 2, soy = (int)((u->bp[0x59] >> 10) & 0x3FF) * 2;
+    if (g_debug_frame)
+        rt_log("[gxdbg] viewport scale %.1f %.1f off %.1f %.1f | scissor %08X %08X off %d %d | proj %u P0 %g P2 %g", xs, ys,
+               xo, yo, u->bp[0x20], u->bp[0x21], sox, soy, u->xfr[0x26], f32(u->xfr[0x20]), f32(u->xfr[0x22]));
+    float vx = xo - (xs < 0 ? -xs : xs) - (float)sox, vy = yo - (ys < 0 ? -ys : ys) - (float)soy;
+    float k = g_wide_k;
+    glViewport((GLint)(vx * k * EFB_SCALE), (GLint)(vy * EFB_SCALE), (GLsizei)(2 * (xs < 0 ? -xs : xs) * k * EFB_SCALE),
+               (GLsizei)(2 * (ys < 0 ? -ys : ys) * EFB_SCALE));
+    int x0 = (int)((u->bp[0x20] >> 12) & 0x7FF) - sox, y0 = (int)(u->bp[0x20] & 0x7FF) - soy;
+    int x1 = (int)((u->bp[0x21] >> 12) & 0x7FF) - sox + 1, y1 = (int)(u->bp[0x21] & 0x7FF) - soy + 1;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(wx(x0), y0 * EFB_SCALE, x1 > x0 ? wx(x1) - wx(x0) : 0, (y1 > y0 ? y1 - y0 : 0) * EFB_SCALE);
+    /* depth */
+    uint32_t z = u->bp[0x40];
+    static const GLenum zf[8] = {GL_NEVER, GL_LESS, GL_EQUAL, GL_LEQUAL, GL_GREATER, GL_NOTEQUAL, GL_GEQUAL, GL_ALWAYS};
+    if (z & 1) { glEnable(GL_DEPTH_TEST); glDepthFunc(zf[(z >> 1) & 7]); } else glDisable(GL_DEPTH_TEST);
+    glDepthMask((z >> 4) & 1 ? GL_TRUE : GL_FALSE);
+    /* blending and write masks */
+    uint32_t cm = u->bp[0x41];
+    /* source alpha = the shader's second output (the TEV alpha; the first carries the stored alpha,
+     * which BP 0x42 can make a constant); destination alpha reads 1 when the EFB format has none */
+    enum { SRC1_ALPHA = 0x8589, ONE_MINUS_SRC1_ALPHA = 0x88FB };
+    int efb_alpha = (u->bp[0x43] & 7) == 1;  /* RGBA6_Z24 */
+    const GLenum sf[8] = {GL_ZERO, GL_ONE, GL_DST_COLOR, GL_ONE_MINUS_DST_COLOR, SRC1_ALPHA, ONE_MINUS_SRC1_ALPHA,
+                          efb_alpha ? GL_DST_ALPHA : GL_ONE, efb_alpha ? GL_ONE_MINUS_DST_ALPHA : GL_ZERO};
+    const GLenum df[8] = {GL_ZERO, GL_ONE, GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR, SRC1_ALPHA, ONE_MINUS_SRC1_ALPHA,
+                          efb_alpha ? GL_DST_ALPHA : GL_ONE, efb_alpha ? GL_ONE_MINUS_DST_ALPHA : GL_ZERO};
+    int const_alpha = (u->bp[0x42] >> 8) & 1;  /* the stored alpha is the constant: written as is */
+    static int no_ab = -1;  /* SR_NOALPHABLEND: depth-writing src-alpha blends drawn opaque (debugging) */
+    if (no_ab < 0) no_ab = getenv("SR_NOALPHABLEND") != NULL;
+    if (no_ab && (cm & 1) && ((cm >> 8) & 7) == 4 && ((cm >> 5) & 7) == 5 && ((z >> 4) & 1)) cm &= ~1u;
+    if (cm & 1) {
+        glEnable(GL_BLEND);
+        if ((cm >> 11) & 1) { p_glBlendEquation(0x800B /* GL_FUNC_REVERSE_SUBTRACT */); glBlendFunc(GL_ONE, GL_ONE); }
+        else {
+            p_glBlendEquation(0x8006 /* GL_FUNC_ADD */);
+            GLenum s = sf[(cm >> 8) & 7], d = df[(cm >> 5) & 7];
+            p_glBlendFuncSeparate(s, d, const_alpha ? GL_ONE : s, const_alpha ? GL_ZERO : d);
+        }
+    } else {
+        glDisable(GL_BLEND);
+    }
+    GLboolean cu = (cm >> 3) & 1, au = (cm >> 4) & 1;
+    glColorMask(cu, cu, cu, au);
+    /* culling: GX front faces are clockwise on screen (checked against the vertex normals of a race
+     * frame); the EFB is stored top row first, upside down in GL's window space, where they turn
+     * counter-clockwise */
+    uint32_t cull = (u->bp[0x00] >> 14) & 3;
+    if (cull == 0) glDisable(GL_CULL_FACE);
+    else { glEnable(GL_CULL_FACE); glFrontFace(GL_CCW); glCullFace(cull == 1 ? GL_BACK : cull == 2 ? GL_FRONT : GL_FRONT_AND_BACK); }
+}
+
+/* ---- EFB copies and presentation ---- */
+static void save_png(const char* path, int w, int h, const uint8_t* rgba);
+
+/* ---- the settings menu / FPS counter (overlay.h), over the whole window ---- */
+static GLuint g_ov_prog, g_ov_tex;
+static unsigned g_ov_version = ~0u;
+
+static void draw_overlay(int ww, int wh) {
+    unsigned version;
+    const uint8_t* img = overlay_image(&version, NULL);
+    if (!img) return;
+    if (!g_ov_prog) {
+        g_ov_prog = p_glCreateProgram();
+        p_glAttachShader(g_ov_prog, compile(GL_VERTEX_SHADER, k_overlay_vert_glsl));
+        p_glAttachShader(g_ov_prog, compile(GL_FRAGMENT_SHADER, k_overlay_frag_glsl));
+        p_glLinkProgram(g_ov_prog);
+        glGenTextures(1, &g_ov_tex);
+        glBindTexture(GL_TEXTURE_2D, g_ov_tex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
+    p_glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, g_ov_tex);
+    if (version != g_ov_version) {
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, OVERLAY_W, OVERLAY_H, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
+        g_ov_version = version;
+    }
+    p_glUseProgram(g_ov_prog);
+    {
+        /* the overlay is a 16:9 picture (the menu's layout): centred, not stretched over a 4:3 window */
+        int vw = ww, vh = ww * 9 / 16;
+        if (vh > wh) vh = wh, vw = wh * 16 / 9;
+        glViewport((ww - vw) / 2, (wh - vh) / 2, vw, vh);
+    }
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glColorMask(1, 1, 1, 1);
+    glEnable(GL_BLEND);
+    p_glBlendEquation(0x8006 /* GL_FUNC_ADD */);
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);  /* premultiplied alpha (menu_raster.cpp) */
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    p_glUseProgram(g_prog);  /* the GX state is set again by the next state command (apply_state) */
+}
+
+static int fsr_present(int sx, int sy, int sw, int sh, int dx, int dy, int dw, int dh);
+
+/* EFB copy target formats (BP 0x52 bits 4-6, bit 3 the high bit) without alpha: RGB565 */
+static int copy_format_opaque(uint32_t exec) { return (((exec >> 4) & 7) | ((exec >> 3) & 1) << 3) == 4; }
+
+static void efb_copy(const GxCmd* c, const GxUniforms* u) {
+    int x = (int)c->copy[0], y = (int)c->copy[1], w = (int)c->copy[2], h = (int)c->copy[3];
+    if (g_debug_frame)
+        rt_log("[gxdbg] copy %d,%d %dx%d xfb %u clear %u dest %08X exec %06X", x, y, w, h, c->copy[4], c->copy[5], c->copy[10],
+               c->copy[9]);
+    efb_resolve();
+    p_glBindFramebuffer(GL_READ_FRAMEBUFFER, g_fbo);
+    glDisable(GL_SCISSOR_TEST);
+    if (c->copy[4]) {  /* to the XFB: show it */
+        if (!g_headless) {
+            int ww, wh;
+            SDL_GetWindowSize(g_win, &ww, &wh);
+            if (ww <= 0 || wh <= 0) { ww = 1280; wh = 960; }
+            settings_set_window_aspect((float)ww / (float)wh);  /* the fit mode (next frame) */
+            pres_target(ww, wh);
+            glColorMask(1, 1, 1, 1);
+            glClearColor(0, 0, 0, 1);
+            glClear(GL_COLOR_BUFFER_BIT);
+            /* the picture at the chosen aspect (settings.h), centred; the EFB is stored top row first:
+             * flip while blitting to the window */
+            float aspect = g_wide_k > 1.0f ? 4.0f / 3.0f * g_wide_k : settings_display_aspect();
+            int sy = y, sh = h;
+            if (c->copy[11]) {  /* online: this player's part of a split screen (gx_render.c), same scale both ways */
+                sy = y + (int)(c->copy[11] >> 16), sh = (int)(c->copy[11] & 0xFFFF);
+                aspect *= (float)h / (float)sh;
+            }
+            int dw = ww, dh = wh;
+            if ((float)ww > (float)wh * aspect) dw = (int)((float)wh * aspect + 0.5f);
+            else dh = (int)((float)ww / aspect + 0.5f);
+            int dx = (ww - dw) / 2, dy = (wh - dh) / 2;
+            if (!fsr_present(wx(x), sy * EFB_SCALE, wx(x + w) - wx(x), sh * EFB_SCALE, dx, dy, dw, dh))
+                p_glBlitFramebuffer(wx(x), sy * EFB_SCALE, wx(x + w), (sy + sh) * EFB_SCALE, dx, dy + dh, dx + dw, dy,
+                                    GL_COLOR_BUFFER_BIT, GL_LINEAR);
+            /* the menu's "Save screenshot": the game's picture without the menu on top (read before the
+             * overlay is drawn; the user's first shots showed the settings window over the game) */
+            uint8_t* menu_px = NULL;
+            if (g_same_k < 0 && overlay_take_screenshot_request()) {
+                menu_px = malloc((size_t)ww * wh * 4);
+                p_glBindFramebuffer(GL_READ_FRAMEBUFFER, g_pres_fbo);
+                glReadPixels(0, 0, ww, wh, GL_RGBA, GL_UNSIGNED_BYTE, menu_px);
+            }
+            draw_overlay(ww, wh);
+            if (g_same_k >= 0) {  /* SR_SKIPSAME: a repeat of this frame; saved, not counted */
+                uint8_t* px = malloc((size_t)ww * wh * 4);
+                p_glBindFramebuffer(GL_READ_FRAMEBUFFER, g_pres_fbo);
+                glReadPixels(0, 0, ww, wh, GL_RGBA, GL_UNSIGNED_BYTE, px);
+                for (size_t k = 3; k < (size_t)ww * wh * 4; k += 4) px[k] = 255;
+                char path[64];
+                snprintf(path, sizeof path, "build/same_%u_%02d.png", g_presented + 1, g_same_k);
+                save_png(path, ww, wh, px);
+                free(px);
+                goto presented;
+            }
+            g_presented++;
+            int menu_shot = menu_px != NULL;
+            int listed = 0;
+            for (int k = 0; k < g_nshots; k++) listed |= g_presented == (unsigned)g_shot_list[k];
+            if (listed) g_shot_at = (int)g_presented;
+            if (menu_shot || (g_shot_at && g_presented == (unsigned)g_shot_at)) {
+                uint8_t* px = menu_px;
+                if (!px) {
+                    px = malloc((size_t)ww * wh * 4);
+                    p_glBindFramebuffer(GL_READ_FRAMEBUFFER, g_pres_fbo);
+                    glReadPixels(0, 0, ww, wh, GL_RGBA, GL_UNSIGNED_BYTE, px);
+                }
+                /* opaque: the picture's alpha is the EFB's, and viewers composite it over white */
+                for (size_t k = 3; k < (size_t)ww * wh * 4; k += 4) px[k] = 255;
+                char path[64];
+                snprintf(path, sizeof path, "build/shot_%u.png", menu_shot ? g_presented : (unsigned)g_shot_at);
+                save_png(path, ww, wh, px);
+                free(px);
+                rt_log("[gl] screenshot %s (VI field %u)", path, vi_field_count());
+            }
+            if (!(SDL_GetWindowFlags(g_win) & SDL_WINDOW_MINIMIZED)) {
+                p_glBindFramebuffer(GL_READ_FRAMEBUFFER, g_pres_fbo);
+                p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+                p_glBlitFramebuffer(0, 0, ww, wh, 0, 0, ww, wh, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+            }
+            SDL_GL_SwapWindow(g_win);
+        presented:;
+        }
+    } else if ((int)c->copy[8] >= 0) {  /* to a texture: render-to-texture */
+        GxTexture* t = gx_texture_get((int)c->copy[8]);
+        GLuint tex = gl_texture((int)c->copy[8]);
+        if (t && tex) {
+            p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_copy_fbo);
+            p_glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+            glColorMask(1, 1, 1, 1);
+            p_glBlitFramebuffer(wx(x), y * EFB_SCALE, wx(x + w), (y + h) * EFB_SCALE, 0, 0,
+                                (GLint)(t->width * EFB_SCALE), (GLint)(t->height * EFB_SCALE), GL_COLOR_BUFFER_BIT, GL_LINEAR);
+            if (copy_format_opaque(c->copy[9])) {  /* the target format has no alpha: it samples as 1 */
+                glColorMask(0, 0, 0, 1);
+                glClearColor(0, 0, 0, 1);
+                glClear(GL_COLOR_BUFFER_BIT);
+                glColorMask(1, 1, 1, 1);
+            }
+        }
+    }
+    p_glBindFramebuffer(GL_FRAMEBUFFER, DRAW_FBO);
+    if (c->copy[5]) {  /* clear the copied rectangle */
+        uint32_t argb = c->copy[6];
+        uint32_t cm = u->bp[0x41];
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(wx(x), y * EFB_SCALE, wx(x + w) - wx(x), h * EFB_SCALE);
+        glColorMask((cm >> 3) & 1, (cm >> 3) & 1, (cm >> 3) & 1, (cm >> 4) & 1);
+        glDepthMask((u->bp[0x40] >> 4) & 1 ? GL_TRUE : GL_FALSE);
+        glClearColor(((argb >> 16) & 255) / 255.0f, ((argb >> 8) & 255) / 255.0f, (argb & 255) / 255.0f, (argb >> 24) / 255.0f);
+        glClearDepth((double)c->copy[7] / 16777215.0);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    }
+}
+
+/* ---- bloom and colour grading (PC only; settings bloom / grade_*) ----
+ * Run on the EFB right after the last 3D (perspective) draw before each picture (XFB copy), so the HUD and
+ * menus drawn after it stay as the game drew them. Bloom: the bright parts of a small copy of the picture
+ * (a mip level: small highlights do not flicker), blurred at 1/4 and 1/8 of the native size (the same look at
+ * every internal resolution), mixed back as a screen blend. Grading: exposure, contrast, saturation, warmth.
+ * The EFB alpha is kept (the game blends with it later). */
+static const char k_post_vert[] =
+    "out vec2 v_uv;\n"
+    "void main() {\n"
+    "  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n"
+    "  v_uv = p;\n"
+    "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+    "}\n";
+static const char k_post_bright[] =
+    "in vec2 v_uv; out vec4 o; uniform sampler2D u_tex; uniform float u_lod;\n"
+    "void main() {\n"
+    "  vec3 c = textureLod(u_tex, v_uv, u_lod).rgb;\n"
+    "  float k = clamp((max(c.r, max(c.g, c.b)) - 0.5) / 0.5, 0.0, 1.0);\n"
+    "  o = vec4(c * k * k, 1.0);\n"
+    "}\n";
+static const char k_post_blur[] =  /* 9-tap Gaussian in 5 linear fetches */
+    "in vec2 v_uv; out vec4 o; uniform sampler2D u_tex; uniform vec2 u_dir;\n"
+    "void main() {\n"
+    "  vec3 c = texture(u_tex, v_uv).rgb * 0.2270270;\n"
+    "  c += (texture(u_tex, v_uv + u_dir * 1.3846154).rgb + texture(u_tex, v_uv - u_dir * 1.3846154).rgb) * 0.3162162;\n"
+    "  c += (texture(u_tex, v_uv + u_dir * 3.2307692).rgb + texture(u_tex, v_uv - u_dir * 3.2307692).rgb) * 0.0702703;\n"
+    "  o = vec4(c, 1.0);\n"
+    "}\n";
+static const char k_post_comp[] =
+    "in vec2 v_uv; out vec4 o;\n"
+    "uniform sampler2D u_scene, u_b0, u_b1; uniform float u_bloom; uniform vec4 u_grade;\n"
+    "void main() {\n"
+    "  vec4 s = textureLod(u_scene, v_uv, 0.0);\n"
+    "  vec3 b = clamp(u_bloom * (texture(u_b0, v_uv).rgb + texture(u_b1, v_uv).rgb), 0.0, 1.0);\n"
+    "  vec3 c = 1.0 - (1.0 - s.rgb) * (1.0 - b);\n"
+    "  c *= u_grade.x;\n"
+    "  c = (c - 0.5) * u_grade.y + 0.5;\n"
+    "  float l = dot(c, vec3(0.2126, 0.7152, 0.0722));\n"
+    "  c = mix(vec3(l), c, u_grade.z);\n"
+    "  c *= vec3(1.0 + u_grade.w, 1.0, 1.0 - u_grade.w);\n"
+    "  o = vec4(clamp(c, 0.0, 1.0), s.a);\n"
+    "}\n";
+enum { PP_BRIGHT, PP_BLUR, PP_COMP, PP_N };
+static GLuint g_pp_prog[PP_N], g_pp_vao, g_scene_tex, g_scene_fbo, g_bl_tex[4], g_bl_fbo[4];
+static int g_scene_w, g_scene_h, g_bl_w[2], g_bl_h[2];
+
+static int post_wanted(void) {
+    return g_settings.bloom > 0 || g_settings.grade_bright != 0 || g_settings.grade_contrast != 100 ||
+           g_settings.grade_sat != 100 || g_settings.grade_warm != 0;
+}
+
+static void pp_target(GLuint tex, GLuint fbo, int w, int h, int mips) {
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    if (mips) p_glGenerateMipmap(GL_TEXTURE_2D);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, mips ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+}
+
+/* one full-target pass of program prog reading tex (unit 0) */
+static void pp_pass(int prog, GLuint tex, GLuint fbo, int w, int h, float dx, float dy) {
+    p_glUseProgram(g_pp_prog[prog]);
+    if (prog == PP_BLUR) p_glUniform2f(p_glGetUniformLocation(g_pp_prog[prog], "u_dir"), dx, dy);
+    p_glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glViewport(0, 0, w, h);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+}
+
+/* one full-target pass of an already set up program reading tex (unit 0) */
+static void pp_pass_prog(GLuint prog, GLuint tex, GLuint fbo, int w, int h) {
+    p_glUseProgram(prog);
+    p_glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glViewport(0, 0, w, h);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+}
+
+static void post_process(void) {
+    int w = efb_w(g_efb_k), h = EFB_H;
+    if (!g_pp_vao) {
+        static const char* const fs[PP_N] = {k_post_bright, k_post_blur, k_post_comp};
+        for (int i = 0; i < PP_N; i++) {
+            g_pp_prog[i] = p_glCreateProgram();
+            p_glAttachShader(g_pp_prog[i], compile(GL_VERTEX_SHADER, k_post_vert));
+            p_glAttachShader(g_pp_prog[i], compile(GL_FRAGMENT_SHADER, fs[i]));
+            p_glLinkProgram(g_pp_prog[i]);
+            GLint ok;
+            p_glGetProgramiv(g_pp_prog[i], GL_LINK_STATUS, &ok);
+            if (!ok) rt_fatal("post-process shader link error");
+            p_glUseProgram(g_pp_prog[i]);
+            p_glUniform1i(p_glGetUniformLocation(g_pp_prog[i], "u_tex"), 0);
+        }
+        p_glUseProgram(g_pp_prog[PP_COMP]);
+        p_glUniform1i(p_glGetUniformLocation(g_pp_prog[PP_COMP], "u_scene"), 0);
+        p_glUniform1i(p_glGetUniformLocation(g_pp_prog[PP_COMP], "u_b0"), 1);
+        p_glUniform1i(p_glGetUniformLocation(g_pp_prog[PP_COMP], "u_b1"), 2);
+        p_glGenVertexArrays(1, &g_pp_vao);
+        glGenTextures(1, &g_scene_tex);
+        p_glGenFramebuffers(1, &g_scene_fbo);
+        glGenTextures(4, g_bl_tex);
+        p_glGenFramebuffers(4, g_bl_fbo);
+    }
+    if (w != g_scene_w || h != g_scene_h) {
+        g_scene_w = w, g_scene_h = h;
+        pp_target(g_scene_tex, g_scene_fbo, w, h, 1);
+        for (int l = 0; l < 2; l++) {  /* 1/4 and 1/8 of the native 640 x k by 528 */
+            g_bl_w[l] = w / g_sc / (4 << l), g_bl_h[l] = h / g_sc / (4 << l);
+            pp_target(g_bl_tex[2 * l], g_bl_fbo[2 * l], g_bl_w[l], g_bl_h[l], 0);
+            pp_target(g_bl_tex[2 * l + 1], g_bl_fbo[2 * l + 1], g_bl_w[l], g_bl_h[l], 0);
+        }
+    }
+    efb_resolve();
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glDisable(GL_CULL_FACE);
+    glDepthMask(GL_FALSE);
+    glColorMask(1, 1, 1, 1);
+    p_glBindFramebuffer(GL_READ_FRAMEBUFFER, g_fbo);  /* the picture so far */
+    p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_scene_fbo);
+    p_glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    p_glBindVertexArray(g_pp_vao);
+    float bloom = g_in_race ? (float)g_settings.bloom / 100.0f : 0.0f;  /* character select went almost white */
+    if (bloom > 0.0f) {
+        glBindTexture(GL_TEXTURE_2D, g_scene_tex);
+        p_glGenerateMipmap(GL_TEXTURE_2D);
+        p_glUseProgram(g_pp_prog[PP_BRIGHT]);
+        p_glUniform1f(p_glGetUniformLocation(g_pp_prog[PP_BRIGHT], "u_lod"), log2f((float)w / (float)g_bl_w[0]) - 1.0f);
+        pp_pass(PP_BRIGHT, g_scene_tex, g_bl_fbo[0], g_bl_w[0], g_bl_h[0], 0, 0);
+        for (int l = 0; l < 2; l++) {
+            GLuint* t = &g_bl_tex[2 * l];
+            GLuint* fb = &g_bl_fbo[2 * l];
+            if (l) pp_pass(PP_BLUR, g_bl_tex[0], fb[0], g_bl_w[1], g_bl_h[1], 0, 0);  /* the 1/8 level from the 1/4 */
+            for (int k = 0; k < 2; k++) {  /* two rounds: wider glow */
+                pp_pass(PP_BLUR, t[0], fb[1], g_bl_w[l], g_bl_h[l], 1.0f / (float)g_bl_w[l], 0);
+                pp_pass(PP_BLUR, t[1], fb[0], g_bl_w[l], g_bl_h[l], 0, 1.0f / (float)g_bl_h[l]);
+            }
+        }
+    }
+    p_glUseProgram(g_pp_prog[PP_COMP]);
+    p_glUniform1f(p_glGetUniformLocation(g_pp_prog[PP_COMP], "u_bloom"), bloom * 0.72f);  /* 100% = the first build's 45% (above was too much) */
+    p_glUniform4f(p_glGetUniformLocation(g_pp_prog[PP_COMP], "u_grade"), exp2f((float)g_settings.grade_bright / 100.0f),
+                  (float)g_settings.grade_contrast / 100.0f, (float)g_settings.grade_sat / 100.0f,
+                  (float)g_settings.grade_warm / 50.0f * 0.16f);
+    p_glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, g_bl_tex[0]);
+    p_glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, g_bl_tex[2]);
+    p_glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, g_scene_tex);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, DRAW_FBO);
+    glViewport(0, 0, w, h);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    /* back to the game's state (the caller applies the draw state) */
+    p_glUseProgram(g_prog);
+    p_glBindVertexArray(g_vao);
+}
+
+/* ---- FSR 1 on the presented picture (PC only; setting sharpness, fsr1_gl.h) ----
+ * With sharpness above 0 the picture goes to the window in up to three steps instead of one linear blit: the
+ * shown part of the EFB is copied upright into a texture; EASU scales it to the window's picture size when that
+ * is bigger (a smaller window: a linear blit); RCAS sharpens it into the window. The HUD is part of the EFB, so
+ * it is scaled and sharpened too. Returns 0 when off (the caller blits as before). */
+static GLuint g_fsr_prog[2], g_fsr_vao, g_fsr_tex[2], g_fsr_fbo[2];
+static int g_fsr_w[2], g_fsr_h[2];
+static GLint g_fsr_loc[2][3];
+
+static void fsr_target(int t, int w, int h) {
+    if (w == g_fsr_w[t] && h == g_fsr_h[t]) return;
+    g_fsr_w[t] = w, g_fsr_h[t] = h;
+    pp_target(g_fsr_tex[t], g_fsr_fbo[t], w, h, 0);
+}
+
+static int fsr_present(int sx, int sy, int sw, int sh, int dx, int dy, int dw, int dh) {
+    if (g_settings.sharpness <= 0 || sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return 0;
+    if (!g_fsr_vao) {
+        static const char* const fs[2] = {k_fsr_easu, k_fsr_rcas};
+        for (int i = 0; i < 2; i++) {
+            g_fsr_prog[i] = p_glCreateProgram();
+            p_glAttachShader(g_fsr_prog[i], compile(GL_VERTEX_SHADER, k_post_vert));
+            p_glAttachShader(g_fsr_prog[i], compile(GL_FRAGMENT_SHADER, fs[i]));
+            p_glLinkProgram(g_fsr_prog[i]);
+            GLint ok;
+            p_glGetProgramiv(g_fsr_prog[i], GL_LINK_STATUS, &ok);
+            if (!ok) rt_fatal("FSR shader link error");
+            p_glUseProgram(g_fsr_prog[i]);
+            p_glUniform1i(p_glGetUniformLocation(g_fsr_prog[i], "u_tex"), 0);
+            g_fsr_loc[i][0] = p_glGetUniformLocation(g_fsr_prog[i], i ? "u_off" : "u_con");
+            g_fsr_loc[i][1] = p_glGetUniformLocation(g_fsr_prog[i], "u_max");
+            g_fsr_loc[i][2] = p_glGetUniformLocation(g_fsr_prog[i], "u_sharp");
+        }
+        p_glGenVertexArrays(1, &g_fsr_vao);
+        glGenTextures(2, g_fsr_tex);
+        p_glGenFramebuffers(2, g_fsr_fbo);
+        rt_log("[gl] FSR 1 (EASU + RCAS) on the presented picture");
+    }
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glDisable(GL_CULL_FACE);
+    glColorMask(1, 1, 1, 1);
+    /* 1: the shown part of the EFB (the bound read framebuffer, top row first), upright */
+    fsr_target(0, sw, sh);
+    p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_fsr_fbo[0]);
+    p_glBlitFramebuffer(sx, sy, sx + sw, sy + sh, 0, sh, sw, 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    /* 2: at the window's picture size */
+    fsr_target(1, dw, dh);
+    p_glBindVertexArray(g_fsr_vao);
+    p_glActiveTexture(GL_TEXTURE0);
+    if (dw > sw || dh > sh) {
+        float kx = (float)sw / (float)dw, ky = (float)sh / (float)dh;
+        p_glUseProgram(g_fsr_prog[0]);
+        p_glUniform4f(g_fsr_loc[0][0], kx, ky, 0.5f * kx - 0.5f, 0.5f * ky - 0.5f);
+        p_glUniform2i(g_fsr_loc[0][1], sw - 1, sh - 1);
+        pp_pass_prog(g_fsr_prog[0], g_fsr_tex[0], g_fsr_fbo[1], dw, dh);
+    } else {
+        p_glBindFramebuffer(GL_READ_FRAMEBUFFER, g_fsr_fbo[0]);
+        p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_fsr_fbo[1]);
+        p_glBlitFramebuffer(0, 0, sw, sh, 0, 0, dw, dh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    }
+    /* 3: sharpened into the window's picture (100% = AMD's strongest; each 50% less halves it) */
+    p_glUseProgram(g_fsr_prog[1]);
+    p_glUniform2i(g_fsr_loc[1][0], dx, dy);
+    p_glUniform2i(g_fsr_loc[1][1], dw - 1, dh - 1);
+    p_glUniform1f(g_fsr_loc[1][2], exp2f(-(float)(100 - g_settings.sharpness) / 50.0f));
+    glBindTexture(GL_TEXTURE_2D, g_fsr_tex[1]);
+    p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_pres_fbo);
+    glViewport(dx, dy, dw, dh);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    p_glUseProgram(g_prog);
+    p_glBindVertexArray(g_vao);
+    return 1;
+}
+
+/* ---- in-between pictures (setting pc_fps; PC only) ----
+ * The game draws 60 pictures a second (its physics run at a fixed 60 steps). For other picture rates the
+ * render thread keeps the last two game pictures A and B and draws B again with its matrices blended
+ * from A's: at time t after B arrived, the picture shows A + (B - A) * t / (1/60 s), so it is one game
+ * picture behind. Draws are paired by a key (primitive, index count, textures, the position matrices
+ * its vertices use); the k-th draw with a key in B pairs with the k-th in A. Only the matrices a paired
+ * draw uses are blended (position rows 0x000-0x0FF and their normal matrices), and the projection;
+ * texture matrices (scrolling textures would sweep back) and lights stay B's. A matrix that turned
+ * more than a little between A and B (a camera cut, a respawn) stays B's. */
+typedef struct IpDraw { uint64_t key, pmask; uint32_t uni, xt, order; } IpDraw;
+typedef struct IpInfo { IpDraw* d; uint32_t n, cap; } IpInfo;
+static IpInfo g_ip_info[4];             /* per g_frames entry */
+static uint32_t* g_ip_pairs;            /* (B pool word, A pool word) */
+static uint32_t g_ip_npairs, g_ip_cap_pairs;
+static uint32_t* g_ip_upairs;           /* (B state, A state) for the projection */
+static uint32_t g_ip_nupairs, g_ip_cap_upairs;
+static uint8_t* g_ip_mark;              /* B pool words / states already paired */
+static size_t g_ip_cap_mark;
+static uint32_t* g_ip_chunks;           /* B's XF memory chunk pool, blended */
+static size_t g_ip_cap_chunks;
+static const GxFrame* g_ip_a;           /* while drawing an in-between picture: A, and the blend factor */
+static float g_ip_t;
+static int g_ip_on;
+static uint32_t g_ip_matched, g_ip_draws;  /* last pairing: draws paired / B's draws (log) */
+
+static uint64_t ip_hash(uint64_t h, uint64_t v) { return (h ^ v) * 0x100000001B3ull; }
+
+static void ip_frame_info(const GxFrame* f, IpInfo* in) {
+    in->n = 0;
+    uint32_t uni = 0, xt = 0;
+    for (uint32_t i = 0; i < f->ncmds; i++) {
+        const GxCmd* c = &f->cmds[i];
+        if (c->type == GXC_STATE) { uni = c->a, xt = c->b; continue; }
+        if (c->type != GXC_DRAW) continue;
+        uint64_t pm = 0;
+        for (uint32_t k = c->a; k < c->a + c->b && k < f->nidx; k++) {
+            uint32_t vi = f->idx[k];
+            if (vi >= f->nverts) continue;
+            int m = (int)f->verts[vi].pos[3];
+            if (m >= 0 && m < 64) pm |= 1ull << m;
+        }
+        uint64_t h = 0xCBF29CE484222325ull;
+        h = ip_hash(h, c->prim);
+        h = ip_hash(h, c->b);
+        for (int t = 0; t < 8; t++) h = ip_hash(h, (uint32_t)c->tex[t]);
+        h = ip_hash(h, pm);
+        if (in->n == in->cap) in->d = realloc(in->d, (in->cap = in->cap ? in->cap * 2 : 1024) * sizeof *in->d);
+        in->d[in->n] = (IpDraw){h, pm, uni, xt, in->n};
+        in->n++;
+    }
+}
+
+static int ip_cmp(const void* a, const void* b) {
+    const IpDraw *x = a, *y = b;
+    if (x->key != y->key) return x->key < y->key ? -1 : 1;
+    return x->order < y->order ? -1 : x->order > y->order;
+}
+
+static float ip_f(uint32_t w) { float f; memcpy(&f, &w, 4); return f; }
+
+/* one matrix (n words from XF memory word w0) of a paired draw: its pool words, unless it jumped */
+static void ip_pair_words(const GxFrame* a, const GxFrame* b, uint32_t xa, uint32_t xb, uint32_t w0, int n, int rot_check) {
+    uint32_t sa[12], sb[12];
+    if (xa >= a->nxtabs || xb >= b->nxtabs) return;
+    for (int k = 0; k < n; k++) {
+        uint32_t w = w0 + (uint32_t)k, ch = w / GX_XFM_CHUNK, o = w % GX_XFM_CHUNK;
+        if (ch >= GX_XFM_CHUNKS) return;
+        uint32_t pa = a->xtabs[xa].xtab[ch], pb = b->xtabs[xb].xtab[ch];
+        if (pa >= a->nxchunks || pb >= b->nxchunks) return;
+        sa[k] = pa * GX_XFM_CHUNK + o, sb[k] = pb * GX_XFM_CHUNK + o;
+        float fa = ip_f(a->xchunks[sa[k]]), fb = ip_f(b->xchunks[sb[k]]);
+        if (!isfinite(fa) || !isfinite(fb)) return;
+        /* the 3x3 part of a position matrix (not the translation column 3/7/11) */
+        if (rot_check && (k & 3) != 3 && fabsf(fa - fb) > 0.35f * fmaxf(1.0f, fmaxf(fabsf(fa), fabsf(fb)))) return;
+    }
+    for (int k = 0; k < n; k++) {
+        if (g_ip_mark[sb[k]]) continue;
+        g_ip_mark[sb[k]] = 1;
+        if (g_ip_npairs + 2 > g_ip_cap_pairs)
+            g_ip_pairs = realloc(g_ip_pairs, (size_t)(g_ip_cap_pairs = g_ip_cap_pairs ? g_ip_cap_pairs * 2 : 65536) * 4);
+        g_ip_pairs[g_ip_npairs++] = sb[k];
+        g_ip_pairs[g_ip_npairs++] = sa[k];
+    }
+}
+
+/* pair B's draws with A's (once per new game picture) */
+static void ip_match(const GxFrame* a, const IpInfo* ia, const GxFrame* b, const IpInfo* ib) {
+    g_ip_npairs = g_ip_nupairs = 0;
+    g_ip_matched = 0, g_ip_draws = ib->n;
+    size_t need = (size_t)b->nxchunks * GX_XFM_CHUNK + b->nunis + 1;
+    if (need > g_ip_cap_mark) g_ip_mark = realloc(g_ip_mark, g_ip_cap_mark = need * 2);
+    memset(g_ip_mark, 0, need);
+    uint8_t* umark = g_ip_mark + (size_t)b->nxchunks * GX_XFM_CHUNK;
+    /* sorted copies (key, then order) */
+    static IpDraw *sa, *sb;
+    static uint32_t cap_a, cap_b;
+    if (ia->n > cap_a) sa = realloc(sa, (cap_a = ia->n) * sizeof *sa);
+    if (ib->n > cap_b) sb = realloc(sb, (cap_b = ib->n) * sizeof *sb);
+    if (ia->n) memcpy(sa, ia->d, ia->n * sizeof *sa);
+    if (ib->n) memcpy(sb, ib->d, ib->n * sizeof *sb);
+    qsort(sa, ia->n, sizeof *sa, ip_cmp);
+    qsort(sb, ib->n, sizeof *sb, ip_cmp);
+    uint32_t i = 0, j = 0;
+    while (i < ia->n && j < ib->n) {
+        if (sa[i].key < sb[j].key) { i++; continue; }
+        if (sa[i].key > sb[j].key) { j++; continue; }
+        const IpDraw *da = &sa[i++], *db = &sb[j++];
+        g_ip_matched++;
+        for (uint64_t pm = db->pmask; pm; pm &= pm - 1) {
+            int m = __builtin_ctzll(pm);
+            ip_pair_words(a, b, da->xt, db->xt, (uint32_t)m * 4, 12, 1);
+            ip_pair_words(a, b, da->xt, db->xt, 0x400u + (uint32_t)(m & 31) * 3, 9, 0);
+        }
+        if (db->uni < b->nunis && da->uni < a->nunis && !umark[db->uni]) {
+            umark[db->uni] = 1;
+            const uint32_t *ra = a->unis[da->uni].xfr, *rb = b->unis[db->uni].xfr;
+            if (ra[0x26] == rb[0x26]) {
+                if (g_ip_nupairs + 2 > g_ip_cap_upairs)
+                    g_ip_upairs = realloc(g_ip_upairs, (size_t)(g_ip_cap_upairs = g_ip_cap_upairs ? g_ip_cap_upairs * 2 : 4096) * 4);
+                g_ip_upairs[g_ip_nupairs++] = db->uni;
+                g_ip_upairs[g_ip_nupairs++] = da->uni;
+            }
+        }
+    }
+}
+
+static uint32_t ip_lerp(uint32_t a, uint32_t b, float t) {
+    float fa = ip_f(a), fb = ip_f(b), r = fa + (fb - fa) * t;
+    uint32_t w;
+    memcpy(&w, &r, 4);
+    return w;
+}
+
+/* B's chunk pool with the paired words blended (execute uploads this instead) */
+static const uint32_t* ip_chunks(const GxFrame* b) {
+    size_t n = (size_t)b->nxchunks * GX_XFM_CHUNK;
+    if (n > g_ip_cap_chunks) g_ip_chunks = realloc(g_ip_chunks, (g_ip_cap_chunks = n) * 4);
+    if (n) memcpy(g_ip_chunks, b->xchunks, n * 4);
+    for (uint32_t k = 0; k < g_ip_npairs; k += 2)
+        g_ip_chunks[g_ip_pairs[k]] = ip_lerp(g_ip_a->xchunks[g_ip_pairs[k + 1]], b->xchunks[g_ip_pairs[k]], g_ip_t);
+    return g_ip_chunks;
+}
+
+/* the paired states' projection (XF 0x1020-0x1025), blended in the staged copy */
+static void ip_states(uint8_t* staging, size_t stride) {
+    for (uint32_t k = 0; k < g_ip_nupairs; k += 2) {
+        GxUniforms* u = (GxUniforms*)(staging + stride * g_ip_upairs[k]);
+        const uint32_t* ra = g_ip_a->unis[g_ip_upairs[k + 1]].xfr;
+        for (int r = 0x20; r < 0x26; r++) {
+            if (!isfinite(ip_f(ra[r])) || !isfinite(ip_f(u->xfr[r]))) continue;
+            u->xfr[r] = ip_lerp(ra[r], u->xfr[r], g_ip_t);
+        }
+    }
+}
+
+static GxFrame* g_up_frame;  /* whose vertices and indices the buffers hold (in-between pictures reuse them) */
+static void execute(GxFrame* f) {
+    g_wide_k = f->wide_k >= 1.0f ? f->wide_k : 1.0f;
+    g_in_race = f->in_race;
+    {   /* SR_SCALE_AT=<frame>:<scale>[:<msaa>]: change them at that presented frame, as the F1 menu does (tests) */
+        static int at = -1, sc, ms;
+        if (at == -1) {
+            const char* e = getenv("SR_SCALE_AT");
+            at = -2, ms = 0;
+            if (e && sscanf(e, "%d:%d:%d", &at, &sc, &ms) < 2) at = -2;
+        }
+        if (at >= 0 && g_presented >= (unsigned)at) {
+            g_settings.pc_scale = sc;
+            if (ms) g_settings.msaa = ms;
+            rt_log("[gl] SR_SCALE_AT: %dx, MSAA %d at frame %u", sc, g_settings.msaa, g_presented);
+            at = -2;
+        }
+    }
+    efb_config();
+    if (g_wide_k != g_efb_k) efb_resize(g_wide_k);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, DRAW_FBO);
+    p_glUseProgram(g_prog);
+    {   /* SR_TEVDEBUG=cycle (modes 0-3) or cycle:a,b,...: one mode per frame, in turn (one moment several ways) */
+        static int ncyc = -1, cyc[8];
+        if (ncyc < 0) {
+            const char* t = getenv("SR_TEVDEBUG");
+            ncyc = 0;
+            if (t && !strcmp(t, "cycle")) for (; ncyc < 4; ncyc++) cyc[ncyc] = ncyc;
+            else if (t && !strncmp(t, "cycle:", 6))
+                for (const char* q = t + 6; q && *q && ncyc < 8; q = strchr(q, ',') ? strchr(q, ',') + 1 : NULL) cyc[ncyc++] = atoi(q);
+        }
+        if (ncyc) p_glUniform1i(p_glGetUniformLocation(g_prog, "u_tev_debug"), cyc[(g_presented + 1) % (unsigned)ncyc]);
+    }
+    {   /* per-pixel lighting (setting char_light; gx.frag PERPIXEL_LIGHT) */
+        static GLint loc = -2;
+        if (loc == -2) loc = p_glGetUniformLocation(g_prog, "u_perpixel");
+        p_glUniform1i(loc, g_settings.char_light);
+    }
+    p_glBindVertexArray(g_vao);
+    p_glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
+    p_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_ibo);  /* part of the VAO's state */
+    if (f != g_up_frame) {
+        p_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)f->nverts * sizeof(GxVertex), f->verts, GL_STREAM_DRAW);
+        p_glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)f->nidx * 4, f->idx, GL_STREAM_DRAW);
+        g_up_frame = f;
+    }
+    size_t stride = (sizeof(GxUniforms) + (size_t)g_ubo_align - 1) / (size_t)g_ubo_align * (size_t)g_ubo_align;
+    /* the states, packed at the UBO offset alignment, in one upload */
+    size_t ubo_bytes = stride * (f->nunis ? f->nunis : 1);
+    if (ubo_bytes > g_ubo_staging_cap) {
+        g_ubo_staging = realloc(g_ubo_staging, ubo_bytes);
+        g_ubo_staging_cap = ubo_bytes;
+    }
+    for (uint32_t i = 0; i < f->nunis; i++) memcpy(g_ubo_staging + stride * i, &f->unis[i], sizeof(GxUniforms));
+    if (g_ip_on) ip_states(g_ubo_staging, stride);
+    p_glBindBuffer(GL_UNIFORM_BUFFER, g_ubo);
+    p_glBufferData(GL_UNIFORM_BUFFER, (GLsizeiptr)ubo_bytes, g_ubo_staging, GL_STREAM_DRAW);
+    /* the chunk tables, likewise */
+    size_t xstride = (sizeof(GxXTab) + (size_t)g_ubo_align - 1) / (size_t)g_ubo_align * (size_t)g_ubo_align;
+    size_t xt_bytes = xstride * (f->nxtabs ? f->nxtabs : 1);
+    if (xt_bytes > g_ubo_staging_cap) {
+        g_ubo_staging = realloc(g_ubo_staging, xt_bytes);
+        g_ubo_staging_cap = xt_bytes;
+    }
+    for (uint32_t i = 0; i < f->nxtabs; i++) memcpy(g_ubo_staging + xstride * i, &f->xtabs[i], sizeof(GxXTab));
+    p_glBindBuffer(GL_UNIFORM_BUFFER, g_ubo_xt);
+    p_glBufferData(GL_UNIFORM_BUFFER, (GLsizeiptr)xt_bytes, g_ubo_staging, GL_STREAM_DRAW);
+    const GxXTab* curx = NULL;
+    uint32_t cur_regs = ~0u;
+    /* the XF memory chunk pool */
+    p_glBindBuffer(0x8C2A /* GL_TEXTURE_BUFFER */, g_xfm_buf);
+    p_glBufferData(0x8C2A, (GLsizeiptr)(f->nxchunks ? f->nxchunks : 1) * GX_XFM_CHUNK * 4, g_ip_on ? ip_chunks(f) : f->xchunks, GL_STREAM_DRAW);
+    p_glActiveTexture(GL_TEXTURE0 + XFM_UNIT);
+    glBindTexture(0x8C2A, g_xfm_tex);
+    p_glTexBuffer(0x8C2A, 0x8236 /* GL_R32UI */, g_xfm_buf);
+    p_glActiveTexture(GL_TEXTURE0);
+    const GxUniforms* cur = NULL;
+    int scan_k = g_scan_at ? (int)g_presented + 1 - g_scan_at : -1;
+    int scanning = scan_k >= 0 && scan_k < 32;
+    uint32_t draw_no = 0, skip_lo = scanning ? (uint32_t)(scan_k * g_scan_step) : 0, skip_hi = skip_lo + (uint32_t)g_scan_step;
+    if (g_same_k >= 0) { scanning = 1; skip_lo = (uint32_t)(g_same_first + g_same_k * g_same_step); skip_hi = skip_lo + (uint32_t)g_same_step; }
+    /* bloom / grading (post_process): after the last 3D draw before each picture (XFB copy) */
+    static uint32_t* post_at;
+    static uint32_t post_cap;
+    uint32_t npost = 0, ipost = 0;
+    if (post_wanted()) {
+        int64_t last3d = -1;
+        uint32_t ureg = ~0u;
+        for (uint32_t i = 0; i < f->ncmds; i++) {
+            const GxCmd* c = &f->cmds[i];
+            if (c->type == GXC_STATE) ureg = c->a;
+            else if (c->type == GXC_DRAW && ureg < f->nunis && f->unis[ureg].xfr[0x26] == 0) last3d = i;
+            else if (c->type == GXC_COPY && c->copy[4]) {
+                if (last3d >= 0) {
+                    if (npost == post_cap) post_at = realloc(post_at, (post_cap = post_cap ? post_cap * 2 : 8) * sizeof *post_at);
+                    post_at[npost++] = (uint32_t)last3d;
+                }
+                last3d = -1;
+            }
+        }
+    }
+    for (uint32_t i = 0; i < f->ncmds; i++) {
+        if (ipost < npost && i > post_at[ipost]) {
+            ipost++;
+            post_process();
+            if (cur) apply_state(cur);
+        }
+        const GxCmd* c = &f->cmds[i];
+        switch (c->type) {
+        case GXC_STATE:
+            curx = &f->xtabs[c->b];
+            p_glBindBufferRange(GL_UNIFORM_BUFFER, 1, g_ubo_xt, (GLintptr)(xstride * c->b), sizeof(GxXTab));
+            if (c->a != cur_regs) {
+                cur = &f->unis[c->a];
+                cur_regs = c->a;
+                p_glBindBufferRange(GL_UNIFORM_BUFFER, 0, g_ubo, (GLintptr)(stride * c->a), sizeof(GxUniforms));
+                apply_state(cur);
+                /* SR_SHADER_KEYS=<file>: record the fragment-shader specialization keys (gx_shader_key.c) */
+                static const char* keys = (const char*)1;
+                if (keys == (const char*)1) keys = getenv("SR_SHADER_KEYS");
+                if (keys) {
+                    GxFragKey k;
+                    gx_frag_key(cur->bp, &k);
+                    gx_frag_key_record(&k, keys);
+                }
+            }
+            break;
+        case GXC_DRAW:
+            if (!cur) break;
+            if (scanning && draw_no >= skip_lo && draw_no < skip_hi) { draw_no++; break; }
+            draw_no++;
+            if (g_debug_frame) {
+                char t[160] = "";
+                int n = 0;
+                for (int m = 0; m < 8; m++)
+                    if (c->tex[m] >= 0) {
+                        GxTexture* gt = gx_texture_get(c->tex[m]);
+                        n += snprintf(t + n, sizeof t - n, " t%d=%d(%ux%u%s)", m, c->tex[m], gt ? gt->width : 0,
+                                      gt ? gt->height : 0, gt && gt->is_copy ? " copy" : "");
+                    }
+                {   /* SR_GLTEXDUMP=<hex address>: write what the GL texture of map 0 holds when a draw samples
+                     * that texture address (build/gltex_<id>.tga) */
+                    const char* gd = getenv("SR_GLTEXDUMP");
+                    static int done;
+                    uint32_t want_addr = gd ? (uint32_t)strtoul(gd, NULL, 16) : 0;
+                    int want = c->tex[0];
+                    if (gd && ((cur->bp[0x95] & 0xFFFFFF) << 5) == want_addr) want = c->tex[1];  /* or map 1 */
+                    else if (gd && ((cur->bp[0x94] & 0xFFFFFF) << 5) != want_addr) want = -1;
+                    if (!done && gd && want >= 0 && want < g_gltex_cap && g_gltex[want]) {
+                        done = 1;
+                        GLint w = 0, h = 0;
+                        glBindTexture(GL_TEXTURE_2D, g_gltex[want]);
+                        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
+                        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
+                        uint8_t* px = malloc((size_t)w * h * 4);
+                        glGetTexImage(GL_TEXTURE_2D, 0, GL_BGRA, GL_UNSIGNED_BYTE, px);
+                        char path[64];
+                        snprintf(path, sizeof path, "build/gltex_%d.tga", want);
+                        FILE* tf = fopen(path, "wb");
+                        if (tf) {
+                            uint8_t hdr[18] = {0, 0, 2};
+                            hdr[12] = (uint8_t)w; hdr[13] = (uint8_t)(w >> 8); hdr[14] = (uint8_t)h; hdr[15] = (uint8_t)(h >> 8);
+                            hdr[16] = 32; hdr[17] = 0x28;
+                            fwrite(hdr, 1, 18, tf);
+                            fwrite(px, 1, (size_t)w * h * 4, tf);
+                            fclose(tf);
+                        }
+                        GxTexture* gt = gx_texture_get(want);
+                        rt_log("[gxdbg] GL texture %d is %dx%d (GxTexture %ux%u gen %u, GL gen %u)", want, w, h, gt ? gt->width : 0,
+                               gt ? gt->height : 0, gt ? gt->gen : 0, g_gltex_gen[want]);
+                        free(px);
+                    }
+                }
+                rt_log("[gxdbg] draw prim %u verts %u stages %u genmode %06X ind %u%s | z %06X blend %06X dstalpha %06X pe %06X",
+                       c->prim, c->b, ((cur->bp[0] >> 10) & 15) + 1, cur->bp[0], (cur->bp[0] >> 16) & 7, t, cur->bp[0x40],
+                       cur->bp[0x41], cur->bp[0x42], cur->bp[0x43]);
+                /* the first draw of each genmode in full: TEV stages, channel controls, ambient/material */
+                static uint32_t seen[64];
+                static int nseen;
+                int known = 0;
+                for (int k = 0; k < nseen; k++) known |= seen[k] == cur->bp[0];
+                static int all = -1;  /* SR_GXDEBUG_ALL=1: every draw in full */
+                if (all < 0) all = getenv("SR_GXDEBUG_ALL") != NULL;
+                if (all) known = 0;
+                if (!known && (nseen < 64 || all)) {
+                    if (nseen < 64) seen[nseen++] = cur->bp[0];
+                    for (int st = 0; st <= (int)((cur->bp[0] >> 10) & 15); st++)
+                        rt_log("[gxdbg]   stage %d: order %03X cenv %06X aenv %06X ksel %06X", st,
+                               (cur->bp[0x28 + st / 2] >> ((st & 1) * 12)) & 0xFFF, cur->bp[0xC0 + 2 * st], cur->bp[0xC1 + 2 * st],
+                               cur->bp[0xF6 + st / 2]);
+                    rt_log("[gxdbg]   xf: numchan %u numtex %u | amb %08X %08X mat %08X %08X | ctrl c0 %08X c1 %08X a0 %08X a1 %08X",
+                           cur->xfr[0x09], cur->xfr[0x3F], cur->xfr[0x0A], cur->xfr[0x0B], cur->xfr[0x0C], cur->xfr[0x0D],
+                           cur->xfr[0x0E], cur->xfr[0x0F], cur->xfr[0x10], cur->xfr[0x11]);
+                    for (int m = 0; m < 2; m++)
+                        rt_log("[gxdbg]   map %d: image0 %06X image1 %06X (preloaded %u) image2 %06X image3 %06X tlut %06X", m,
+                               cur->bp[0x88 + m], cur->bp[0x8C + m], (cur->bp[0x8C + m] >> 21) & 1, cur->bp[0x90 + m],
+                               cur->bp[0x94 + m], cur->bp[0x98 + m]);
+                    for (int li = 0; li < 2; li++) {
+                        float lv[16];
+                        uint32_t lraw[16];
+                        for (int w = 0; w < 16; w++) {
+                            uint32_t idx = 0x600 + (uint32_t)li * 16 + (uint32_t)w;
+                            lraw[w] = f->xchunks[(size_t)curx->xtab[idx >> 6] * GX_XFM_CHUNK + (idx & 63)];
+                            memcpy(&lv[w], &lraw[w], 4);
+                        }
+                        rt_log("[gxdbg]   light %d: color %08X cosatt %g %g %g distatt %g %g %g pos %g %g %g dir %g %g %g", li,
+                               lraw[3], lv[4], lv[5], lv[6], lv[7], lv[8], lv[9], lv[10], lv[11], lv[12], lv[13], lv[14], lv[15]);
+                    }
+                    rt_log("[gxdbg]   texgen %08X %08X %08X %08X | post %08X %08X | dualtex %u", cur->xfr[0x40], cur->xfr[0x41],
+                           cur->xfr[0x42], cur->xfr[0x43], cur->xfr[0x50], cur->xfr[0x51], cur->xfr[0x12] & 1);
+                    for (uint32_t vi = 0; vi < 3 && vi < c->b; vi++) {
+                        const GxVertex* vx = &f->verts[f->idx[c->a + vi]];
+                        /* texcoord 1 as the vertex shader computes it (regular texgen only) */
+                        uint32_t info1 = cur->xfr[0x41];
+                        if (((info1 >> 4) & 7) == 0) {
+                            uint32_t src = (info1 >> 7) & 31;
+                            float s[4] = {0, 0, 1, 1};
+                            if (src == 0) memcpy(s, vx->pos, 12);
+                            else if (src <= 4) memcpy(s, vx->nrm, 12);
+                            else { s[0] = vx->tex[src - 5][0]; s[1] = vx->tex[src - 5][1]; }
+                            s[3] = 1.0f;
+                            if (!((info1 >> 2) & 1)) s[2] = 1.0f;
+                            float tm[12];
+                            int base = (int)vx->tmtx[1] * 4;
+                            for (int w = 0; w < 12; w++) {
+                                uint32_t xi = (uint32_t)base + (uint32_t)w;
+                                uint32_t raw = f->xchunks[(size_t)curx->xtab[xi >> 6] * GX_XFM_CHUNK + (xi & 63)];
+                                memcpy(&tm[w], &raw, 4);
+                            }
+                            float o[3];
+                            for (int r = 0; r < 3; r++) o[r] = tm[r * 4] * s[0] + tm[r * 4 + 1] * s[1] + tm[r * 4 + 2] * s[2] + tm[r * 4 + 3] * s[3];
+                            rt_log("[gxdbg]   v%u tc1: src %u in %g %g %g | tmtx %g rows %g %g %g %g / %g %g %g %g / %g %g %g %g | out %g %g %g",
+                                   vi, src, s[0], s[1], s[2], vx->tmtx[1], tm[0], tm[1], tm[2], tm[3], tm[4], tm[5], tm[6], tm[7],
+                                   tm[8], tm[9], tm[10], tm[11], o[0], o[1], o[2]);
+                            if (cur->xfr[0x12] & 1) {
+                                uint32_t post = cur->xfr[0x51];
+                                if ((post >> 8) & 1) {
+                                    float l = sqrtf(o[0] * o[0] + o[1] * o[1] + o[2] * o[2]) + 1e-12f;
+                                    for (int r = 0; r < 3; r++) o[r] /= l;
+                                }
+                                for (int w = 0; w < 12; w++) {
+                                    uint32_t xi = 0x500 + (post & 63) * 4 + (uint32_t)w;
+                                    uint32_t raw = f->xchunks[(size_t)curx->xtab[xi >> 6] * GX_XFM_CHUNK + (xi & 63)];
+                                    memcpy(&tm[w], &raw, 4);
+                                }
+                                float q[3];
+                                for (int r = 0; r < 3; r++) q[r] = tm[r * 4] * o[0] + tm[r * 4 + 1] * o[1] + tm[r * 4 + 2] * o[2] + tm[r * 4 + 3];
+                                rt_log("[gxdbg]   v%u tc1 post rows %g %g %g %g / %g %g %g %g / %g %g %g %g | final %g %g %g", vi,
+                                       tm[0], tm[1], tm[2], tm[3], tm[4], tm[5], tm[6], tm[7], tm[8], tm[9], tm[10], tm[11],
+                                       q[0], q[1], q[2]);
+                            }
+                        }
+                        int idx = (int)vx->pos[3];
+                        float nm[9];
+                        for (int w = 0; w < 9; w++) {
+                            uint32_t xi = 0x400 + (uint32_t)(idx & 31) * 3 + (uint32_t)w;
+                            uint32_t raw = f->xchunks[(size_t)curx->xtab[xi >> 6] * GX_XFM_CHUNK + (xi & 63)];
+                            memcpy(&nm[w], &raw, 4);
+                        }
+                        float pm[12];
+                        for (int w = 0; w < 12; w++) {
+                            uint32_t xi = (uint32_t)idx * 4 + (uint32_t)w;
+                            uint32_t raw = f->xchunks[(size_t)curx->xtab[xi >> 6] * GX_XFM_CHUNK + (xi & 63)];
+                            memcpy(&pm[w], &raw, 4);
+                        }
+                        float pv[3], nv[3], l[3], lp[3];
+                        for (int r = 0; r < 3; r++) {
+                            pv[r] = pm[r * 4] * vx->pos[0] + pm[r * 4 + 1] * vx->pos[1] + pm[r * 4 + 2] * vx->pos[2] + pm[r * 4 + 3];
+                            nv[r] = nm[r * 3] * vx->nrm[0] + nm[r * 3 + 1] * vx->nrm[1] + nm[r * 3 + 2] * vx->nrm[2];
+                            uint32_t xi = 0x600 + 10 + (uint32_t)r;
+                            uint32_t raw = f->xchunks[(size_t)curx->xtab[xi >> 6] * GX_XFM_CHUNK + (xi & 63)];
+                            memcpy(&lp[r], &raw, 4);
+                            l[r] = lp[r] - pv[r];
+                        }
+                        float ll = sqrtf(l[0] * l[0] + l[1] * l[1] + l[2] * l[2]), nl = sqrtf(nv[0] * nv[0] + nv[1] * nv[1] + nv[2] * nv[2]);
+                        rt_log("[gxdbg]   v%u: idx %d view pos %g %g %g | view normal %g %g %g | light vec %g %g %g | diffuse %g"
+                               " | col0 %.3f %.3f %.3f %.3f | tex0 %g %g tmtx %g | mode0 %06X", vi,
+                               idx, pv[0], pv[1], pv[2], nv[0], nv[1], nv[2], l[0], l[1], l[2],
+                               (l[0] * nv[0] + l[1] * nv[1] + l[2] * nv[2]) / (ll * nl + 1e-9f), vx->col[0][0], vx->col[0][1],
+                               vx->col[0][2], vx->col[0][3], vx->tex[0][0], vx->tex[0][1], vx->tmtx[0], cur->bp[0x80]);
+                    }
+                    rt_log("[gxdbg]   tev regs E0-E7 %06X %06X %06X %06X %06X %06X %06X %06X | konst %06X %06X | alpha test %06X",
+                           cur->bp[0xE0], cur->bp[0xE1], cur->bp[0xE2], cur->bp[0xE3], cur->bp[0xE4], cur->bp[0xE5],
+                           cur->bp[0xE6], cur->bp[0xE7], cur->konst[0], cur->konst[1], cur->bp[0xF3]);
+                    rt_log("[gxdbg]   fog EE %06X EF %06X F0 %06X F1 %06X F2 %06X range E8 %06X | proj P4 %g P5 %g zscale %g zoff %g",
+                           cur->bp[0xEE], cur->bp[0xEF], cur->bp[0xF0], cur->bp[0xF1], cur->bp[0xF2], cur->bp[0xE8],
+                           f32(cur->xfr[0x24]), f32(cur->xfr[0x25]), f32(cur->xfr[0x1C]), f32(cur->xfr[0x1F]));
+                }
+            }
+            bind_textures(c, cur);
+            glDrawElements(c->prim == GXP_TRIANGLES ? GL_TRIANGLES : c->prim == GXP_LINES ? GL_LINES : GL_POINTS,
+                           (GLsizei)c->b, GL_UNSIGNED_INT, (const void*)((uintptr_t)c->a * 4));
+            break;
+        case GXC_COPY:
+            if (cur) efb_copy(c, cur);
+            if (cur) apply_state(cur);
+            break;
+        case GXC_TEXBLIT: {  /* an EFB copy into the top left of a larger copy texture (gx_render.h) */
+            static GLuint read_fbo;
+            GLuint s = gl_texture((int)c->copy[0]), d = gl_texture((int)c->copy[1]);
+            if (!s || !d) break;
+            if (!read_fbo) p_glGenFramebuffers(1, &read_fbo);
+            p_glBindFramebuffer(GL_READ_FRAMEBUFFER, read_fbo);
+            p_glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s, 0);
+            p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_copy_fbo);
+            p_glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, d, 0);
+            glDisable(GL_SCISSOR_TEST);
+            glColorMask(1, 1, 1, 1);
+            GLint bw = (GLint)(c->copy[2] * EFB_SCALE), bh = (GLint)(c->copy[3] * EFB_SCALE);
+            p_glBlitFramebuffer(0, 0, bw, bh, 0, 0, bw, bh, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+            p_glBindFramebuffer(GL_FRAMEBUFFER, DRAW_FBO);
+            if (cur) apply_state(cur);
+            break;
+        }
+        default: break;
+        }
+    }
+}
+
+/* the textures the game dropped after this frame (once the frame is not drawn again) */
+static void retire(GxFrame* f) {
+    for (uint32_t i = 0; i < f->nretired; i++) {
+        int id = f->retired[i];
+        if (id < g_gltex_cap && g_gltex[id]) { glDeleteTextures(1, &g_gltex[id]); g_gltex[id] = 0; }
+        gx_texture_free(id);
+    }
+    f->nretired = 0;
+}
+
+/* ---- frame queue ---- */
+void render_dump(void) {}
+
+GxFrame* render_take_free_frame(void) {
+    mtx_lock(&g_lock);
+    while (!g_nfree) cnd_wait(&g_cv, &g_lock);
+    GxFrame* f = g_free[--g_nfree];
+    mtx_unlock(&g_lock);
+    return f;
+}
+
+void render_submit(GxFrame* f) {
+    mtx_lock(&g_lock);
+    while (g_pending) cnd_wait(&g_cv, &g_lock);
+    g_pending = f;
+    cnd_broadcast(&g_cv);
+    mtx_unlock(&g_lock);
+}
+
+int render_poll_quit(void) { return g_quit; }
+
+/* window events: closing, and the fullscreen toggle (F11 or Alt+Enter; also the settings menu) */
+/* a window point -> the menu overlay's pixels (draw_overlay: a 16:9 picture centred in the window) */
+static void mouse_to_overlay(int mx, int my, float* ox, float* oy) {
+    int ww, wh;
+    SDL_GetWindowSize(g_win, &ww, &wh);
+    int vw = ww, vh = ww * 9 / 16;
+    if (vh > wh) vh = wh, vw = wh * 16 / 9;
+    if (vw <= 0 || vh <= 0) vw = vh = 1;
+    *ox = (float)(mx - (ww - vw) / 2) * (float)OVERLAY_W / (float)vw;
+    *oy = (float)(my - (wh - vh) / 2) * (float)OVERLAY_H / (float)vh;
+}
+
+static void handle_event(const SDL_Event* e) {
+    if (e->type == SDL_QUIT) g_quit = 1;
+    /* the mouse works the settings menu (F1) */
+    float ox, oy;
+    if (e->type == SDL_MOUSEMOTION) {
+        mouse_to_overlay(e->motion.x, e->motion.y, &ox, &oy);
+        overlay_mouse_pos(ox, oy);
+    } else if (e->type == SDL_MOUSEBUTTONDOWN || e->type == SDL_MOUSEBUTTONUP) {
+        mouse_to_overlay(e->button.x, e->button.y, &ox, &oy);
+        overlay_mouse_pos(ox, oy);
+        int b = e->button.button == SDL_BUTTON_LEFT ? 0 : e->button.button == SDL_BUTTON_RIGHT ? 1
+              : e->button.button == SDL_BUTTON_MIDDLE ? 2 : -1;
+        overlay_mouse_button(b, e->type == SDL_MOUSEBUTTONDOWN);
+    } else if (e->type == SDL_MOUSEWHEEL) {
+        float dx = e->wheel.preciseX, dy = e->wheel.preciseY;
+        if (e->wheel.direction == SDL_MOUSEWHEEL_FLIPPED) dx = -dx, dy = -dy;
+        overlay_mouse_wheel(dx, dy);
+    }
+    if (e->type == SDL_KEYDOWN && !e->key.repeat &&
+        (e->key.keysym.scancode == SDL_SCANCODE_F11 ||
+         (e->key.keysym.scancode == SDL_SCANCODE_RETURN && (e->key.keysym.mod & KMOD_ALT)))) {
+        g_settings.fullscreen = !g_settings.fullscreen;
+        settings_apply();
+    }
+}
+
+/* the window follows g_settings.fullscreen (changed by a key or the menu); in fullscreen the cursor
+ * shows only while the settings menu is open (it works with the mouse) */
+static void sync_fullscreen(void) {
+    static int applied = -1, cursor = -1, pad_bg = -1;
+    /* controllers while another window has focus (setting pad_background; SDL re-reads the hint) */
+    if (g_settings.pad_background != pad_bg) {
+        pad_bg = g_settings.pad_background;
+        SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, pad_bg ? "1" : "0");
+    }
+    int want = !g_settings.fullscreen || overlay_menu_open();
+    if (want != cursor) {
+        cursor = want;
+        SDL_ShowCursor(want ? SDL_ENABLE : SDL_DISABLE);
+    }
+    if (g_settings.fullscreen == applied || getenv("SR_MINIMIZED")) return;
+    applied = g_settings.fullscreen;
+    SDL_SetWindowFullscreen(g_win, applied ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+    rt_log("[gl] %s", applied ? "fullscreen" : "windowed");
+}
+
+/* ---- the picture rate (setting pc_fps): see "in-between pictures" above ---- */
+#define IP_GAME_NS 16683333ull  /* one game picture at 59.94 Hz */
+static GxFrame *g_ip_fa, *g_ip_fb;  /* the pictures held: A (older) and B */
+static uint64_t g_ip_tb, g_ip_next;  /* when B counts as arrived; when the next picture is due */
+static int g_ip_b_shown;             /* B itself was drawn (nothing newer to show until the next) */
+static int g_vsync_ok, g_vsync_cur = -1;  /* vsync allowed (not a test run); as set now */
+static unsigned g_ip_presents;
+static uint64_t g_ip_fps_t0;
+
+/* pictures per second wanted from in-between pictures: 0 = off (the game's own pacing) */
+static int ip_target(void) {
+    if (g_headless || g_settings.framerate == FR_30) return 0;
+    return g_settings.pc_fps;
+}
+
+static void set_vsync(int on) {
+    if (on == g_vsync_cur) return;
+    g_vsync_cur = on;
+    SDL_GL_SetSwapInterval(on);
+    rt_log("[gl] vsync %s", on ? "on" : "off");
+}
+
+static void give_back(GxFrame* f) {
+    retire(f);
+    mtx_lock(&g_lock);
+    g_free[g_nfree++] = f;
+    cnd_broadcast(&g_cv);
+    mtx_unlock(&g_lock);
+}
+
+/* leaving the in-between mode: the held pictures go back */
+static void ip_release(void) {
+    if (g_ip_fa) give_back(g_ip_fa);
+    if (g_ip_fb) give_back(g_ip_fb);
+    g_ip_fa = g_ip_fb = NULL;
+}
+
+static void ip_pump(void) {
+    SDL_Event e;
+    while (SDL_PollEvent(&e)) handle_event(&e);
+    sync_fullscreen();
+    input_pump();
+}
+
+/* one round of the render thread in the in-between mode */
+static void ip_round(int target) {
+    /* vsync only when the display runs at the wanted rate (it then paces the pictures) */
+    SDL_DisplayMode dm;
+    int hz = SDL_GetWindowDisplayMode(g_win, &dm) == 0 ? dm.refresh_rate : 0;
+    int vs = g_vsync_ok && target > 0 && hz > 0 && abs(hz - target) <= 1;
+    set_vsync(vs);
+    uint64_t period = target > 0 && !vs ? 1000000000ull / (uint64_t)target : 0;
+    mtx_lock(&g_lock);
+    if (!g_pending) {
+        uint64_t now = platform_now_ns();
+        uint64_t wake = now + 4000000;
+        if (g_ip_fb && !g_ip_b_shown && g_ip_next < wake) wake = g_ip_next;
+        if (wake > now + 1500000) {  /* sleep (millisecond timer); the last stretch is spun below */
+            struct timespec ts;
+            timespec_get(&ts, TIME_UTC);
+            uint64_t ns = (uint64_t)ts.tv_nsec + (wake - now - 1000000);
+            ts.tv_sec += (time_t)(ns / 1000000000ull);
+            ts.tv_nsec = (long)(ns % 1000000000ull);
+            cnd_timedwait(&g_cv, &g_lock, &ts);
+        }
+    }
+    GxFrame* nf = g_pending;
+    if (nf) {
+        g_pending = NULL;  /* the game goes on with the next one; this one stays here */
+        cnd_broadcast(&g_cv);
+    }
+    mtx_unlock(&g_lock);
+    ip_pump();
+    uint64_t now = platform_now_ns();
+    if (nf) {
+        if (g_ip_fa) give_back(g_ip_fa);
+        g_ip_fa = g_ip_fb;
+        g_ip_fb = nf;
+        g_up_frame = NULL;  /* new vertices */
+        /* steady arrivals keep a steady time base (jitter would shake the blend) */
+        uint64_t expect = g_ip_tb + IP_GAME_NS;
+        g_ip_tb = g_ip_fa && now + 4000000 > expect && now < expect + 4000000 ? expect : now;
+        ip_frame_info(nf, &g_ip_info[nf - g_frames]);
+        if (g_ip_fa) ip_match(g_ip_fa, &g_ip_info[g_ip_fa - g_frames], nf, &g_ip_info[nf - g_frames]);
+        g_ip_b_shown = 0;
+        if (!g_ip_fa) {  /* the first: as it is */
+            execute(nf);
+            g_ip_b_shown = 1;
+            return;
+        }
+    }
+    if (!g_ip_fb || g_ip_b_shown) return;
+    if (period && now < g_ip_next) {
+        while (platform_now_ns() < g_ip_next) SDL_Delay(0);
+        now = platform_now_ns();
+    }
+    double t = now > g_ip_tb ? (double)(now - g_ip_tb) / (double)IP_GAME_NS : 0.0;
+    if (t >= 1.0) {
+        execute(g_ip_fb);
+        g_ip_b_shown = 1;
+    } else {
+        g_ip_a = g_ip_fa;
+        g_ip_t = (float)t;
+        g_ip_on = 1;
+        execute(g_ip_fb);
+        g_ip_on = 0;
+    }
+    g_ip_next = (period && g_ip_next + period > now ? g_ip_next : now) + period;
+    g_ip_presents++;
+    if (now - g_ip_fps_t0 >= 500000000ull) {
+        float rate = g_ip_fps_t0 ? (float)(g_ip_presents * 1e9 / (double)(now - g_ip_fps_t0)) : 0.0f;
+        if (g_ip_fps_t0) overlay_set_fps(rate);
+        g_ip_presents = 0;
+        g_ip_fps_t0 = now;
+        static uint64_t last_log;
+        if (now - last_log > 10000000000ull) {
+            last_log = now;
+            rt_log("[gl] in-between pictures: target %d, %.1f/s, %u of %u draws paired, %u matrix words, %u projections",
+                   target, rate, g_ip_matched, g_ip_draws, g_ip_npairs / 2, g_ip_nupairs / 2);
+        }
+    }
+}
+
+static int render_thread(void* arg) {
+    (void)arg;
+    rt_thread_pin(1);
+    if (!g_headless) {
+        SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, g_settings.pad_background ? "1" : "0");
+        if (SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0)
+            rt_fatal("SDL_InitSubSystem: %s", SDL_GetError());
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+        /* SR_MINIMIZED: start minimized and without taking focus (unattended test runs) */
+        int minimized = getenv("SR_MINIMIZED") != NULL;
+        if (minimized) SDL_SetHint("SDL_WINDOW_NO_ACTIVATION_WHEN_SHOWN", "1");
+        int win_w = 1280, win_h = 960;  /* SR_WINDOW=WxH: the window's first size (wide screen captures) */
+        if (getenv("SR_WINDOW")) sscanf(getenv("SR_WINDOW"), "%dx%d", &win_w, &win_h);
+        if (win_w < 160 || win_h < 120) win_w = 1280, win_h = 960;
+        SDL_DisplayMode dm;  /* Steam Deck / gamescope: the window as big as the screen (it is scaled to it) */
+        if (!getenv("SR_WINDOW") && settings_handheld_pc() && SDL_GetDesktopDisplayMode(0, &dm) == 0 && dm.w >= 640)
+            win_w = dm.w, win_h = dm.h;
+        g_win = SDL_CreateWindow("Sonic Riders (native)", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, win_w, win_h,
+                                 SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | (minimized ? SDL_WINDOW_MINIMIZED : 0));
+        if (!g_win) rt_fatal("SDL_CreateWindow: %s", SDL_GetError());
+        if (!SDL_GL_CreateContext(g_win)) rt_fatal("SDL_GL_CreateContext: %s", SDL_GetError());
+        /* vsync, so frames line up with the display (no tearing); test runs (minimized) and
+         * SR_NOVSYNC=1 present at once */
+        int vsync = !minimized && !getenv("SR_NOVSYNC");
+        g_vsync_ok = vsync;
+        set_vsync(vsync);
+        gl_setup();
+    }
+    for (;;) {
+        int ip = ip_target();
+        g_render_counts_fps = ip != 0;
+        if (ip) {
+            ip_round(ip);
+            goto round_done;
+        }
+        if (g_ip_fa || g_ip_fb) {  /* the in-between mode was turned off */
+            ip_release();
+            if (!g_headless) set_vsync(g_vsync_ok);
+        }
+        mtx_lock(&g_lock);
+        while (!g_pending) {
+            mtx_unlock(&g_lock);
+            if (!g_headless) {
+                SDL_Event e;
+                while (SDL_PollEvent(&e)) handle_event(&e);
+                sync_fullscreen();
+                input_pump();
+                /* closing while no picture comes (online: the host waiting for a player to join): the close
+                 * used to wait for the next frame, so the window could not be closed */
+                if (overlay_take_quit_request()) g_quit = 1;
+                if (g_quit) {
+                    rt_log("[gl] window closed (no frame pending)");
+                    exit(0);
+                }
+            }
+            mtx_lock(&g_lock);
+            if (!g_pending) {
+                struct timespec ts;
+                timespec_get(&ts, TIME_UTC);
+                ts.tv_nsec += 4000000;
+                if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+                cnd_timedwait(&g_cv, &g_lock, &ts);
+            }
+        }
+        GxFrame* f = g_pending;
+        mtx_unlock(&g_lock);
+        if (g_headless) {
+            for (uint32_t i = 0; i < f->nretired; i++) gx_texture_free(f->retired[i]);
+        } else {
+            SDL_Event e;
+            while (SDL_PollEvent(&e)) handle_event(&e);
+            sync_fullscreen();
+            input_pump();
+            const char* dbg = getenv("SR_GXDEBUG");
+            g_debug_frame = dbg && (unsigned)atoi(dbg) == g_presented + 1;
+            if (g_same_at && g_presented + 1 == (unsigned)g_same_at) {
+                uint32_t nd = 0;
+                for (uint32_t i = 0; i < f->ncmds; i++) nd += f->cmds[i].type == GXC_DRAW;
+                rt_log("[gl] SR_SKIPSAME: frame %d, %u draws, %u blocks of %d", g_same_at, nd, (nd + g_same_step - 1) / g_same_step, g_same_step);
+                for (g_same_k = 0; g_same_first + g_same_k * g_same_step < (int)nd && g_same_k < 400; g_same_k++) execute(f);
+                g_same_k = -1;
+            }
+            g_up_frame = NULL;  /* a recycled frame: new vertices */
+            execute(f);
+            retire(f);
+            g_debug_frame = 0;
+        }
+        mtx_lock(&g_lock);
+        g_pending = NULL;
+        g_free[g_nfree++] = f;
+        cnd_broadcast(&g_cv);
+        mtx_unlock(&g_lock);
+    round_done:
+        if (overlay_take_quit_request()) g_quit = 1;  /* the menu's "Quit Game" */
+        if (g_quit) {
+            rt_log("[gl] window closed");
+            exit(0);
+        }
+    }
+    return 0;
+}
+
+void render_start(void) {
+    mtx_init(&g_lock, mtx_plain);
+    cnd_init(&g_cv);
+    for (g_nfree = 0; g_nfree < 4; g_nfree++) g_free[g_nfree] = &g_frames[g_nfree];
+    const char* h = getenv("SR_HEADLESS");
+    g_headless = h && *h == '1';
+    const char* s = getenv("SR_SCREENSHOT");
+    g_shot_at = s ? atoi(s) : 0;
+    for (const char* q = s; q && *q && g_nshots < 512; q = strchr(q, ',') ? strchr(q, ',') + 1 : NULL)
+        g_shot_list[g_nshots++] = atoi(q);
+    const char* same = getenv("SR_SKIPSAME");
+    if (same && sscanf(same, "%d,%d,%d", &g_same_at, &g_same_step, &g_same_first) >= 2 && g_same_step > 0) {
+        g_shot_list[g_nshots++] = g_same_at;  /* the frame as drawn, for comparison */
+        rt_log("[gl] SR_SKIPSAME: frame %d drawn again without each block of %d draws", g_same_at, g_same_step);
+    }
+    const char* scan = getenv("SR_SKIPSCAN");
+    if (scan && sscanf(scan, "%d,%d", &g_scan_at, &g_scan_step) == 2 && g_scan_at > 0 && g_scan_step > 0) {
+        g_nshots = 0;
+        for (int k = 0; k < 32; k++) g_shot_list[g_nshots++] = g_scan_at + k;
+        rt_log("[gl] SR_SKIPSCAN: frames %d-%d leave out %d draws each", g_scan_at, g_scan_at + 31, g_scan_step);
+    } else {
+        g_scan_at = 0;
+    }
+    /* video and controllers start on the render thread (render_thread), which pumps the window
+     * messages: on Windows SDL's controller input arrives as messages to the thread that started
+     * it, so starting it here left controllers detected but always idle */
+    if (!g_headless && SDL_Init(SDL_INIT_AUDIO) != 0)
+        rt_fatal("SDL_Init: %s", SDL_GetError());
+    input_init();
+    rt_thread_start(render_thread, NULL);
+}
+
+/* ---- minimal PNG writer (stored deflate blocks), for screenshots ---- */
+static uint32_t crc_table[256];
+static uint32_t crc32_of(const uint8_t* p, size_t n, uint32_t c) {
+    if (!crc_table[1])
+        for (uint32_t i = 0; i < 256; i++) {
+            uint32_t v = i;
+            for (int k = 0; k < 8; k++) v = (v & 1) ? 0xEDB88320u ^ (v >> 1) : v >> 1;
+            crc_table[i] = v;
+        }
+    c = ~c;
+    for (size_t i = 0; i < n; i++) c = crc_table[(c ^ p[i]) & 255] ^ (c >> 8);
+    return ~c;
+}
+static void be32w(uint8_t* p, uint32_t v) { p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = (uint8_t)v; }
+static void chunk(FILE* f, const char* type, const uint8_t* data, uint32_t n) {
+    uint8_t h[8];
+    be32w(h, n);
+    memcpy(h + 4, type, 4);
+    fwrite(h, 1, 8, f);
+    fwrite(data, 1, n, f);
+    uint32_t c = crc32_of((const uint8_t*)type, 4, 0);
+    c = crc32_of(data, n, c);
+    be32w(h, c);
+    fwrite(h, 1, 4, f);
+}
+static void save_png(const char* path, int w, int h, const uint8_t* rgba) {
+    FILE* f = fopen(path, "wb");
+    if (!f) return;
+    fwrite("\x89PNG\r\n\x1a\n", 1, 8, f);
+    uint8_t ihdr[13];
+    be32w(ihdr, (uint32_t)w);
+    be32w(ihdr + 4, (uint32_t)h);
+    ihdr[8] = 8; ihdr[9] = 6; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
+    chunk(f, "IHDR", ihdr, 13);
+    size_t raw_n = (size_t)h * (1 + (size_t)w * 4);
+    uint8_t* raw = malloc(raw_n);
+    for (int y = 0; y < h; y++) {  /* GL rows are bottom first */
+        raw[(size_t)y * (1 + w * 4)] = 0;
+        memcpy(raw + (size_t)y * (1 + w * 4) + 1, rgba + (size_t)(h - 1 - y) * w * 4, (size_t)w * 4);
+    }
+    size_t nblocks = (raw_n + 65534) / 65535;
+    size_t z_n = 2 + raw_n + nblocks * 5 + 4;
+    uint8_t* z = malloc(z_n);
+    size_t o = 0;
+    z[o++] = 0x78; z[o++] = 0x01;
+    uint32_t a = 1, b = 0;
+    for (size_t i = 0; i < raw_n; i += 65535) {
+        size_t n = raw_n - i < 65535 ? raw_n - i : 65535;
+        z[o++] = i + n >= raw_n ? 1 : 0;
+        z[o++] = (uint8_t)n; z[o++] = (uint8_t)(n >> 8); z[o++] = (uint8_t)~n; z[o++] = (uint8_t)(~n >> 8);
+        memcpy(z + o, raw + i, n);
+        o += n;
+    }
+    for (size_t i = 0; i < raw_n; i++) { a = (a + raw[i]) % 65521; b = (b + a) % 65521; }
+    be32w(z + o, b << 16 | a);
+    o += 4;
+    chunk(f, "IDAT", z, (uint32_t)o);
+    chunk(f, "IEND", NULL, 0);
+    fclose(f);
+    free(raw);
+    free(z);
+}
