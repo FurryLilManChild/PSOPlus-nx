@@ -1,0 +1,41 @@
+# NEVER COMMIT GAME DATA. Only our own source, configs and tooling belong here.
+
+# Discs and anything extracted or converted from them
+assets/
+baserom/
+extracted/
+*.iso
+*.gcm
+*.rvz
+*.wia
+*.ciso
+*.gcz
+*.nkit.*
+*.dol
+*.rel
+*.adx
+*.afs
+*.prs
+*.gvm
+*.GVM
+*.bml
+
+# Disassembly, recompiled output, analysis dumps (derived from the game)
+build/
+gen/
+asm/
+analysis/
+
+# Shader and pipeline caches, SD staging, release output
+*.dksh
+shader_keys.local.txt
+out/
+cache/
+
+# Local tools and OS cruft
+__pycache__/
+*.pyc
+.vs/
+.vscode/
+Thumbs.db
+.DS_Store
