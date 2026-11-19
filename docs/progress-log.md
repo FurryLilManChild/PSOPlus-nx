@@ -1,5 +1,18 @@
 # Progress log (newest first)
 
+## 2026-11-19: first PC build ready (commit a45a21d2)
+
+- gcrecomp: REL made optional (config/GPOE8P/recomp.txt). 27,593 functions, clean report: data words, the
+  "Metr" string at 0x8000C2FC, one table-less dispatch (__ptmf_scall 0x80396A50, a computed tail call).
+- Runtime: boot from PsoV3.dol via the FST; PSO OS statics (OSThread 0x310 bytes in this SDK); frame_end hook
+  on the game's flip for logging only; Riders-only files removed with stubs (pso_stubs.c).
+- Cloud compile check with llvm-mingw 20261006 (clang 23) and SDL2 2.32.10, the versions setup_pc.ps1 installs:
+  first link failed on Riders addresses in hle_misc.c (memcpy/memset/memmove originals), fixed via game_addrs.h.
+- tools/sweep_hw.py: every device block the game touches is modelled except MI (memory protection, explained);
+  rfi functions all replaced or never reached. Preflight RESULT: PASS (commit a45a21d2).
+- Known gap: OSResetSystem ends in Reset(), a hang loop on the console; reached only by a reset or the DOL
+  chain loader (0x8007FA08). To replace with a native exit when it is reached.
+
 ## 2026-11-19: phase 1 analysis
 
 - the owner approved MPL-2.0, our own copy of the runtime, and matching the original frame rate.

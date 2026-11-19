@@ -1,0 +1,6 @@
+# Config, tools and sources stay LF on every checkout (dtk and the recompiler read the config files);
+# PowerShell scripts CRLF for Windows.
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.png binary
+*.jpg binary

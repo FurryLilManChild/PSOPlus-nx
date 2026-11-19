@@ -1,4 +1,4 @@
-/* Entry point: psoplus [path to the GXEE8P disc image] (default: platform_disc_path) */
+/* Entry point: psoplus [path to the GPOE8P disc image] (default: platform_disc_path) */
 #ifdef SR_IOS
 #include <SDL.h>
 #endif

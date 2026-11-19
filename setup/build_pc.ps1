@@ -13,8 +13,8 @@ Steps (each printed as "step N of 7"):
   5. configure (PC, llvm-mingw clang, SDL2).
   6. ninja: recompile and build; its own [n/N] counter shows progress.
   7. Summary: the commit, the program, its size.
-Everything is also written to build_pc.log. The program is build\host-mingw\psoplus.exe; run it from this folder
-(the log goes to psoplus.log here).
+Everything is also written to build_pc.log. The program is build\host-mingw\psoplus.exe; start it with
+Start-Process and this folder as the working directory (then its log goes to psoplus.log here).
 #>
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
@@ -105,7 +105,7 @@ $seedHash = (Get-FileHash $seed -Algorithm SHA1).Hash
 $need = -not (Test-Path $sym) -or -not (Test-Path $mark) -or ((Get-Content $mark -Raw).Trim() -ne $seedHash)
 if ($need) {
     Copy-Item $seed $sym -Force
-    Set-Content -Path (Join-Path $Root "config\GPOE8P\splits.txt") -Value ""
+    [IO.File]::WriteAllText((Join-Path $Root "config\GPOE8P\splits.txt"), "")
     Run "decomp-toolkit" $dtk @("dol", "split", "config\GPOE8P\config.yml", "build\GPOE8P")
     Set-Content -Path $mark -Value $seedHash
 } else { Log "  analysis is up to date" }
@@ -127,4 +127,4 @@ $size = [math]::Round((Get-Item $exe).Length / 1MB, 1)
 Log "  commit   $head"
 Log "  program  build\host-mingw\psoplus.exe ($size MB)"
 Log ""
-Log "BUILD RESULT: PASS (commit $head). Run it with:  .\build\host-mingw\psoplus.exe" "Green"
+Log "BUILD RESULT: PASS (commit $head). Run it with:  Start-Process .\build\host-mingw\psoplus.exe -WorkingDirectory $Root" "Green"
