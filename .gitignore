@@ -43,3 +43,7 @@ Thumbs.db
 # decomp-toolkit output (generated from the game; config/*/symbols_seed.txt is the hand-written input)
 config/*/symbols.txt
 config/*/splits.txt
+
+# PC toolchain downloaded by setup\setup_pc.ps1, and its log
+toolchain/
+setup.log
