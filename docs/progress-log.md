@@ -1,5 +1,20 @@
 # Progress log (newest first)
 
+## 2026-11-19: test 3 result, test 4 (interrupt-delivery diagnostics)
+
+- Test 3 (3d6b7ff4): sound works (the owner). Black screen right after choosing offline mode, with no movie.rel
+  link this time, so the movie player is not the cause. [stall] report after 6 s:
+  - game thread 80543FC8 (prio 16) asleep in GXDrawDone (parked 80375D1C 8038A0B0 803DCEFC, the flip);
+  - thread 80575E80 (prio 24, started at 803CBA58) suspended itself; no thread ready; the host thread
+    spins in SelectThread's idle loop (exe+179A810 = f_8037522C, code_044.c:12656, `while (RunQueueBits == 0)`);
+  - interrupts pending and posted but never taken: 07001880 = DSP AI/ARAM/DSP, PE finish (the draw done the
+    game waits for), SI, VI. The OS mask does not mask PE finish.
+  So the GPU did finish; the CPU is not taking interrupts while idle. Cause not proven: deliver() refuses when
+  its host thread is already inside handlers (t_in_irq), and ppc_preempt skips when MSR.EE is off.
+- Test 4 adds counters to the [stall] report (interrupt checks, how many were refused for EE off or for being
+  inside handlers, deliveries), a second sample 1 s later, and marks each guest thread whose host thread is
+  inside the interrupt handlers.
+
 ## 2026-11-19: test 2 result, test 3 (old AX audio, stall report)
 
 - Test 2 first run failed in configure (no baserom/movie.rel): build_pc.ps1's step 1 updated the script but

@@ -64,6 +64,9 @@ static int stall_watch(void* arg) {
         mmio_dump();
         sched_dump();
         platform_sample_threads();  /* every host thread's PC (exe+offset): the generated function a busy loop is in */
+        { void sched_irq_state_dump(void);  /* the same counters 1 s later: which ones are still climbing */
+          platform_sleep_ns(1000000000ull); rt_log("[stall] one second later:"); sched_irq_state_dump();
+          platform_sample_threads(); }
         rt_log("[stall] end of report; the game keeps running");
         fflush(stderr);
     }

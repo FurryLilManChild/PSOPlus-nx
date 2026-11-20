@@ -35,6 +35,7 @@ typedef struct GThread {
     cnd_t cv;
     Cpu cpu;
     uint32_t bt[12];     /* guest backtrace where it last parked (diagnostics) */
+    volatile int in_irq; /* its host thread is inside deliver() (interrupt handlers) */
     struct GThread* next;
 } GThread;
 
@@ -236,8 +237,12 @@ static void make_irq_cpu(Cpu* ic, const Cpu* c) {
  * cleared and cleared after the handlers ran (a thread they woke is in the run queue by then), so
  * vi.c never sees "no thread running, nothing pending" in between */
 _Atomic int g_irq_running;
+/* stall diagnostics (frame_pacing.c's [stall] report): why pending interrupts are not taken */
+static _Atomic uint64_t g_pre_calls, g_pre_noee, g_pre_inirq, g_deliver_runs;
 static void deliver(Cpu* c) {
-    if (t_in_irq) return;
+    if (t_in_irq) { atomic_fetch_add(&g_pre_inirq, 1); return; }
+    atomic_fetch_add(&g_deliver_runs, 1);
+    if (t_self) t_self->in_irq = 1;
     t_in_irq = 1;
     atomic_store(&g_irq_running, 1);
     /* the profiler charges the time after the handlers to the interrupted code again */
@@ -263,6 +268,7 @@ static void deliver(Cpu* c) {
     }
     atomic_store(&g_irq_running, 0);
     t_in_irq = 0;
+    if (t_self) t_self->in_irq = 0;
     g_ppc_cur_fn = prof_fn;
     g_ppc_cur_lr = prof_lr;
     /* the handlers may have written GX commands (a retrace callback); while the CPU idles nothing else
@@ -277,7 +283,17 @@ static void deliver(Cpu* c) {
 }
 
 void ppc_preempt(Cpu* c) {
+    atomic_fetch_add(&g_pre_calls, 1);
     if (c->msr & MSR_EE) deliver(c);
+    else atomic_fetch_add(&g_pre_noee, 1);
+}
+
+void sched_irq_state_dump(void) {
+    rt_log("[irqstate] preempt flag %d, irq bits %08X, native queue %u queued, handlers running %d; interrupt checks %llu "
+           "(MSR.EE off %llu, already in a handler on that host thread %llu), deliveries %llu",
+           g_core_preempt[0], g_irq_bits, g_native_tail - g_native_head, atomic_load(&g_irq_running),
+           (unsigned long long)atomic_load(&g_pre_calls), (unsigned long long)atomic_load(&g_pre_noee),
+           (unsigned long long)atomic_load(&g_pre_inirq), (unsigned long long)atomic_load(&g_deliver_runs));
 }
 
 /* MSR.EE turned on (OSEnableInterrupts / OSRestoreInterrupts): deliver what is pending. In the
@@ -612,6 +628,7 @@ void sched_dump(void) {
     di_dump();
     dsp_dump();
     os_irq_dump();
+    sched_irq_state_dump();
     rt_log("[threads] current %08X, run-queue bits %08X, running ctx %08X", ld32(OS_CURRENT_THREAD),
            ld32(OS_RUNQUEUE_BITS), g_running ? g_running->ctx : 0);
     for (GThread* g = g_threads; g; g = g->next) {
@@ -619,9 +636,9 @@ void sched_dump(void) {
         char bt[160] = "";
         int n = 0;
         for (int i = 0; i < 12 && g->bt[i]; i++) n += snprintf(bt + n, sizeof bt - n, " %08X", g->bt[i]);
-        rt_log("[threads]   %08X state %u suspend %d prio %d queue %08X%s parked at:%s", t, t ? ld16(t + 0x2C8) : 0,
+        rt_log("[threads]   %08X state %u suspend %d prio %d queue %08X%s%s parked at:%s", t, t ? ld16(t + 0x2C8) : 0,
                t ? (int)ld32(t + 0x2CC) : 0, t ? (int)ld32(t + 0x2D0) : -1, t ? ld32(t + 0x2DC) : 0,
-               g == g_running ? " (running)" : "", bt);
+               g == g_running ? " (running)" : "", g->in_irq ? " (inside interrupt handlers)" : "", bt);
     }
 }
 
