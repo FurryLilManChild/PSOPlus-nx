@@ -8,11 +8,16 @@
  * main L/R goes to a main-RAM buffer as 16-bit stereo, which the AI DMA then plays (dsp.c,
  * audio_submit).
  *
- * The game's microcode is the one Dolphin identifies by hash 0x3DAF59B9 (a "newer" GameCube AX:
- * PBs with a low-pass filter block, the newer mixer-control bits, and the compressor command).
+ * Two microcodes, told apart by Dolphin's hash of the IRAM image (dsp.c, ax_set_ucode):
+ *   0x3DAF59B9 (Sonic Riders), a "newer" GameCube AX: PBs with a low-pass filter block, the newer
+ *     mixer-control bits, and the compressor command;
+ *   0x4E8A8B21 (PSO Episode I & II Plus, Crazy Taxi, Smash Bros. Melee, ...), the older AX: the PB has no
+ *     low-pass filter block (4 words shorter in main RAM) and mixer control is a small set of route
+ *     flags (Dolphin AX.cpp ConvertMixerControl, HasLpf). The command list is the same.
  * Formats and behaviour follow Dolphin's DSP HLE (AX.cpp, AXVoice.h, DSPAccelerator.cpp). The
  * polyphase resampler needs the DSP's coefficient ROM, which is not available; like Dolphin without
  * it, linear interpolation is used. */
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,16 +60,54 @@ _Static_assert(sizeof(PB) == 98 * 2, "PB layout");
 
 #define HILO(n) ((uint32_t)p->n##_hi << 16 | p->n##_lo)
 
-/* PBs live in main RAM: whole-block copies with a byte swap per word */
+static int g_old_ax;  /* microcode 0x4E8A8B21: no filter block in main RAM, older mixer control */
+void ax_set_ucode(uint32_t hash) { g_old_ax = hash == 0x4E8A8B21u; }
+
+#define LPF_WORD (offsetof(PB, lpf_on) / 2)        /* where the filter block sits in the newer layout */
+#define LPF_WORDS ((offsetof(PB, loop_counter) - offsetof(PB, lpf_on)) / 2)
+
+/* PBs live in main RAM: whole-block copies with a byte swap per word. The older layout lacks the
+ * filter block: the words after it in RAM (loop_counter on) are read into place and the filter is off. */
 static void read_pb(uint32_t addr, PB* pb) {
     uint16_t* w = (uint16_t*)pb;
-    memcpy(w, ppc_ptr(addr), sizeof(PB));
+    if (g_old_ax) {
+        memcpy(w, ppc_ptr(addr), LPF_WORD * 2);
+        memset(w + LPF_WORD, 0, LPF_WORDS * 2);
+        memcpy(w + LPF_WORD + LPF_WORDS, ppc_ptr(addr + LPF_WORD * 2), (PB_WORDS - LPF_WORD - LPF_WORDS) * 2);
+    } else {
+        memcpy(w, ppc_ptr(addr), sizeof(PB));
+    }
     for (unsigned i = 0; i < PB_WORDS; i++) w[i] = __builtin_bswap16(w[i]);
 }
 static void write_pb(uint32_t addr, const PB* pb) {
     uint16_t w[PB_WORDS];
     for (unsigned i = 0; i < PB_WORDS; i++) w[i] = __builtin_bswap16(((const uint16_t*)pb)[i]);
-    memcpy(ppc_ptr(addr), w, sizeof(PB));
+    if (g_old_ax) {
+        memcpy(ppc_ptr(addr), w, LPF_WORD * 2);
+        memcpy(ppc_ptr(addr + LPF_WORD * 2), w + LPF_WORD + LPF_WORDS, (PB_WORDS - LPF_WORD - LPF_WORDS) * 2);
+    } else {
+        memcpy(ppc_ptr(addr), w, sizeof(PB));
+    }
+}
+
+/* the older microcode's mixer control, as the newer bits (Dolphin AX.cpp ConvertMixerControl):
+ * 0x10 Dolby Pro Logic II mode, 0x1 AUX A, 0x2 AUX B, 0x4 surround, 0x8 every volume ramps */
+static uint16_t old_mixer_control(uint16_t m) {
+    uint16_t r = 0x0001 | 0x0002;  /* main L and R always */
+    if (m & 0x0010) {
+        if ((m & 0x0006) == 0) r |= 0x0200 | 0x0400;
+        if ((m & 0x0007) == 1) r |= 0x0010 | 0x0020 | 0x0080;
+    } else {
+        if (m & 0x0001) r |= 0x0010 | 0x0020;
+        if (m & 0x0002) r |= 0x0200 | 0x0400;
+        if (m & 0x0004) {
+            r |= 0x0004;
+            if (r & 0x0010) r |= 0x0080;
+            if (r & 0x0200) r |= 0x1000;
+        }
+    }
+    if (m & 0x0008) r |= 0x0008 | 0x0040 | 0x0100 | 0x0800 | 0x2000;
+    return r;
 }
 
 /* ---- mixing buffers: 5 ms of 32 kHz ---- */
@@ -216,7 +259,7 @@ static void process_voice(PB* p, int32_t* const* bufs, int count) {
         for (int i = 0; i < count; i++)
             p->lpf_yn1 = s[i] = clamp16(((int32_t)p->lpf_a0 * s[i] + (int32_t)p->lpf_b0 * p->lpf_yn1) >> 15);
     }
-    uint16_t mc = p->mixer_control;
+    uint16_t mc = g_old_ax ? old_mixer_control(p->mixer_control) : p->mixer_control;
     if (MC(0x0001)) mix_add(bufs[MAIN_L], s, count, &p->main_l, &p->dpop_main_l, MC(0x0008) != 0);
     if (MC(0x0002)) mix_add(bufs[MAIN_R], s, count, &p->main_r, &p->dpop_main_r, MC(0x0008) != 0);
     if (MC(0x0004)) mix_add(bufs[MAIN_S], s, count, &p->main_s, &p->dpop_main_s, MC(0x0008) != 0);
@@ -236,6 +279,7 @@ static void apply_updates(PB* p, int ms, const uint16_t* upd) {
     if (start >= 32 || n > 32 - start) return;
     for (unsigned i = start; i < start + n; i++) {
         uint16_t off = upd[2 * i], val = upd[2 * i + 1];
+        if (g_old_ax && off >= LPF_WORD) off += LPF_WORDS;  /* offsets count the game's (shorter) layout */
         if (off < PB_WORDS) ((uint16_t*)p)[off] = val;
     }
 }

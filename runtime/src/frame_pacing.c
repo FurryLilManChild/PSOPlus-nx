@@ -8,7 +8,11 @@
  *   - hold the game thread while the host pauses it (rt_host_pause),
  *   - mark one game frame for perftest.c,
  *   - log the frame rate every 10 s ([pace] lines): frames flipped per second and the game thread's
- *     work per frame (the flip's own wait left out).
+ *     work per frame (the flip's own wait left out);
+ *   - watch for a stall: no flip for 5 s while the host is not pausing the game logs [stall] with the last
+ *     function entries (the trace ring, on from the first flip), the hardware registers and every guest
+ *     thread with where it is parked, once per stall, and the game keeps running (test 2's black screen
+ *     after movie.rel was linked left no trace at all).
  * Based on sonic-riders-recomp's frame_pacing.c (MPL-2.0); Riders' 30/60 fps modes are not used here.
  */
 #include <stdio.h>
@@ -39,6 +43,33 @@ uint32_t ram_block_hash(uint32_t blk) {
 static volatile int g_host_pause;
 void rt_host_pause(int on) { g_host_pause = on; rt_clock_hold(on); }  /* timers stop too */
 
+void cpu_dump_trace(void);
+void mmio_dump(void);
+void sched_dump(void);
+extern int g_ppc_trace;
+
+static volatile uint64_t g_last_flip_ns;
+static int stall_watch(void* arg) {
+    (void)arg;
+    int reported = 0;
+    for (;;) {
+        platform_sleep_ns(1000000000ull);
+        uint64_t last = g_last_flip_ns, now = platform_now_ns();
+        if (g_host_pause || !last) continue;
+        if (now - last < 5000000000ull) { reported = 0; continue; }
+        if (reported) continue;
+        reported = 1;
+        rt_log("[stall] no frame for %.1f s (field %u): where the game is", (now - last) / 1e9, vi_field_count());
+        cpu_dump_trace();
+        mmio_dump();
+        sched_dump();
+        platform_sample_threads();  /* every host thread's PC (exe+offset): the generated function a busy loop is in */
+        rt_log("[stall] end of report; the game keeps running");
+        fflush(stderr);
+    }
+    return 0;
+}
+
 static uint32_t g_stat_field, g_n_frames;
 static uint64_t g_work_ns, g_last_return_ns;
 
@@ -50,6 +81,11 @@ void hle_frame_end(Cpu* c) {
     if (g_last_return_ns) g_work_ns += now - g_last_return_ns;  /* game work since the last flip returned */
     f_803DCF2C_orig(c);  /* the game's own flip: waits for its retraces */
     g_last_return_ns = platform_now_ns();
+    if (!g_last_flip_ns) {  /* first flip: start the stall watch and the function-entry trace it reports */
+        g_ppc_trace = getenv("SR_NO_STALL_TRACE") == NULL;
+        rt_thread_start(stall_watch, NULL);
+    }
+    g_last_flip_ns = g_last_return_ns;
     perftest_frame_done();
     g_n_frames++;
     uint32_t f = vi_field_count();

@@ -1,5 +1,18 @@
 # Progress log (newest first)
 
+## 2026-11-19: test 2 result, test 3 (old AX audio, stall report)
+
+- Test 2 first run failed in configure (no baserom/movie.rel): build_pc.ps1's step 1 updated the script but
+  PowerShell ran the old copy. build_pc now restarts itself when the fast-forward changed it (0e733963).
+- Test 2 (0e733963): boots, 30 fps, but no sound (the owner). Character creation: OSLink of movie.rel logged, then
+  no [pace]/[perf] line until the window was closed (black screen; frozen or not drawing unknown).
+- No sound, cause proven: the DSP image's Dolphin hash (HashEctor over 6624 bytes at 0x804F7980) is 0x4E8A8B21,
+  the older AX microcode; Riders' stand-in implements 0x3DAF59B9. In the older one mixer control is route flags
+  (Dolphin ConvertMixerControl), so a voice routed "main only" (0x0000) had none of the newer bits set and was
+  never mixed; its PB also lacks the 4-word filter block. ax.c now handles both (dsp.c picks by hash).
+- The black screen: no evidence in the log. frame_pacing.c now reports a stall (no flip for 5 s): function-entry
+  trace, hardware registers, guest threads, host thread PCs.
+
 ## 2026-11-19: test 1 result, test 2 (movie.rel)
 
 - Test 1 (ce8665b9, the owner's PC): boots to the title screen; 30 fps in every [pace] line after the first two;

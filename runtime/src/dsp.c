@@ -157,8 +157,17 @@ static void dsp_mail_from_cpu(uint32_t mail) {
         if (g_boot_step == 10) {
             g_boot_step = 0;
             uint32_t iram_mm = g_boot[1], iram_len = g_boot[5];
-            rt_log("[dsp] task boot: IRAM image %08X (%u bytes), entry %04X; using the AX stand-in", iram_mm, iram_len,
-                   g_boot[9]);
+            /* which AX microcode: Dolphin's hash of the IRAM image (Common::HashEctor). PSO Ep I & II Plus
+             * boots 0x4E8A8B21, the older AX (no low-pass filter in the PB, older mixer-control bits);
+             * Sonic Riders booted 0x3DAF59B9. ax.c follows Dolphin's AX HLE for both. */
+            uint32_t hash = 0;
+            for (uint32_t i = 0; i < iram_len && i < 0x2000; i++) {
+                hash ^= ld8(iram_mm + i);
+                hash = hash << 3 | hash >> 29;
+            }
+            ax_set_ucode(hash);
+            rt_log("[dsp] task boot: IRAM image %08X (%u bytes, hash %08X), entry %04X; using the AX stand-in (%s)",
+                   iram_mm, iram_len, hash, g_boot[9], hash == 0x4E8A8B21u ? "older AX: PBs without the filter block" : "newer AX");
             g_state = DSP_AX;
             g_cmdlist_next = 0;
             push_mail(DSP_INIT, 1);
