@@ -784,10 +784,31 @@ static void draw_impl(int prim, int vat, uint32_t count, const uint8_t* vertices
         for (uint32_t i = 0; i < out_n; i++) o[k++] = v0 + i;
         break;
     }
-    /* unimplemented features in use, for the [perf] line: indirect stages (genmode bits 16-18),
-     * fog (BP 0xF1 bits 21-23, the fog type), Z textures (BP 0xF4 bits 2-3) */
+    /* features in use, for the [perf] line: indirect stages (genmode bits 16-18), fog (BP 0xF1 bits
+     * 21-23, the fog type; drawn by gx.frag), Z textures (BP 0xF4 bits 2-3) */
     if ((g_gx.bp[0x00] >> 16) & 7) g_feat_ind++;
-    if ((g_gx.bp[0xF1] >> 21) & 7) g_feat_fog++;
+    if ((g_gx.bp[0xF1] >> 21) & 7) {
+        g_feat_fog++;
+        /* each new fog setup, logged (the first 60): type, A, B, shift, C, colour, and the range
+         * adjustment (BP 0xE8 bit 10 on = fog wider towards the screen sides, not drawn yet) */
+        static uint32_t seen[60][3];
+        static int nseen;
+        uint32_t key[3] = {g_gx.bp[0xEE] ^ (g_gx.bp[0xF0] << 24), g_gx.bp[0xEF] ^ (g_gx.bp[0xF1] << 8),
+                           g_gx.bp[0xF2] ^ (g_gx.bp[0xE8] << 8)};
+        static uint32_t last[3];
+        int known = !memcmp(last, key, sizeof key);  /* the common case: the same setup as the last draw */
+        memcpy(last, key, sizeof key);
+        for (int i = 0; i < nseen && !known; i++) known = !memcmp(seen[i], key, sizeof key);
+        if (!known && nseen < 60) {
+            memcpy(seen[nseen++], key, sizeof key);
+            rt_log("[fog] setup %d: type %u%s, EE %06X EF %06X F0 %06X F1 %06X colour %06X, range %s (E8 %06X E9-ED %06X %06X %06X %06X %06X)",
+                   nseen, (g_gx.bp[0xF1] >> 21) & 7, (g_gx.bp[0xF1] >> 20) & 1 ? " orthographic" : "",
+                   g_gx.bp[0xEE] & 0xFFFFFF, g_gx.bp[0xEF] & 0xFFFFFF, g_gx.bp[0xF0] & 0xFFFFFF, g_gx.bp[0xF1] & 0xFFFFFF,
+                   g_gx.bp[0xF2] & 0xFFFFFF, (g_gx.bp[0xE8] >> 10) & 1 ? "ON (not drawn yet)" : "off", g_gx.bp[0xE8] & 0xFFFFFF,
+                   g_gx.bp[0xE9] & 0xFFFFFF, g_gx.bp[0xEA] & 0xFFFFFF, g_gx.bp[0xEB] & 0xFFFFFF, g_gx.bp[0xEC] & 0xFFFFFF,
+                   g_gx.bp[0xED] & 0xFFFFFF);
+        }
+    }
     if ((g_gx.bp[0xF4] >> 2) & 3) g_feat_ztex++;
     /* textures used by the enabled TEV stages, looked up first: a lookup may queue a texture blit,
      * which must come before the draw */
@@ -1458,7 +1479,7 @@ static void efb_copy(uint32_t v) {
                 double ms = 1000.0 / 40500000.0 / 120;
                 uint64_t idle, late_avg, late_max;
                 sched_stats(&idle, &late_avg, &late_max);
-                rt_log("[perf]   draws/frame using indirect textures %llu (dynamic matrices not implemented), fog %llu (not implemented), Z textures %llu (not implemented)",
+                rt_log("[perf]   draws/frame using indirect textures %llu (dynamic matrices not implemented), fog %llu (drawn; range adjustment not), Z textures %llu (not implemented)",
                        g_feat_ind / 120, g_feat_fog / 120, g_feat_ztex / 120);
                 extern unsigned long long g_pipe_stores, g_pipe_bytes;
                 static unsigned long long st0, by0;

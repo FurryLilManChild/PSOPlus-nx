@@ -445,6 +445,7 @@ void rt_thread_start(int (*fn)(void*), void* arg) {
 }
 #endif
 
+void platform_clocks_str(char* out, size_t n) { if (n) out[0] = 0; }  /* PC: not logged */
 double platform_gpu_frame_ms(void) { return -1.0; }  /* not measured by the GL renderer */
 #ifdef __ANDROID__
 /* Android (#14: 50-150 ms game-thread stalls on an Adreno 810 phone, even on the title): the scheduler may park

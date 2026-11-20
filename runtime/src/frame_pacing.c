@@ -49,6 +49,7 @@ void sched_dump(void);
 extern int g_ppc_trace;
 
 static volatile uint64_t g_last_flip_ns;
+static uint64_t g_t0_ns;  /* the first flip: [pace] lines give the time since then */
 static int stall_watch(void* arg) {
     (void)arg;
     int reported = 0;
@@ -86,6 +87,7 @@ void hle_frame_end(Cpu* c) {
     if (g_last_return_ns) g_work_ns += now - g_last_return_ns;  /* game work since the last flip returned */
     f_803DCF2C_orig(c);  /* the game's own flip: waits for its retraces */
     g_last_return_ns = platform_now_ns();
+    if (!g_last_flip_ns) g_t0_ns = g_last_return_ns;
     if (!g_last_flip_ns) {  /* first flip: start the stall watch and the function-entry trace it reports */
 #ifdef __SWITCH__
         g_ppc_trace = 0;  /* the function-entry trace costs speed; the console report has the rest */
@@ -101,8 +103,11 @@ void hle_frame_end(Cpu* c) {
     if (!g_stat_field) g_stat_field = f;
     if (f - g_stat_field >= 600) {
         double s = (f - g_stat_field) / 59.94;
-        rt_log("[pace] %.1f frames/s (game target 30), game work %.1f ms per frame, GPU %.1f ms per frame",
-               g_n_frames / s, g_n_frames ? g_work_ns / 1e6 / g_n_frames : 0.0, platform_gpu_frame_ms());
+        char clk[96];
+        platform_clocks_str(clk, sizeof clk);
+        rt_log("[pace] %.1f frames/s (game target 30), game work %.1f ms per frame, GPU %.1f ms per frame%s, %u s since the first frame",
+               g_n_frames / s, g_n_frames ? g_work_ns / 1e6 / g_n_frames : 0.0, platform_gpu_frame_ms(), clk,
+               (unsigned)((platform_now_ns() - g_t0_ns) / 1000000000ull));
         g_stat_field = f; g_n_frames = 0; g_work_ns = 0;
     }
 }

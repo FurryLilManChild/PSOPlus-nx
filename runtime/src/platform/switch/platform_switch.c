@@ -85,6 +85,32 @@ void platform_set_handheld_gpu(int on) {
     rt_log("[switch] handheld performance configuration -> 0x%08X (%s): rc 0x%X", want, on ? "GPU 384 MHz" : "system default", rc);
 }
 
+/* the clocks the console actually runs at (sys-clk or other overclock tools included), for the [pace]
+ * lines: clkrst (system 8.0+), else pcv; "" when neither answers */
+void platform_clocks_str(char* out, size_t n) {
+    static int mode = -1;  /* -1 not tried, 0 none, 1 clkrst, 2 pcv */
+    static ClkrstSession ses[3];
+    if (mode < 0) {
+        mode = 0;
+        if (R_SUCCEEDED(clkrstInitialize()) && R_SUCCEEDED(clkrstOpenSession(&ses[0], PcvModuleId_CpuBus, 3)) &&
+            R_SUCCEEDED(clkrstOpenSession(&ses[1], PcvModuleId_GPU, 3)) && R_SUCCEEDED(clkrstOpenSession(&ses[2], PcvModuleId_EMC, 3)))
+            mode = 1;
+        else if (R_SUCCEEDED(pcvInitialize()))
+            mode = 2;
+        rt_log("[clocks] read through %s", mode == 1 ? "clkrst" : mode == 2 ? "pcv" : "nothing (unavailable)");
+    }
+    u32 hz[3] = {0, 0, 0};
+    if (mode == 1) for (int i = 0; i < 3; i++) clkrstGetClockRate(&ses[i], &hz[i]);
+    else if (mode == 2) {
+        pcvGetClockRate(PcvModule_CpuBus, &hz[0]);
+        pcvGetClockRate(PcvModule_GPU, &hz[1]);
+        pcvGetClockRate(PcvModule_EMC, &hz[2]);
+    }
+    if (!mode) { if (n) out[0] = 0; return; }
+    snprintf(out, n, ", CPU %u / GPU %u / memory %u MHz %s", hz[0] / 1000000, hz[1] / 1000000, hz[2] / 1000000,
+             appletGetOperationMode() == AppletOperationMode_Console ? "docked" : "handheld");
+}
+
 void platform_init(void) {
     appletHook(&g_hook, applet_hook, NULL);  /* before the render thread runs appletMainLoop */
     mkdir(BASE_DIR, 0777);
@@ -326,7 +352,8 @@ static int stall_thread(void* arg) {
         if (gap > 3.0) rt_log("[clock] the tick counter moved %.1f s during a 1 s wait (sleep or suspension)", gap);
         prev = now;
         unsigned long long f = gx_frames_presented();
-        if (f != last_frames || appletGetFocusState() != AppletFocusState_InFocus) {
+        int rel_is_linked(void);  /* rel.c: a Sofdec movie (movie.rel) writes the XFB directly, no new frames */
+        if (f != last_frames || appletGetFocusState() != AppletFocusState_InFocus || rel_is_linked()) {
             if (reported && f != last_frames) rt_log("[stall] frames again after %u s", still);
             last_frames = f;
             still = 0;
