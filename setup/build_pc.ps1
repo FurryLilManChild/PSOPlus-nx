@@ -67,7 +67,14 @@ Step 1 "get the latest push from GitHub"
 $r = Capture "git" @("fetch", "-q", "origin", "main"); if ($r.code -ne 0) { Fail "git fetch failed: $($r.out)" }
 $r = Capture "git" @("status", "--porcelain", "--untracked-files=no")
 if ($r.out) { Fail "This folder has local changes to tracked files:`n$($r.out)`nTell Claude; nothing was changed." }
+$selfBefore = (Get-FileHash $PSCommandPath -Algorithm SHA1).Hash
 $r = Capture "git" @("merge", "--ff-only", "-q", "origin/main"); if ($r.code -ne 0) { Fail "Cannot fast-forward to GitHub's main: $($r.out)" }
+if ((Get-FileHash $PSCommandPath -Algorithm SHA1).Hash -ne $selfBefore) {
+    # the push changed this script: PowerShell is still running the old copy, so start the new one
+    Log "  build_pc.ps1 itself changed in this push: restarting with the new version" "Yellow"
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath
+    exit $LASTEXITCODE
+}
 $head = (Capture "git" @("rev-parse", "--short=8", "HEAD")).out
 $remote = (Capture "git" @("rev-parse", "--short=8", "origin/main")).out
 if ($head -ne $remote) { Fail "HEAD $head is not GitHub's main $remote." }
