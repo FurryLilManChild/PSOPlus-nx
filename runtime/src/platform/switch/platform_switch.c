@@ -296,6 +296,26 @@ static void prof_report(void) {
     uint32_t n = g_prof_samples;
     if (!n) return;
     rt_log("[profile] %u samples (1 ms) over the last 10 s: last function entered on the game core, and its return address:", n);
+    /* the same samples per function, whatever called it (the pairs below split a busy function by caller) */
+    {
+        static uint32_t fns[PROF_BUCKETS], cnt[PROF_BUCKETS];
+        uint32_t nf = 0;
+        for (uint32_t i = 0; i < PROF_BUCKETS; i++) {
+            if (!g_prof[i].count && !g_prof[i].fn) continue;
+            uint32_t c = g_prof[i].count;
+            for (uint32_t j = 0; j < nf; j++) if (fns[j] == g_prof[i].fn) { cnt[j] += c; c = 0; break; }
+            if (c && nf < PROF_BUCKETS) { fns[nf] = g_prof[i].fn; cnt[nf++] = c; }
+        }
+        rt_log("[profile] by function:");
+        for (int k = 0; k < 40; k++) {
+            uint32_t best = 0, bi = 0;
+            for (uint32_t j = 0; j < nf; j++) if (cnt[j] > best) { best = cnt[j]; bi = j; }
+            if (!best) break;
+            rt_log("[profile]   %5.1f%%  %08X", 100.0 * best / n, fns[bi]);
+            cnt[bi] = 0;
+        }
+    }
+    rt_log("[profile] by function and return address:");
     for (int k = 0; k < 30; k++) {
         uint32_t best = 0, bi = 0;
         for (uint32_t i = 0; i < PROF_BUCKETS; i++)

@@ -1,5 +1,19 @@
 # Progress log (newest first)
 
+## 2026-11-20: Switch test 2 results, test 3 (range fog, game-thread profile)
+
+- Test 2 (2a6e50e, handheld, stock CPU 1020 / GPU 384 / memory 1331 MHz): precompiled shaders from the 7
+  recorded keys covered every draw (121212 of 121212 states); GPU 20-27 ms per frame (test 1, ubershader) ->
+  6-9 ms. 30 fps except one stretch in the Forest's first large area: 18-21 fps for about 40 s with about
+  4000 draws per frame; game thread 34-37 ms per frame, GPU 9-10 ms, render thread 10 ms. The vertex decode
+  already runs on the GP thread and its helper, so the limit is the game thread itself.
+- Fog: the Forest uses range fog (BP 0xE8 = 0x696, K 102100 108104 11210C 11F118 130127).
+- Test 3: range fog as Dolphin computes it (offset from the vertex shader's viewport x, K / 64); the
+  game-thread sampling profiler (SR_PROFILE=1 in env.txt) with per-function totals; the port's own icon.
+- GameCube saves: tools/import_gci.py put the owner's GameCube character on the card (PSO_SYSTEM serial and CRC
+  redone as Dolphin does; the tool's CRC matched the original file, and its serial matched the one the port's
+  own PSO_SYSTEM carried).
+
 ## 2026-11-19: Switch test 1 (first NRO, commit e42ee70)
 
 - Cloud build with devkitPro's Linux toolchain (copied out of ghcr.io/danfromtico/switch-dev-legacy-vulkan:

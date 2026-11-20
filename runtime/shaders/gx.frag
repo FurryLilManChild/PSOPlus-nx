@@ -10,6 +10,7 @@ VARY(6) in vec3 v_tex4;
  VARY(7) in vec3 v_tex5;
  VARY(8) in vec3 v_tex6;
  VARY(9) in vec3 v_tex7;
+VARY(10) noperspective in float v_fogx;  /* range fog: gx.vert */
 #ifdef PERPIXEL_LIGHT
 /* PC per-pixel lighting (setting char_light): the XF colour channels evaluated per pixel for lit 3D draws
    (characters, boards, objects) from the interpolated position and normal, instead of per vertex */
@@ -271,7 +272,10 @@ void main() {
   /* fog (BP 0xEE-0xF2), as Dolphin's pixel shader (WriteFog): the EFB depth turned into eye distance
      (perspective: A / (B_mag - (z >> B_shift)); orthographic: A * z), minus C, through the selected
      curve, then a blend toward the fog colour. Read with BP(): a run-time branch in every variant.
-     The range adjustment (BP 0xE8-0xED, wider fog towards the screen sides) is not done. */
+     With the range adjustment on (BP 0xE8 bit 10) the distance grows towards the screen sides, as
+     Dolphin does it: offset = horizontal distance from the fog centre (BP 0xE8 bits 0-9, the viewport
+     centre + 342) in viewport half-widths, k from the ten 12-bit values in BP 0xE9-0xED (low half
+     first, value / 64) at index 9 - 9|offset|, and the eye distance times sqrt(offset^2 + k^2) / k. */
   uint f3 = BP(0xF1), fsel = bits(f3, 21, 3);
   if (fsel != 0u && DEBUG_TEV != 9) {  /* 9: fog off (debugging) */
     float fa = gx_float(BP(0xEE)), fc = gx_float(f3);
@@ -279,6 +283,18 @@ void main() {
     float ze = bits(f3, 20, 1) == 0u
       ? fa * 16777216.0 / float(int(bits(BP(0xEF), 0, 24)) - int(zi >> bits(BP(0xF0), 0, 5)))
       : fa * float(zi) / 16777216.0;
+    uint fr = BP(0xE8);
+    if (bits(fr, 10, 1) != 0u) {
+      float wd = abs(uintBitsToFloat(XR(0x1A)));
+      float offs = v_fogx + (wd > 0.0 ? (uintBitsToFloat(XR(0x1D)) - float(bits(fr, 0, 10))) / wd : 0.0);
+      float fi = clamp(9.0 - abs(offs) * 9.0, 0.0, 9.0);
+      int il = min(int(fi), 8);
+      uint rl = BP(0xE9 + il / 2), ru = BP(0xE9 + (il + 1) / 2);
+      float kl = float((il & 1) == 0 ? bits(rl, 12, 12) : bits(rl, 0, 12)) / 64.0;
+      float ku = float(((il + 1) & 1) == 0 ? bits(ru, 12, 12) : bits(ru, 0, 12)) / 64.0;
+      float k = mix(kl, ku, fi - float(il));
+      if (k > 0.0) ze *= sqrt(offs * offs + k * k) / k;
+    }
     float fog = clamp(ze - fc, 0.0, 1.0);
     if (fsel == 4u) fog = 1.0 - exp2(-8.0 * fog);
     else if (fsel == 5u) fog = 1.0 - exp2(-8.0 * fog * fog);

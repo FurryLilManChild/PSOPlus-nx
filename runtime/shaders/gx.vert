@@ -20,6 +20,9 @@ VARY(6) out vec3 v_tex4;
  VARY(7) out vec3 v_tex5;
  VARY(8) out vec3 v_tex6;
  VARY(9) out vec3 v_tex7;
+/* range fog (gx.frag): the horizontal position in the game's own viewport, -1..1, before the port's wide
+   screen and field of view changes; interpolated linearly across the screen */
+VARY(10) noperspective out float v_fogx;
 #ifdef PERPIXEL_LIGHT
 /* PC per-pixel lighting (gx.frag): what the lighting needs, interpolated */
 out vec3 v_pv; out vec3 v_n; out vec4 v_vc0; out vec4 v_vc1;
@@ -78,6 +81,7 @@ void main() {
   float P3 = uintBitsToFloat(XR(0x23)), P4 = uintBitsToFloat(XR(0x24)), P5 = uintBitsToFloat(XR(0x25));
   vec4 clip = XR(0x26) == 0u ? vec4(P0 * pv.x + P1 * pv.z, P2 * pv.y + P3 * pv.z, P4 * pv.z + P5, -pv.z)
                              : vec4(P0 * pv.x + P1, P2 * pv.y + P3, P4 * pv.z + P5, 1.0);
+  v_fogx = clip.w != 0.0 ? clip.x * sign(uintBitsToFloat(XR(0x1A))) / clip.w : 0.0;
   /* wide screen modes (gx_render.h GX_XR_WIDE_K): the backend widened the viewport k times; 2D
      (orthographic) draws keep their 4:3 proportions, placed per draw (GX_ANCHOR_* in the normal's w,
      gx_render.c wide_anchor): in the middle, at the left or right edge, or stretched to the width */
