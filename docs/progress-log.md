@@ -1,5 +1,16 @@
 # Progress log (newest first)
 
+## 2026-11-19: Switch test 1 (first NRO, commit e42ee70)
+
+- Cloud build with devkitPro's Linux toolchain (copied out of ghcr.io/danfromtico/switch-dev-legacy-vulkan:
+  devkitA64 GCC 15.2, libnx, deko3d, uam). 109 of 109 steps, no errors; NRO 31.4 MB, sha256 d4420b4f...
+  ELF kept as build/switch/psoplus-e42ee70.elf for crash offsets.
+- deko3d renderer; no PSO shader keys yet, so every draw uses the precompiled ubershader (nothing compiles on
+  the console). The PC build now records keys to shader_keys.txt by default; the next Switch build folds them in.
+- Stall report skipped while movie.rel is linked; function-entry trace off on Switch.
+- Preflight: tree, codegen, compile (PC), hardware, addresses all PASS at e42ee70.
+- Known going in: movies show black (sound only, Start skips), no fog, Riders colours in the menu.
+
 ## 2026-11-19: test 3 result, test 4 (interrupt-delivery diagnostics)
 
 - Test 3 (3d6b7ff4): sound works (the owner). Black screen right after choosing offline mode, with no movie.rel
