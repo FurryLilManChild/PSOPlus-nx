@@ -48,7 +48,7 @@ HOME_OK = re.compile(r"(?i)(users[\\/](?:<[^>]+>|(?:you|name|username|me|public)
 # drawn by tools/make_app_icon.py, not from the game; exactly these files with exactly this content. A new or
 # changed picture is refused until its SHA-1 is put here.
 OWN_ART = {
-    "setup/icon.png": "737054c197cdc9715b92348f012dc09dce641f37",
+    "setup/icon.png": "aa7ab1d0a10746718ced4ead05d0486c6ee015b5",
     "setup/icon_256.jpg": "437038accde23ba6a1a5d20b26067bdf81325402",
 }
 

@@ -158,18 +158,20 @@ def shader_key_files():
 
 
 def default_pc_icon():
-    """build/icon_default.ico from setup/icon.png (16-256 px PNGs in one .ico), or "" if the picture is missing"""
+    """build/icon_default.ico from setup/icon.png (a 256 x 256 PNG, stored as is: Windows reads PNG
+    icon entries and scales them down), or "" if the picture is missing"""
     src, dst = os.path.join(ROOT, "setup", "icon.png"), os.path.join(ROOT, "build", "icon_default.ico")
     if not os.path.isfile(src):
         return ""
     if not os.path.isfile(dst) or os.path.getmtime(dst) < os.path.getmtime(src):
-        sys.path.insert(0, os.path.join(ROOT, "tools"))
-        import android_icon
-        import make_icon
-        px = android_icon.load(src)
+        import struct
+        png = open(src, "rb").read()
+        w, h = struct.unpack(">II", png[16:24])
         os.makedirs(os.path.dirname(dst), exist_ok=True)
-        with open(dst, "wb") as f:
-            f.write(make_icon.ico([android_icon.resample(px, n) for n in (16, 32, 48, 64, 128, 256)]))
+        with open(dst, "wb") as f:  # ICONDIR, one ICONDIRENTRY (0 = 256 px), the PNG
+            f.write(struct.pack("<HHH", 0, 1, 1))
+            f.write(struct.pack("<BBBBHHII", w & 255, h & 255, 0, 0, 1, 32, len(png), 22))
+            f.write(png)
     return "build/icon_default.ico"
 
 
@@ -423,7 +425,7 @@ with open(os.path.join(ROOT, "build.ninja"), "w") as f:
         objs.append(o)
     # program icon (PC, llvm-mingw): your own .ico (--icon), else build/icon_default.ico, made here from the
     # port's icon in setup/icon.png (our own art, tools/make_app_icon.py)
-    icon = os.path.abspath(args.icon).replace("\\", "/") if args.icon else default_pc_icon()
+    icon = os.path.abspath(args.icon).replace("\\", "/") if args.icon else (default_pc_icon() if args.target == "host" else "")
     if args.target == "host" and args.toolchain == "mingw" and os.path.isfile(os.path.join(ROOT, icon)):
         rc = OUT + "/gen/icon.rc"
         with open(os.path.join(ROOT, rc), "w", encoding="utf-8") as f:

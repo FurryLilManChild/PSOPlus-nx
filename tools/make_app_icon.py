@@ -81,5 +81,5 @@ img = text(((S - w) / 2, 70), "PSO", big, (235, 248, 255))
 w2 = small.getlength("Ep. I & II Plus")
 img = text(((S - w2) / 2, 380), "Ep. I & II Plus", small, (130, 225, 255))
 img.resize((256, 256), Image.LANCZOS).save("setup/icon_256.jpg", quality=95)
-img.resize((512, 512), Image.LANCZOS).save("setup/icon.png")
+img.resize((256, 256), Image.LANCZOS).save("setup/icon.png")
 
