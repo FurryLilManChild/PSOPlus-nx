@@ -56,7 +56,7 @@ ap.add_argument("--bundle-id", default="", help="ios: app bundle ID (default: ne
 ap.add_argument("--moltenvk", default="", help="ios: MoltenVK folder holding include/ and static/ (default build/ext/MoltenVK/MoltenVK)")
 ap.add_argument("--abi", choices=["arm64-v8a", "x86_64", "both"], default="arm64-v8a", help="android: phone (arm64-v8a) or emulator (x86_64)")
 ap.add_argument("--keystore", default="", help="android: local signing key (made if missing; default next to the SDK)")
-ap.add_argument("--icon", default="", help="your own program icon (.ico; android and ios also .png) instead of the fan-made icon in "
+ap.add_argument("--icon", default="", help="your own program icon (.ico; android and ios also .png) instead of the port's icon in "
                 "setup/icon.png. Keep it out of git unless it is your own art")
 ap.add_argument("--android-app", choices=["game", "probe"], default="game", help="android: the game, or the milestone 1 probe APK")
 args = ap.parse_args()
@@ -422,7 +422,7 @@ with open(os.path.join(ROOT, "build.ninja"), "w") as f:
         n.build(o, "cxx", IMGUI + "/" + src, variables={"extra": "-O2 -w"})
         objs.append(o)
     # program icon (PC, llvm-mingw): your own .ico (--icon), else build/icon_default.ico, made here from the
-    # fan-made icon in setup/icon.png (by cedry2kio, README credits)
+    # port's icon in setup/icon.png (our own art, tools/make_app_icon.py)
     icon = os.path.abspath(args.icon).replace("\\", "/") if args.icon else default_pc_icon()
     if args.target == "host" and args.toolchain == "mingw" and os.path.isfile(os.path.join(ROOT, icon)):
         rc = OUT + "/gen/icon.rc"
@@ -441,7 +441,7 @@ with open(os.path.join(ROOT, "build.ninja"), "w") as f:
         n.rule("nacp", "%s --create \"PSO Ep I&II Plus\" \"native port (own disc image required)\" 0.0.1 $out" % dkp_tool("nacptool"),
                description="NACP $out")
         n.build(OUT + "/psoplus.nacp", "nacp")
-        # the Homebrew Menu icon: setup/icon_256.jpg (256 x 256 JPEG; the fan-made icon by cedry2kio, README credits)
+        # the Homebrew Menu icon: setup/icon_256.jpg (256 x 256 JPEG; our own art, tools/make_app_icon.py)
         nro_icon = "setup/icon_256.jpg" if os.path.isfile(os.path.join(ROOT, "setup/icon_256.jpg")) else ""
         n.rule("nro", "%s $in $out --nacp=%s/psoplus.nacp%s" % (dkp_tool("elf2nro"), OUT, " --icon=" + nro_icon if nro_icon else ""),
                description="NRO $out")
@@ -454,7 +454,7 @@ with open(os.path.join(ROOT, "build.ninja"), "w") as f:
     if args.target == "android":
         dex, sdl_libs = android_build.add_common(n, atools, py, ROOT, [args.abi])
         apk = "build/android/sonicriders-%s.apk" % args.abi
-        # the app icon: your own (--icon), else the fan-made icon in setup/icon.png
+        # the app icon: your own (--icon), else the port's icon in setup/icon.png
         app_icon = os.path.abspath(args.icon).replace("\\", "/") if args.icon else "setup/icon.png"
         if not os.path.isfile(os.path.join(ROOT, app_icon)):
             print("configure: no app icon (%s not found); the APK gets Android's default icon" % app_icon)

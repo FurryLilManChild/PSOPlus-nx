@@ -44,54 +44,12 @@ HOME_PATH = re.compile(r"(?i)(?:[a-z]:[\\/]" + "users" + r"[\\/][^\\/\s]+|/c/" +
 HOME_OK = re.compile(r"(?i)(users[\\/](?:<[^>]+>|(?:you|name|username|me|public)\b)|/home/(?:<|(?:you|user|runner)\b))")
 
 
-# The one exception to "no binary files" (the user's OK, 2026-11-03): the touch-control pictures, the
-# maintainer's own art (not from the game), exactly these files with exactly this content. A new or changed
-# picture is refused until its SHA-1 is put here. Also the launcher banner (the user's OK, 2026-11-07): public
-# fan art the user chose, not from the game.
+# The one exception to "no binary files": the port's own icon (the owner asked for it, 2026-11-20), original art
+# drawn by tools/make_app_icon.py, not from the game; exactly these files with exactly this content. A new or
+# changed picture is refused until its SHA-1 is put here.
 OWN_ART = {
-    # User-requested documentation: reviewed current installer UI, privacy masks and vector annotations.
-    "docs/images/installation/switch-completion.png": "117e009d71e381fddb4c4cb6332ece8c87c3f63d",
-    "docs/images/installation/switch-installer.png": "c99dbc9b73cd2eff24ca90320837d46c7323a15d",
-    "docs/images/installation/switch-options.png": "d3f833422dd4516892cf3c3d6f0081adcc328ad3",
-    "docs/images/installation/switch-select-card.png": "11edb8b1b22b4918e675a8ab53135bda53652b70",
-    "docs/images/installation/switch-select-disc.png": "61022475a40e09d810c6109c18162d854e26b1c4",
-    "docs/images/installation/switch2-completion.png": "871abff16aa48ed974e3197b4ff43e4ed9fcfb43",
-    "docs/images/installation/switch2-installer.png": "2d0427e65a7c73bfdd9d84250ac27995cd60bf60",
-    "docs/images/installation/switch2-options.png": "38d20665c4661e4bf94671f9de4b58b0d6d2df55",
-    "docs/images/installation/switch2-select-card.png": "3415e8d035862c907f3cdeefe8bd3dbe7e84a600",
-    "docs/images/installation/switch2-select-disc.png": "eff37dd176652aa70c7c8977d04d0e95f70abfcb",
-    "docs/images/switch2-alpha1-banner.jpg": "b4be7ce0f7e34e3b56735283781a58c775fc5161",  # user-approved Lanmana banner, unchanged with signature (2026-11-18)
-    "docs/images/switch2-poster.jpg": "1b3ad238b2a0864f3b838fbde681415262cc5d47",  # README Switch 2 poster, Lanmana art with signature (user's choice, 2026-11-19)
-    "docs/images/riders-plus/riders-plus-banner.jpg": "db92bc23219a1cc21e32f950d26c205b56a49c11",  # README Riders Plus banner (user's choice, 2026-11-19)
-    "launcher/banner.jpg": "a1d51fb7890668be5dfd126311b946aec8744339",
-    # README comparison screenshots, original vs this port (the user's OK, 2026-11-11): exactly these four
-    "docs/images/compare/original-1.jpg": "4bd5401024ca6f240715dc878434d6d298f59421",
-    "docs/images/compare/recomp-1.jpg": "0c6a55e5adb65b61a34af262b847ada0e7df3a8e",
-    "docs/images/compare/original-2.jpg": "12b047881bffee3a6474c4d276a37ad03c827d6b",
-    "docs/images/compare/recomp-2.jpg": "fcd82ec1a09589caf26a55fcaf501e0f7bd4cdde",
-    "docs/images/settings-display.jpg": "c02503fd7d6f88b77049d5b695505cab0fc6bb7b",  # settings menu screenshot for the v0.8.0 notes (the user's OK, 2026-11-11)
-    # v0.8.2 release notes (the user's OK, 2026-11-14): the user's ChatGPT banners and a PC race screenshot pair
-    "docs/images/v0.8.2/riders-plus-banner.jpg": "74a6b9d10125473c5be6130b8520b29aabc5c750",  # fixed hand (2026-11-16)
-    "docs/images/issues/mp-level-hud.jpg": "e8d45030f746c1ce4f90e66e622662965dd961e0",  # issue: split-screen HUD stays Lv 3 (user, 2026-11-16)
-    "docs/images/v0.8.2/online-coming-soon.jpg": "2d581b0f9a375a972d77d26a7d870cfeade37af2",
-    "docs/images/v0.8.2/riders-plus-lv5.jpg": "334b4f1100ec2981fd006e6ea71ffbc81046e2e1",
-    # README Riders Plus section (the user's OK, 2026-11-16): the user's recorded PC race, replayed at 21:9
-    "docs/images/riders-plus/lv4-level-up.jpg": "49e32a6731443637290c05c66091ecf539dfbbd5",
-    "docs/images/riders-plus/lv5-level-up.jpg": "e943e0f254e90fc9076ac0dedd5fbbde8db8b0c1",
-    "docs/images/riders-plus/gold-capsule-298.jpg": "785f018329aae3140b9fa36fadfc437808b482fb",
-    "docs/images/riders-plus/lv5-boost.jpg": "56cefaa56117aa79fc437d676cc7f10fe9287daa",
-    "docs/images/riders-plus/trick-rank-ss.jpg": "d8d432b8da8a8a35b25ecaf7131ad59e8620f533",
-    "docs/images/riders-plus/tunnel-294.jpg": "8ac53a61c267a2e2cbb103b35d38f4c7b229803d",
-    "launcher/icon_256.png": "80541e60eb82d9440c001da3bc4c7240bda2b111",  # launcher icon (user's ChatGPT art, 2026-11-09)
-    "launcher/icon_32.png": "24e3018e7e6651be4cbba8228f81364bf9d0a70e",
-    "setup/icon.png": "b84f997daba5df2563d0c3526cf633aa87151ebf",  # game icon: cedry2kio's fan-made icon (user's OK, 2026-11-10; README credits)
-    "setup/icon_256.jpg": "4ab58b2f4da4418a9febadea57937eae7f2da5a6",  # the same, 256 x 256 for the Switch NRO
-    "android/touch_icons/boost_b.png": "e91d748d8a99c76b0aad985ea40ae1437c10e982",
-    "android/touch_icons/drift_r.png": "45e1558994abaad8f85966ad7c8ff32ee5cde5ac",
-    "android/touch_icons/jump_a.png": "d1ff0d81d64478b89993997059c635d42cd3c331",
-    "android/touch_icons/stick_base.png": "7279efbd5b60980cf5af16cb5a1c6666f34a1455",
-    "android/touch_icons/stick_knob.png": "181e6e6f4882716c1c743ee5fdd85286224dd6dc",
-    "android/touch_icons/tornado_lr.png": "5ab1c2552a4a15757d974abf7aa8e87226a2b441",
+    "setup/icon.png": "737054c197cdc9715b92348f012dc09dce641f37",
+    "setup/icon_256.jpg": "437038accde23ba6a1a5d20b26067bdf81325402",
 }
 
 
