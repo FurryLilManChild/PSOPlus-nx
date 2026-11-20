@@ -13,6 +13,7 @@
 void rel_relink(void);  /* loader.c */
 
 static int g_linked;
+int rel_is_linked(void) { return g_linked; }  /* frame_pacing.c: no stall report while a movie plays */
 
 void hle_OSLink(Cpu* c) {
     uint32_t m = c->r[3], bss = c->r[4];

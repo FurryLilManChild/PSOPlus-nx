@@ -1073,9 +1073,15 @@ static void execute(GxFrame* f) {
                 cur_regs = c->a;
                 p_glBindBufferRange(GL_UNIFORM_BUFFER, 0, g_ubo, (GLintptr)(stride * c->a), sizeof(GxUniforms));
                 apply_state(cur);
-                /* SR_SHADER_KEYS=<file>: record the fragment-shader specialization keys (gx_shader_key.c) */
+                /* the fragment-shader specialization keys (gx_shader_key.c) for the Switch build's precompiled
+                 * shaders: recorded by default to shader_keys.txt in the working folder (SR_SHADER_KEYS=<file>
+                 * elsewhere, SR_SHADER_KEYS=off not at all) */
                 static const char* keys = (const char*)1;
-                if (keys == (const char*)1) keys = getenv("SR_SHADER_KEYS");
+                if (keys == (const char*)1) {
+                    keys = getenv("SR_SHADER_KEYS");
+                    if (!keys) keys = "shader_keys.txt";
+                    else if (!strcmp(keys, "off")) keys = NULL;
+                }
                 if (keys) {
                     GxFragKey k;
                     gx_frag_key(cur->bp, &k);

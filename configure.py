@@ -325,6 +325,10 @@ with open(os.path.join(ROOT, "build.ninja"), "w") as f:
                    % (dkp, arch, dkp, OUT))
         exe = OUT + "/psoplus.elf"
 
+    def dkp_tool(name):  # devkitPro's tools: name.exe on Windows, name on Linux (the cloud's Docker image)
+        p = "%s/tools/bin/%s" % (dkp, name)
+        return p + ".exe" if os.path.isfile(p + ".exe") else p
+
     n.rule("cc", "$cc -MMD -MF $out.d $cflags $extra -c $in -o $out", depfile="$out.d", deps="gcc",
            description="CC $in")
     n.rule("cxx", "$cxx -MMD -MF $out.d $cxxflags $extra -c $in -o $out", depfile="$out.d", deps="gcc",
@@ -368,7 +372,7 @@ with open(os.path.join(ROOT, "build.ninja"), "w") as f:
         # the picture options' passes share the Vulkan quad shaders (QUAD_DK)
         shader_src += ["runtime/shaders/vk_quad.vert", "runtime/shaders/vk_bright.frag", "runtime/shaders/vk_blur.frag",
                        "runtime/shaders/vk_grade.frag", "runtime/shaders/vk_easu.frag", "runtime/shaders/vk_rcas.frag"]
-        n.rule("shaders", "%s tools/embed_shaders.py dksh $out %s/tools/bin/uam.exe %s/shaders" % (py, dkp, OUT),
+        n.rule("shaders", "%s tools/embed_shaders.py dksh $out %s %s/shaders" % (py, dkp_tool("uam"), OUT),
                description="UAM $out")
     if shader_h:
         n.build(shader_h, "shaders", shader_src)
@@ -376,7 +380,7 @@ with open(os.path.join(ROOT, "build.ninja"), "w") as f:
         # specialized fragment shaders from config/GPOE8P/shader_keys.txt (+ local extras in build/shaderkeys/)
         key_files = shader_key_files()
         spec_h = OUT + "/gen/gx_spec_dksh.h"
-        n.rule("specshaders", "%s tools/gen_shaders.py $out %s/tools/bin/uam.exe %s/spec $in_keys" % (py, dkp, OUT),
+        n.rule("specshaders", "%s tools/gen_shaders.py $out %s %s/spec $in_keys" % (py, dkp_tool("uam"), OUT),
                description="SPEC $out")
         n.build(spec_h, "specshaders", ["tools/gen_shaders.py", "tools/embed_shaders.py", "runtime/shaders/gx.frag",
                                         "runtime/shaders/gx_common.glsl", "runtime/shaders/gx_light.glsl"] + key_files,
@@ -434,12 +438,12 @@ with open(os.path.join(ROOT, "build.ninja"), "w") as f:
     else:
         n.build(exe, "link", objs, implicit=[android_build.sdl_lib(args.abi)] if args.target == "android" else None)
     if args.target == "switch":
-        n.rule("nacp", "%s/tools/bin/nacptool.exe --create \"PSO Ep I&II Plus\" \"native port (own disc image required)\" 0.0.1 $out" % dkp,
+        n.rule("nacp", "%s --create \"PSO Ep I&II Plus\" \"native port (own disc image required)\" 0.0.1 $out" % dkp_tool("nacptool"),
                description="NACP $out")
         n.build(OUT + "/psoplus.nacp", "nacp")
         # the Homebrew Menu icon: setup/icon_256.jpg (256 x 256 JPEG; the fan-made icon by cedry2kio, README credits)
         nro_icon = "setup/icon_256.jpg" if os.path.isfile(os.path.join(ROOT, "setup/icon_256.jpg")) else ""
-        n.rule("nro", "%s/tools/bin/elf2nro.exe $in $out --nacp=%s/psoplus.nacp%s" % (dkp, OUT, " --icon=" + nro_icon if nro_icon else ""),
+        n.rule("nro", "%s $in $out --nacp=%s/psoplus.nacp%s" % (dkp_tool("elf2nro"), OUT, " --icon=" + nro_icon if nro_icon else ""),
                description="NRO $out")
         n.build(OUT + "/psoplus.nro", "nro", exe, implicit=[OUT + "/psoplus.nacp"] + ([nro_icon] if nro_icon else []))
         n.default(OUT + "/psoplus.nro")

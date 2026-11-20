@@ -56,6 +56,8 @@ static int stall_watch(void* arg) {
         platform_sleep_ns(1000000000ull);
         uint64_t last = g_last_flip_ns, now = platform_now_ns();
         if (g_host_pause || !last) continue;
+        { int rel_is_linked(void);  /* a Sofdec movie (movie.rel) writes its frames straight to the XFB: no flips */
+          if (rel_is_linked()) { reported = 0; continue; } }
         if (now - last < 5000000000ull) { reported = 0; continue; }
         if (reported) continue;
         reported = 1;
@@ -85,7 +87,11 @@ void hle_frame_end(Cpu* c) {
     f_803DCF2C_orig(c);  /* the game's own flip: waits for its retraces */
     g_last_return_ns = platform_now_ns();
     if (!g_last_flip_ns) {  /* first flip: start the stall watch and the function-entry trace it reports */
+#ifdef __SWITCH__
+        g_ppc_trace = 0;  /* the function-entry trace costs speed; the console report has the rest */
+#else
         g_ppc_trace = getenv("SR_NO_STALL_TRACE") == NULL;
+#endif
         rt_thread_start(stall_watch, NULL);
     }
     g_last_flip_ns = g_last_return_ns;

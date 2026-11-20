@@ -93,6 +93,7 @@ uint64_t g_menu_since;
 std::atomic<int> g_fps10{0};
 int g_shown_fps10 = -1;
 int g_tab, g_select_tab = -1;
+const int kTabs = 4;  /* settings_window() */
 bool g_mods_changed;
 int g_shot_request, g_pads_request, g_quit_request;
 bool g_just_opened;
@@ -558,20 +559,7 @@ void tab_performance() {
 #if !defined(__SWITCH__) && !defined(SR_PHONE)
     pc_frame_rate();
 #else
-    static const char* const tips[FR_MODES] = {
-        "60 fps while the console keeps up. In scenes too busy for that it switches to a steady 30 fps at full "
-        "speed, and back to 60 once the scene allows it.",
-        "60 fps while the console keeps up; when it cannot, frames are left out instead, so races keep their real speed.",
-        "Sonic Riders' own 30 fps mode: a steady 30 fps at full speed. The smoothest choice on a console that is not overclocked."};
-    const int order[FR_MODES] = {FR_AUTO, FR_30, FR_60};
-    for (int k = 0; k < FR_MODES; k++) {
-        int m = order[k];
-        if (radio(settings_framerate_name(m), g_settings.framerate == m, tips[m])) {
-            g_settings.framerate = m;
-            settings_apply();
-        }
-    }
-    note("All three keep the game at its real speed. If Auto looks uneven, 60 fps or 30 fps is steadier.");
+    note("Phantasy Star Online runs at its original 30 fps, at full speed, as on the GameCube.");
 #endif
     heading("Frame counter");
     if (check("Show the frame rate in the corner", &g_settings.show_fps, "Frames drawn per second, top left."))
@@ -678,7 +666,7 @@ void tab_mods() {
 }
 
 void tab_about() {
-    heading("Sonic Riders native port");
+    heading("PSO Episode I and II Plus native port");
     ImGui::Text("Version: %s", g_build_version);
 #ifdef _WIN32
     if (const char* latest = update_available()) {
@@ -811,9 +799,10 @@ void settings_window() {
             const char* name;
             void (*draw)();
         };
-        static const Tab tabs[] = {{"Display", tab_display}, {"Performance", tab_performance}, {"Controls", tab_controls},
-                                   {"Gameplay", tab_gameplay}, {"Mods", tab_mods},          {"About", tab_about}};
-        const int ntabs = (int)(sizeof tabs / sizeof tabs[0]);
+        /* PSO: Riders' Gameplay (gear cheats) and Mods tabs are left out */
+        static const Tab tabs[kTabs] = {{"Display", tab_display}, {"Performance", tab_performance}, {"Controls", tab_controls},
+                                        {"About", tab_about}};
+        const int ntabs = kTabs;
         if (ImGui::BeginTabBar("tabs", ImGuiTabBarFlags_FittingPolicyShrink)) {
             for (int i = 0; i < ntabs; i++) {
                 ImGuiTabItemFlags f = g_select_tab == i ? ImGuiTabItemFlags_SetSelected : 0;
@@ -1124,8 +1113,8 @@ int overlay_input(unsigned held) {
         }
     }
     if (!g_quit_popup) {
-        if (pressed & OV_TAB_L) g_select_tab = (g_tab + 5) % 6;
-        if (pressed & OV_TAB_R) g_select_tab = (g_tab + 1) % 6;
+        if (pressed & OV_TAB_L) g_select_tab = (g_tab + kTabs - 1) % kTabs;
+        if (pressed & OV_TAB_R) g_select_tab = (g_tab + 1) % kTabs;
     }
     feed(ImGuiKey_GamepadDpadUp, held, changed, OV_UP);
     feed(ImGuiKey_GamepadDpadDown, held, changed, OV_DOWN);

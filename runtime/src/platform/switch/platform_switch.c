@@ -2,7 +2,7 @@
  *
  * Files (sdmc:/switch/psoplus/):
  *   psoplus.nro     the program
- *   *.iso               the user's own disc image (GXEE8P, the first .iso found)
+ *   *.iso               the user's own disc image (GPOE8P rev 2, the first .iso or .gcm found)
  *   saves/card_a.raw    memory card in slot A (created formatted on first start)
  *   psoplus.log     log of the last session
  *
@@ -95,7 +95,7 @@ void platform_init(void) {
     if (!freopen(BASE_DIR "/psoplus.log", "w", stderr)) return;
     static char logbuf[64 * 1024];
     setvbuf(stderr, logbuf, _IOFBF, sizeof logbuf);  /* flushed by rt_log at most once a second */
-    rt_log("[switch] Sonic Riders native port; log started");
+    rt_log("[switch] PSO Episode I and II Plus native port; log started");
     /* debugging switches (SR_WATCHDOG, ...) as KEY=VALUE lines in env.txt, there being no environment */
     FILE* f = fopen(BASE_DIR "/env.txt", "r");
     if (f) {
