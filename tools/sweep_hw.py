@@ -2,6 +2,7 @@
 """Whole-program hardware sweep for PsoV3.dol (switch-port-base: "every hardware register access").
 
   sweep_hw.py BASEROM/PsoV3.dol CONFIG/symbols.txt [--exceptions config/GPOE8P/hw_exceptions.txt]
+             [--rel BASEROM/movie.rel CONFIG/movie/symbols.txt]   (the module, linked where gcrecomp puts it)
 
 Lists, for every function, the hardware it touches directly:
   - memory-mapped registers: `lis rX, 0xCC00` (or 0xCC01) followed by loads/stores off rX in the same
@@ -18,6 +19,7 @@ with the reason it is safe. Prints PASS or FAIL. Nothing from the game is writte
 """
 import argparse
 import collections
+import os
 import re
 import struct
 import sys
@@ -66,6 +68,7 @@ def main():
     ap.add_argument("dol"); ap.add_argument("symbols")
     ap.add_argument("--exceptions", default="")
     ap.add_argument("--hle", default="")
+    ap.add_argument("--rel", nargs=2, default=None, metavar=("REL", "SYMBOLS"))
     a = ap.parse_args()
     exc = {}
     if a.exceptions:
@@ -75,6 +78,16 @@ def main():
             if key:
                 exc[key] = line[1].strip() if len(line) > 1 else ""
     text = load_dol(a.dol)
+    rel_funcs = []
+    if a.rel:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from gcbin import Rel
+        rel = Rel(a.rel[0])
+        base = 0x81800000  # gcrecomp.py REL_BASE
+        img, addrs, _, _ = rel.link(base)
+        text.append((base, bytes(img)))
+        for start, size, name in load_funcs(a.rel[1]):
+            rel_funcs.append((addrs[1] + start, size, "movie:" + name))  # dtk's module offsets are within .text (section 1)
 
     def word(addr):
         for lo, data in text:
@@ -82,7 +95,7 @@ def main():
                 return struct.unpack_from(">I", data, addr - lo)[0]
         return None
 
-    funcs = load_funcs(a.symbols)
+    funcs = load_funcs(a.symbols) + rel_funcs
     trk = [f for f in funcs if f[2].startswith("TRK") or f[2] == "InitMetroTRK"]
     trk_lo, trk_hi = (min(f[0] for f in trk), max(f[0] + f[1] for f in trk)) if trk else (0, 0)
     hle = set()

@@ -7,7 +7,7 @@ Runs in the cloud on a clean push. Prints PASS or FAIL per check and a final RES
 to the owner quotes. Checks:
   tree       the working tree is clean and HEAD is what GitHub's main has (the build the owner gets)
   codegen    gcrecomp's report: only the explained leftovers (data words, the 0x8000C2FC string, the
-             __ptmf_scall dispatch at 0x80396A74), and every hle.txt line became a native replacement
+             __ptmf_scall dispatch at 0x80396A74; movie.rel's 7 switch tables found), and every hle.txt line became a native replacement
   compile    the PC build with the same clang (llvm-mingw) and SDL2 as the owner's PC: every generated file
              and runtime source compiles and the program links
   hardware   tools/sweep_hw.py: every device block, special register and rfi function is modelled,
@@ -83,7 +83,7 @@ def compile_check(a):
 
 def hardware():
     r = run([sys.executable, "tools/sweep_hw.py", "baserom/PsoV3.dol", GAME + "/symbols.txt", "--hle", GAME + "/hle.txt",
-             "--exceptions", GAME + "/hw_exceptions.txt"])
+             "--exceptions", GAME + "/hw_exceptions.txt", "--rel", "baserom/movie.rel", GAME + "/movie/symbols.txt"])
     last = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else r.stderr.strip()[-200:]
     bad = [l.strip() for l in r.stdout.splitlines() if "NOT " in l or " CHECK " in l]
     check("hardware", r.returncode == 0, last + ("; " + "; ".join(bad[:10]) if bad else ""))

@@ -8,8 +8,8 @@ Steps (each printed as "step N of 7"):
   1. git: fetch GitHub's main and fast-forward to it; print the commit being built. Nothing is built if this
      folder has local changes to tracked files or cannot fast-forward.
   2. Disc: the first .rvz/.iso in assets\ becomes baserom\pso.iso once (converted from .rvz; SHA-1 checked).
-  3. PsoV3.dol copied from the disc into baserom\ (SHA-1 checked).
-  4. decomp-toolkit analysis (only when config\GPOE8P\symbols.txt is missing or the seed changed).
+  3. PsoV3.dol and movie.rel copied from the disc into baserom\ (SHA-1 checked).
+  4. decomp-toolkit analysis (only when config\GPOE8P\symbols.txt is missing or the seed or config changed).
   5. configure (PC, llvm-mingw clang, SDL2).
   6. ninja: recompile and build; its own [n/N] counter shows progress.
   7. Summary: the commit, the program, its size.
@@ -25,6 +25,7 @@ $LogFile = Join-Path $Root "build_pc.log"
 $Tools = Join-Path $Root "toolchain"
 $IsoSha1 = "0ff155311f4cc57951c03baeb1a8cc15de5fe1cd"
 $DolSha1 = "0d85744b51d7379efb025a943d0cd5aaae2191a3"
+$RelSha1 = "767332daf33120d9497dc6426ed644c46bbf3ff3"   # movie.rel, the Sofdec movie player module
 
 "" | Out-File -FilePath $LogFile -Encoding utf8
 function Write-LogFile([string]$text) { [IO.File]::AppendAllText($LogFile, $text + "`r`n", [Text.Encoding]::UTF8) }
@@ -90,22 +91,28 @@ if (-not (Test-Path $iso)) {
 } else { Log "  baserom\pso.iso is already there" }
 
 # ---- 3. PsoV3.dol ----
-Step 3 "PsoV3.dol from the disc"
+Step 3 "PsoV3.dol and movie.rel from the disc"
 $dol = Join-Path $Root "baserom\PsoV3.dol"
 $ok = (Test-Path $dol) -and ((Get-FileHash $dol -Algorithm SHA1).Hash.ToLower() -eq $DolSha1)
 if (-not $ok) { Run "PsoV3.dol extraction" $py @("tools\disc\extract_file.py", $iso, "PsoV3.dol", $dol, "--sha1", $DolSha1) }
 else { Log "  baserom\PsoV3.dol is already there (SHA-1 checked)" }
+$rel = Join-Path $Root "baserom\movie.rel"
+$ok = (Test-Path $rel) -and ((Get-FileHash $rel -Algorithm SHA1).Hash.ToLower() -eq $RelSha1)
+if (-not $ok) { Run "movie.rel extraction" $py @("tools\disc\extract_file.py", $iso, "movie.rel", $rel, "--sha1", $RelSha1) }
+else { Log "  baserom\movie.rel is already there (SHA-1 checked)" }
 
 # ---- 4. decomp-toolkit ----
 Step 4 "decomp-toolkit analysis"
 $sym = Join-Path $Root "config\GPOE8P\symbols.txt"
 $seed = Join-Path $Root "config\GPOE8P\symbols_seed.txt"
 $mark = Join-Path $Root "build\GPOE8P\.seed-sha1"
-$seedHash = (Get-FileHash $seed -Algorithm SHA1).Hash
+$seedHash = (Get-FileHash $seed -Algorithm SHA1).Hash + (Get-FileHash (Join-Path $Root "config\GPOE8P\config.yml") -Algorithm SHA1).Hash
 $need = -not (Test-Path $sym) -or -not (Test-Path $mark) -or ((Get-Content $mark -Raw).Trim() -ne $seedHash)
 if ($need) {
     Copy-Item $seed $sym -Force
     [IO.File]::WriteAllText((Join-Path $Root "config\GPOE8P\splits.txt"), "")
+    New-Item -ItemType Directory -Force -Path (Join-Path $Root "config\GPOE8P\movie") | Out-Null
+    foreach ($f in "symbols.txt", "splits.txt") { [IO.File]::WriteAllText((Join-Path $Root "config\GPOE8P\movie\$f"), "") }
     Run "decomp-toolkit" $dtk @("dol", "split", "config\GPOE8P\config.yml", "build\GPOE8P")
     Set-Content -Path $mark -Value $seedHash
 } else { Log "  analysis is up to date" }

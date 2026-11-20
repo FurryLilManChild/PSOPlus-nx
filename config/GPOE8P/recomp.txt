@@ -1,2 +1,2 @@
 dol PsoV3.dol
-rel none
+rel movie.rel  # CRI Sofdec movie player, linked by the game at run time (rel.c)

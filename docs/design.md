@@ -23,9 +23,12 @@ of scope; the network code stays in the game but finds no adapter.
   the port skips main.dol and the switcher. PsoV3.dol also contains the same chain loader (0x8042E8C4), used to
   hand control back to another program; it is called from one place (0x8007FA08) and will be replaced natively
   if that path is ever reached.
-- **No code modules.** 648 of the 649 `.rel` files are Sega's own data format (map, NPC, text and table data
-  with pointer fixups), not Nintendo RELs, so the whole game is one executable. Simpler than Sonic Riders, which
-  links `_Main.rel`. The one file that looks like a Nintendo REL still has to be checked.
+- **One code module: `movie.rel`.** 648 of the 649 `.rel` files are Sega's own data format (map, NPC, text and
+  table data with pointer fixups). The 649th, `movie.rel` (285 KB, REL version 2, 20 sections), is CRI's Sofdec
+  movie player: the game reads it into the heap and OSLinks it before each movie (0x80320478, from one place,
+  0x80144988) and OSUnlinks it after (0x80320398). Found by the first PC test, which stopped at the attract
+  movie. It is recompiled at a fixed address above MEM1 (0x81800000) like Sonic Riders' `_Main.rel`; OSLink lays
+  that image out fresh each time and points the game's module header at it (runtime/src/rel.c).
 - Other executables on the disc (`switcher.dol`, `iwanaga.dol` and debug `D` copies) are not part of the normal
   game boot; to identify later.
 - Libraries found by their version strings: Dolphin OS (SDK "Revision 54"), CRI ADX (ADXT 8.05, ADXF 6.24,

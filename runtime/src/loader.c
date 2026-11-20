@@ -34,13 +34,17 @@ static void load_dol(void) {
 }
 
 /* OSLink for a module at a fixed base; module 0 (the DOL) targets are absolute addends */
+void rel_relink(void);
+
 static void link_rel(const uint8_t* rel, uint32_t rel_size) {
+    /* the image the game would have in memory: the whole file, or up to fixSize for a version 3 module
+     * (PSO's movie.rel is version 2, which has no fixSize field: gcbin.py Rel.fix_size does the same) */
     uint32_t base = g_rel_base;
     uint32_t nsec = be32(rel + 0x0C), secinfo = be32(rel + 0x10), id = be32(rel + 0x00);
     uint32_t imp_off = be32(rel + 0x28), imp_size = be32(rel + 0x2C);
-    uint32_t fix_size = be32(rel + 0x48);
+    uint32_t fix_size = be32(rel + 0x1C) >= 3 ? be32(rel + 0x48) : rel_size;
     uint32_t sec_addr[32] = {0};
-    if (nsec > 32 || fix_size > rel_size) rt_fatal("unexpected _Main.rel layout");
+    if (nsec > 32 || fix_size > rel_size) rt_fatal("unexpected %s layout", g_rel_file);
     memcpy(mem_phys(base), rel, fix_size);
     for (uint32_t i = 0; i < nsec; i++) {
         uint32_t o = be32(rel + secinfo + 8 * i) & ~3u, s = be32(rel + secinfo + 8 * i + 4);
@@ -76,7 +80,7 @@ static void link_rel(const uint8_t* rel, uint32_t rel_size) {
             applied++;
         }
     }
-    rt_log("[load] _Main.rel linked at %08X (bss %08X+%X), %u relocations", base, g_rel_bss, g_rel_bss_size, applied);
+    rt_log("[load] %s linked at %08X (bss %08X+%X), %u relocations", g_rel_file, base, g_rel_bss, g_rel_bss_size, applied);
 }
 
 void load_game(void) {
@@ -104,13 +108,20 @@ void load_game(void) {
     mem_w32(0x8000003C, be32(h + 0x42C));
     mem_w32(0x80000030, 0);                             /* ArenaLo: OSInit uses __ArenaLo */
     mem_w32(0x80000034, fst_addr);                      /* ArenaHi */
-    if (!g_rel_base) return;                            /* no REL module (PSO) */
+    if (!g_rel_base) return;                            /* no REL module */
 
     uint32_t rel_end = g_rel_bss + g_rel_bss_size;
     if (g_rel_base < 0x80000000u + MEM1_SIZE || rel_end > 0x80000000u + GUEST_RAM_SIZE)
         rt_fatal("REL (%08X-%08X) must lie in the backed area above MEM1", g_rel_base, rel_end);
+    rel_relink();
+}
+
+/* lay the module out at its fixed address again, from the disc: data back to its first state and bss
+ * zeroed. loader at boot, and rel.c every time the game links the module (PSO links movie.rel for each
+ * movie and unlinks it after, so the second movie must not see the first one's leftovers). */
+void rel_relink(void) {
     uint32_t off, size;
-    if (!disc_find("_Main.rel", &off, &size)) rt_fatal("_Main.rel not found on the disc");
+    if (!disc_find(g_rel_file, &off, &size)) rt_fatal("%s not found on the disc", g_rel_file);
     uint8_t* rel = malloc(size);
     disc_read(off, rel, size);
     link_rel(rel, size);

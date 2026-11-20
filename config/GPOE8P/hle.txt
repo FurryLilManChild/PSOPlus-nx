@@ -6,6 +6,10 @@
 80371844 OSSaveContext
 803718C4 OSLoadContext
 
+# --- OS: module linking (runtime/src/rel.c): movie.rel runs from its fixed recompiled image ---
+80372D00 OSLink     # called once, from the game's module loader 0x803203EC (0x80320478)
+8037315C OSUnlink   # called once, from 0x80320398
+
 # --- OS: hardware initialisation with no native counterpart ---
 80370D7C nop        # __OSInitAudioSystem (DSP reset, ARAM probe)
 80370F38 nop        # __OSStopAudioSystem

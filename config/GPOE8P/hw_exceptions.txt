@@ -7,9 +7,9 @@ mmio MI  # memory interface: protection setup (__OSInitMemoryProtection, replace
 # --- privileged instructions and special registers (cpu.c: ppc_mtspr/ppc_mfspr keep every SPR as plain state; DEC drives the scheduler's timer) ---
 mfmsr  # cpu.c keeps MSR as state; OSDisableInterrupts/OSEnableInterrupts/OSRestoreInterrupts use it for EE, which sched.c honours
 mtmsr  # as mfmsr (ppc_mtmsr delivers pending interrupts when EE turns on)
-dcbi  # DCInvalidateRange / LCDisable: cache control, no effect on host memory (ppc2c: no-op)
+dcbi  # DCInvalidateRange / LCDisable, and movie.rel's Sofdec decoder: cache control, no effect on host memory (ppc2c: no-op)
 icbi  # ICInvalidateRange / __flush_cache: no self-modifying code in the recompiled image (all code is translated ahead of time)
-dcbz_l (locked cache)  # LCEnable's helper (0x80371178, called from LCEnable 0x80371244, called by the Ninja layer at 0x803DD028): zeroes locked-cache lines; the runtime backs the 16 KiB locked cache at 0xE0000000 (ppc.h)
+dcbz_l (locked cache)  # LCEnable's helper (0x80371178, called from LCEnable 0x80371244, called by the Ninja layer at 0x803DD028) and movie.rel's Sofdec decoder (scratch in the locked cache): zeroes locked-cache lines; the runtime backs the 16 KiB locked cache at 0xE0000000 (ppc.h). No locked-cache DMA (DMAU/DMAL) outside MetroTRK
 mfspr DAR  # OSDefaultExceptionHandler: only on a guest exception, which the runtime never raises (a fault is a host crash with its own report)
 mfspr DSISR  # as DAR
 mfspr HID0  # cache enable / flash-invalidate at boot: plain SPR state

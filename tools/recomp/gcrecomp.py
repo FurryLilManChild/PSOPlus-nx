@@ -127,6 +127,7 @@ class GcRecompiler:
         else:
             self.rel = Rel(os.path.join(baserom, files["rel"]))
             rel_img, self.rel_addrs, self.rel_bss, self.rel_relocs = self.rel.link(REL_BASE)
+        self.rel_file = files["rel"]
         self.rel_img = rel_img
         self.img = Image(self.dol, rel_img, self.rel_addrs, self.rel)
 
@@ -135,7 +136,10 @@ class GcRecompiler:
         self.jt_count = 0
         self._load_dtk(os.path.join(config_dir, "symbols.txt"), rel=False)
         if self.rel:
-            self._load_dtk(os.path.join(config_dir, "_Main", "symbols.txt"), rel=True)
+            # decomp-toolkit writes a module's symbols to CONFIG_DIR/<module name>/ (the file name's stem)
+            mod_dir = os.path.join(config_dir, os.path.splitext(self.rel_file)[0])
+            self._rel_sections(os.path.join(mod_dir, "splits.txt"))
+            self._load_dtk(os.path.join(mod_dir, "symbols.txt"), rel=True)
         self.entries.add(self.dol.entry)
         self.hooks = {}  # address -> hle name
         hle = os.path.join(config_dir, "hle.txt")
@@ -169,8 +173,25 @@ class GcRecompiler:
         self._fixpoint()
         self._assign_jump_tables()
 
-    # REL section names in dtk's symbols.txt -> REL section index
+    # REL section names in dtk's symbols.txt -> REL section index. dtk lists a module's sections in
+    # file order in its splits.txt ("Sections:"), index 1 first (Riders' _Main.rel: text, rodata, data,
+    # bss; PSO's movie.rel: text, ctors, dtors, rodata, data, bss). Fallback: Riders' layout.
     REL_SECTIONS = {"text": 1, "rodata": 2, "data": 3, "bss": 4}
+
+    def _rel_sections(self, splits_path):
+        names, in_sections = [], False
+        if os.path.exists(splits_path):
+            for line in open(splits_path):
+                if line.startswith("Sections:"):
+                    in_sections = True
+                    continue
+                if in_sections:
+                    m = re.match(r"\s+\.(\S+)\s+type:", line)
+                    if not m:
+                        break
+                    names.append(m.group(1))
+        if names:
+            self.REL_SECTIONS = {n: i + 1 for i, n in enumerate(names)}
 
     def _addr(self, sym, rel):
         if not rel:
@@ -507,9 +528,16 @@ class GcRecompiler:
             t.append("const uint32_t g_rel_base = 0x%08Xu, g_rel_bss = 0x%08Xu, g_rel_bss_size = 0x%08Xu;" % (
                 REL_BASE, self.rel_bss, self.rel.bss_size))
             t.append("const uint32_t g_rel_prolog = 0x%08Xu;" % (self.rel_addrs[self.rel.prolog_section] + self.rel.prolog))
+            t.append("const char g_rel_file[] = \"%s\";" % self.rel_file)
+            r = self.rel
+            t.append("const uint32_t g_rel_epilog = 0x%08Xu, g_rel_unresolved = 0x%08Xu;" % (
+                self.rel_addrs[r.epilog_section] + r.epilog if r.epilog_section else 0,
+                self.rel_addrs[r.unresolved_section] + r.unresolved if r.unresolved_section else 0))
         else:  # no REL module: the runtime's REL linker has nothing to do
             t.append("const uint32_t g_rel_base = 0u, g_rel_bss = 0u, g_rel_bss_size = 0u;")
             t.append("const uint32_t g_rel_prolog = 0u;")
+            t.append("const char g_rel_file[] = \"\";")
+            t.append("const uint32_t g_rel_epilog = 0u, g_rel_unresolved = 0u;")
         t.append("const RecompRange g_code_ranges[] = {%s};\nconst unsigned g_code_range_count = %d;" % (
             ", ".join("{0x%08Xu, 0x%08Xu}" % (lo, hi) for lo, hi, _ in self.img.regions), len(self.img.regions)))
         open(os.path.join(outdir, "table.c"), "w").write("\n".join(t) + "\n")

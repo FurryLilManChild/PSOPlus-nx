@@ -83,19 +83,29 @@ py = sys.executable.replace("\\", "/")
 if " " in py:
     py = '"%s"' % py  # a Python installed under a folder with spaces
 
+RECOMP_INPUTS = ["tools/recomp/gcrecomp.py", "tools/recomp/ppc2c.py", "tools/recomp/crlive.py",
+                 "tools/recomp/leaflocal.py", "tools/recomp/singleflow.py", "tools/gcbin.py", "config/GPOE8P/symbols.txt",
+                 "config/GPOE8P/movie/symbols.txt", "config/GPOE8P/movie/splits.txt", "config/GPOE8P/recomp.txt",
+                 "baserom/PsoV3.dol", "baserom/movie.rel"] + [
+    p for p in ("config/GPOE8P/hle.txt", "config/GPOE8P/patches.txt", "config/GPOE8P/hot_functions.txt")
+    if os.path.exists(os.path.join(ROOT, p))]
 gen_c = sorted(glob.glob(os.path.join(ROOT, GEN, "code_*.c")))
-if not gen_c:
-    # the list of generated files is needed to write build.ninja: recompile once now
+report = os.path.join(ROOT, GEN, "report.txt")
+stale = not gen_c or not os.path.exists(report) or any(
+    os.path.exists(os.path.join(ROOT, p)) and os.path.getmtime(os.path.join(ROOT, p)) > os.path.getmtime(report)
+    for p in RECOMP_INPUTS)
+if stale:
+    # the list of generated files is needed to write build.ninja, and it changes with the inputs (adding
+    # movie.rel took it from 55 to 58 files): recompile now, before listing them. Old files go first.
     import subprocess
-    print("build/gen is empty: recompiling first", flush=True)
+    print("recompiling (build/gen is empty or older than its inputs)", flush=True)
+    for p in gen_c:
+        os.remove(p)
     subprocess.check_call([sys.executable, "tools/recomp/gcrecomp.py", "config/GPOE8P", "baserom", GEN], cwd=ROOT)
     gen_c = sorted(glob.glob(os.path.join(ROOT, GEN, "code_*.c")))
 gen_c = [os.path.relpath(p, ROOT).replace("\\", "/") for p in gen_c] + [GEN + "/table.c"]
 rt_c = sorted(os.path.relpath(p, ROOT).replace("\\", "/") for p in glob.glob(os.path.join(ROOT, "runtime/src/*.c")))
-# REL linking (OSLink) is not built: PSO has no REL module. Riders-only files were removed; their callers
-# reach runtime/src/pso_stubs.c instead.
-RIDERS_ONLY = ("rel.c",)
-rt_c = [p for p in rt_c if os.path.basename(p) not in RIDERS_ONLY]
+# Riders-only files were removed; their callers reach runtime/src/pso_stubs.c instead.
 rt_cpp = sorted(os.path.relpath(p, ROOT).replace("\\", "/") for p in glob.glob(os.path.join(ROOT, "runtime/src/*.cpp")))
 plats = ["runtime/src/platform/%s" % args.target]
 if args.target in ("android", "ios"):
@@ -329,10 +339,7 @@ with open(os.path.join(ROOT, "build.ninja"), "w") as f:
     n.build("version_always", "phony")
     n.build(version_c, "version", implicit=["version_always"])
 
-    recomp_inputs = ["tools/recomp/gcrecomp.py", "tools/recomp/ppc2c.py", "tools/recomp/crlive.py",
-                     "tools/recomp/leaflocal.py", "tools/recomp/singleflow.py", "tools/gcbin.py", "config/GPOE8P/symbols.txt",
-                     "config/GPOE8P/recomp.txt"] + [p for p in ("config/GPOE8P/hle.txt", "config/GPOE8P/patches.txt", "config/GPOE8P/hot_functions.txt")
-                                                           if os.path.exists(os.path.join(ROOT, p))]
+    recomp_inputs = RECOMP_INPUTS  # a change re-runs configure (build.ninja depends on configure.py) or the rule
     n.build(gen_c + [GEN + "/funcs.h"], "recomp", recomp_inputs)
 
     # shaders: GL strings (host) or uam-compiled deko3d binaries (Switch)

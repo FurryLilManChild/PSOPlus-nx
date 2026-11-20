@@ -1,5 +1,20 @@
 # Progress log (newest first)
 
+## 2026-11-19: test 1 result, test 2 (movie.rel)
+
+- Test 1 (ce8665b9, the owner's PC): boots to the title screen; 30 fps in every [pace] line after the first two;
+  game work 1 to 5 ms per frame; card formatted and written in the menus. Stopped after idling at the title
+  with `FATAL: dispatch to 810779E8: not a function entry (lr 80320498)`: the attract movie. 0x80320478 calls
+  OSLink (0x80372D00) on movie.rel read into the heap, then the module's prolog (+0x34).
+- movie.rel is the only code module (the only Nintendo REL on the disc; one OSLink call site). Now recompiled
+  at 0x81800000 (bss 0x81845C80+0x53D34). gcrecomp: REL section numbers from dtk's splits.txt (movie.rel's
+  are text, ctors, dtors, rodata, data, bss, not Riders' layout), which found its 7 switch tables. The
+  runtime's REL linker read fixSize from a version 2 header that has none: fixed (whole file, as gcbin.py).
+- rel.c: OSLink relinks the fixed image from the disc every time (fresh data and bss), sets prolog, epilog
+  and unresolved; OSUnlink reports success. configure.py now recompiles when any recompiler input is newer
+  than build/gen/report.txt (the file count changed from 55 to 58).
+- Not yet: fog (the renderer does not draw it; PSO uses it from the title screen on).
+
 ## 2026-11-19: first PC build ready (commit a45a21d2)
 
 - gcrecomp: REL made optional (config/GPOE8P/recomp.txt). 27,593 functions, clean report: data words, the

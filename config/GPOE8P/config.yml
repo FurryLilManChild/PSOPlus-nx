@@ -10,3 +10,12 @@ splits: config/GPOE8P/splits.txt
 detect_objects: true
 detect_strings: false
 write_asm: true
+
+# movie.rel: CRI's Sofdec movie player, the only code module PsoV3.dol loads at run time (OSLink from
+# 0x80320478, for the attract movie and cutscenes). Recompiled at a fixed address like Riders' _Main.rel.
+modules:
+- object: baserom/movie.rel
+  hash: 767332daf33120d9497dc6426ed644c46bbf3ff3
+  name: movie
+  symbols: config/GPOE8P/movie/symbols.txt
+  splits: config/GPOE8P/movie/splits.txt
