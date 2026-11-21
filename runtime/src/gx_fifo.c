@@ -658,8 +658,10 @@ static void tlut_snapshot(uint32_t v65) {
     uint32_t off = g_tdata_head % TLUT_DATA, skip = off + len > TLUT_DATA ? TLUT_DATA - off : 0;  /* no wrap inside one */
     /* wait for room: the GP thread is a whole ring behind (keeps the pairing in order) */
     while (atomic_load_explicit(&g_tsnap_head, memory_order_relaxed) - atomic_load_explicit(&g_tsnap_tail, memory_order_acquire) >= TLUT_SNAPS ||
-           g_tdata_head + skip + len - atomic_load_explicit(&g_tdata_tail, memory_order_acquire) > TLUT_DATA)
-        ring_kick();
+           g_tdata_head + skip + len - atomic_load_explicit(&g_tdata_tail, memory_order_acquire) > TLUT_DATA) {
+        void gx_pipe_idle(void);
+        gx_pipe_idle();  /* the GP thread may need commands still in the batch (pipe_flush) */
+    }
     g_tdata_head += skip;
     off = g_tdata_head % TLUT_DATA;
     uint32_t h = atomic_load_explicit(&g_tsnap_head, memory_order_relaxed);
