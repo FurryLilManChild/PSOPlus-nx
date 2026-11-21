@@ -47,6 +47,7 @@ static _Atomic int g_proj_valid;
 
 static int g_cull_on = -1;
 unsigned long long g_cull_models, g_cull_skipped, g_cull_unknown;
+static int g_sample_due = 1;
 
 int cull_enabled(void) {
     if (g_cull_on < 0) { const char* e = getenv("SR_CULL"); g_cull_on = !(e && *e == '0'); }
@@ -145,13 +146,26 @@ static int model_hidden(Cpu* c, uint32_t model) {
     if (PPC_IS_MMIO(model) || (model & 0x3FFFFFFFu) + 0x14u > GUEST_RAM_SIZE) return 0;
     float bb[6], p[4];
     if (!model_bounds(model, bb)) { g_cull_unknown++; return 0; }
-    if (!get_proj(p)) return 0;
+    /* the projection in force now: the GX library's own copy (GXSetProjection, the code before 0x8038E978, keeps it in
+     * __GXData, pointer at r13-0x6078: +0x420 type, 0 = perspective, +0x424.. P0-P5). Test 8 used the
+     * last perspective projection the GP thread saw, which is another pass's, and culled nothing. */
+    uint32_t gx = ld32r(c->r[13] - 0x6078u);
+    if (PPC_IS_MMIO(gx) || (gx & 0x3FFFFFFFu) + 0x43Cu > GUEST_RAM_SIZE) return 0;
+    if (ld32r(gx + 0x420u) != 0) return 0;  /* orthographic: 2D, never culled */
+    for (int k = 0; k < 4; k++) p[k] = gf(gx + 0x424u + 4u * (uint32_t)k);
+    (void)get_proj;
     uint32_t mp = ld32r(c->r[13] - 0x2E8Cu);  /* the current matrix: 3x4, row-major floats */
     if (PPC_IS_MMIO(mp) || (mp & 0x3FFFFFFFu) + 48u > GUEST_RAM_SIZE) return 0;
     float m[12];
     for (int i = 0; i < 12; i++) m[i] = gf(mp + 4u * (uint32_t)i);
     const float margin = 1.15f;
     float kx = margin * fmaxf(1.0f, settings_wide_k());  /* wide screen modes show more to the sides */
+    if (g_sample_due) {
+        g_sample_due = 0;
+        rt_log("[cull] sample: model %08X box %.1f %.1f %.1f .. %.1f %.1f %.1f, matrix row z %.3f %.3f %.3f %.1f, "
+               "projection %.3f %.3f %.3f %.3f", model, bb[0], bb[1], bb[2], bb[3], bb[4], bb[5], m[8], m[9], m[10], m[11],
+               p[0], p[1], p[2], p[3]);
+    }
     unsigned out_l = 1, out_r = 1, out_b = 1, out_t = 1, behind = 1;
     for (int k = 0; k < 8; k++) {
         float x = (k & 1) ? bb[3] : bb[0], y = (k & 2) ? bb[4] : bb[1], z = (k & 4) ? bb[5] : bb[2];
@@ -188,4 +202,5 @@ void cull_report(void) {
         rt_log("[cull] models %llu, skipped as wholly outside the view %llu (%.1f%%), drawn because a display list was not "
                "seen yet or is skinned %llu", g_cull_models, g_cull_skipped, 100.0 * g_cull_skipped / g_cull_models, g_cull_unknown);
     g_cull_models = g_cull_skipped = g_cull_unknown = 0;
+    g_sample_due = 1;
 }
