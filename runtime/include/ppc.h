@@ -195,8 +195,30 @@ static inline PPC_ALWAYS_INLINE void st16(uint32_t ea, uint16_t v) {
     if (PPC_MMIO_UNLIKELY(ea)) { mmio_write(ea, v, 2); return; }
     v = __builtin_bswap16(v); memcpy(ppc_ptr(ea), &v, 2);
 }
+/* stores to the GX write-gather pipe (0xCC008000-0xCC00801F): a plain append to gx_fifo.c's batch
+ * buffer, inline, without the device dispatch (PSO makes about 200,000 a frame). The rare cases go to
+ * gx_pipe_write: a BP register word after the 0x61 prefix (palette watch) and a full batch. */
+#define GX_WG_BATCH 4096
+extern uint8_t g_wg[];
+extern int g_wg_n, g_prev_bp_prefix, g_gxstat;
+extern unsigned long long g_pipe_stores, g_pipe_bytes;
+void gx_pipe_write(uint32_t v, int size);
+void gs_store(void);
+static inline PPC_ALWAYS_INLINE int ppc_is_pipe(uint32_t ea) { return (ea & ~31u) == 0xCC008000u; }
+static inline PPC_ALWAYS_INLINE void ppc_pipe32(uint32_t v) {
+    if (__builtin_expect(!g_prev_bp_prefix && g_wg_n <= GX_WG_BATCH - 8, 1)) {
+        if (__builtin_expect(g_gxstat == 1, 0)) gs_store();
+        uint32_t be = __builtin_bswap32(v);
+        memcpy(g_wg + g_wg_n, &be, 4);
+        g_wg_n += 4;
+        g_pipe_stores++;
+        g_pipe_bytes += 4;
+        return;
+    }
+    gx_pipe_write(v, 4);
+}
 static inline PPC_ALWAYS_INLINE void st32(uint32_t ea, uint32_t v) {
-    if (PPC_MMIO_UNLIKELY(ea)) { mmio_write(ea, v, 4); return; }
+    if (PPC_MMIO_UNLIKELY(ea)) { if (ppc_is_pipe(ea)) ppc_pipe32(v); else mmio_write(ea, v, 4); return; }
     v = __builtin_bswap32(v); memcpy(ppc_ptr(ea), &v, 4);
 }
 static inline PPC_ALWAYS_INLINE void st64(uint32_t ea, uint64_t v) {

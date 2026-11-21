@@ -84,9 +84,15 @@ void hle_frame_end(Cpu* c) {
     void perftest_frame_begin(void); void perftest_frame_done(void);
     perftest_frame_begin();
     uint64_t now = platform_now_ns();
-    if (g_last_return_ns) g_work_ns += now - g_last_return_ns;  /* game work since the last flip returned */
+    uint64_t sched_idle_total(void);  /* sched.c: time the game core waited with no ready thread (40.5 MHz ticks) */
+    static uint64_t idle_at_return;
+    if (g_last_return_ns) {  /* game work since the last flip returned, less the time it waited idle */
+        uint64_t busy = now - g_last_return_ns, idle = (sched_idle_total() - idle_at_return) * 1000000ull / 40500;
+        g_work_ns += idle < busy ? busy - idle : 0;
+    }
     f_803DCF2C_orig(c);  /* the game's own flip: waits for its retraces */
     g_last_return_ns = platform_now_ns();
+    idle_at_return = sched_idle_total();
     if (!g_last_flip_ns) g_t0_ns = g_last_return_ns;
     if (!g_last_flip_ns) {  /* first flip: start the stall watch and the function-entry trace it reports */
 #ifdef __SWITCH__
@@ -106,7 +112,7 @@ void hle_frame_end(Cpu* c) {
         { void gx_stat_report(void); gx_stat_report(); }
         char clk[96];
         platform_clocks_str(clk, sizeof clk);
-        rt_log("[pace] %.1f frames/s (game target 30), game work %.1f ms per frame, GPU %.1f ms per frame%s, %u s since the first frame",
+        rt_log("[pace] %.1f frames/s (game target 30), game work %.1f ms per frame (idle waits left out), GPU %.1f ms per frame%s, %u s since the first frame",
                g_n_frames / s, g_n_frames ? g_work_ns / 1e6 / g_n_frames : 0.0, platform_gpu_frame_ms(), clk,
                (unsigned)((platform_now_ns() - g_t0_ns) / 1000000000ull));
         g_stat_field = f; g_n_frames = 0; g_work_ns = 0;

@@ -208,7 +208,7 @@ static void pe_token(uint16_t token, int irq) {
  * where no game thread is running (the CPU idles, or only a thread parked in a known wait loop runs:
  * vi.c, sched.c), or when the game reads a PE register (after the GP has caught up), so the game sees
  * them at the same place in its work every run. */
-static int g_wg_n;  /* (defined below with the write-gather pipe) */
+extern int g_wg_n;  /* (defined below with the write-gather pipe) */
 /* GPU work that could still wake a game thread: held PE updates, or commands the game thread wrote but
  * has not pushed to the GP yet (flushed when it idles, gx_pipe_idle) */
 int gx_det_pending(void) { return atomic_load(&g_pe_det_pending) != 0 || *(volatile int*)&g_wg_n != 0; }
@@ -322,7 +322,7 @@ static inline int gxstat_on(void) {
     if (g_gxstat < 0) { const char* e = getenv("SR_GXSTAT"); g_gxstat = e && *e == '1'; }
     return g_gxstat;
 }
-static void gs_store(void) {  /* game thread: a pipe store, charged to the last function entered */
+void gs_store(void) {  /* game thread: a pipe store, charged to the last function entered */
     uint32_t fn = g_ppc_cur_fn, h = (fn * 2654435761u) >> 23;
     for (int k = 0; k < 16; k++, h = (h + 1) & (GS_FN_SLOTS - 1)) {
         if (gs_fn[h] == fn) { gs_fn_n[h]++; return; }
@@ -330,8 +330,10 @@ static void gs_store(void) {  /* game thread: a pipe store, charged to the last 
     }
     gs_fn_lost++;
 }
+static void gs_dl_report(void);
 void gx_stat_report(void) {
     if (!gxstat_on()) return;
+    gs_dl_report();
     unsigned long long tot = 0;
     for (int d = 0; d < 2; d++) for (int k = 0; k < 8; k++) tot += gs_bytes[d][k];
     if (!tot) return;
@@ -362,6 +364,31 @@ void gx_stat_report(void) {
     memset(gs_fn, 0, sizeof gs_fn); memset(gs_fn_n, 0, sizeof gs_fn_n);
     gs_dl_calls = gs_dl_bytes = gs_fn_lost = 0;
 }
+/* per display list (the models' drawing data): calls and vertices, to name what is drawn most */
+#define GS_DL_SLOTS 2048
+static uint32_t gs_dla[GS_DL_SLOTS], gs_dls[GS_DL_SLOTS], gs_dlc[GS_DL_SLOTS];
+static unsigned long long gs_dlv[GS_DL_SLOTS];
+static void gs_dl(uint32_t addr, uint32_t size, unsigned long long verts) {
+    uint32_t h = (addr * 2654435761u) >> 21;
+    for (int k = 0; k < 32; k++, h = (h + 1) & (GS_DL_SLOTS - 1)) {
+        if (gs_dla[h] == addr || !gs_dla[h]) { gs_dla[h] = addr; gs_dls[h] = size; gs_dlc[h]++; gs_dlv[h] += verts; return; }
+    }
+}
+static void gs_dl_report(void) {
+    unsigned long long calls = 0;
+    int distinct = 0;
+    for (int i = 0; i < GS_DL_SLOTS; i++) if (gs_dla[i]) { calls += gs_dlc[i]; distinct++; }
+    if (!calls) return;
+    rt_log("[gxstat] %d different display lists; the 20 called most (address, size, calls, vertices):", distinct);
+    for (int k = 0; k < 20; k++) {
+        uint32_t best = 0; int bi = -1;
+        for (int i = 0; i < GS_DL_SLOTS; i++) if (gs_dlc[i] > best) { best = gs_dlc[i]; bi = i; }
+        if (bi < 0) break;
+        rt_log("[gxstat]   %08X %6u B  %5.1f%% of calls  %llu vertices", gs_dla[bi], gs_dls[bi], 100.0 * best / calls, gs_dlv[bi]);
+        gs_dlc[bi] = 0;
+    }
+    memset(gs_dla, 0, sizeof gs_dla); memset(gs_dlc, 0, sizeof gs_dlc); memset(gs_dlv, 0, sizeof gs_dlv);
+}
 static inline void gs_cmd(int depth, int kind, size_t n) {
     if (g_gxstat == 1) { gs_bytes[depth > 0][kind] += n; gs_cmds[depth > 0][kind]++; }
 }
@@ -370,7 +397,14 @@ static void call_display_list(uint32_t addr, uint32_t size, int depth) {
     if (depth > 4 || size > 0x4000000) return;
     if (g_dff_active) gx_dff_memory(addr, size);
     const uint8_t* p = mem_phys(addr & 0x03FFFFFF);
-    if (g_gxstat == 1) { gs_dl_calls++; gs_dl_bytes += size; }
+    if (g_gxstat == 1) {
+        gs_dl_calls++;
+        gs_dl_bytes += size;
+        unsigned long long v0 = gs_verts[1];
+        parse(p, size, depth + 1);
+        gs_dl(addr, size, gs_verts[1] - v0);
+        return;
+    }
     parse(p, size, depth + 1);
 }
 
@@ -613,7 +647,7 @@ static uint8_t* g_tdata;
 static _Atomic uint32_t g_tsnap_head, g_tsnap_tail;  /* entries written / consumed, ever */
 static uint32_t g_tdata_head;                         /* data bytes written, ever (game thread) */
 static _Atomic uint32_t g_tdata_tail;                 /* data bytes released, ever (GP thread) */
-static int g_prev_bp_prefix;                          /* the previous pipe store was the 1-byte 0x61 */
+int g_prev_bp_prefix;                                 /* the previous pipe store was the 1-byte 0x61 (ppc.h reads it) */
 static uint32_t g_store_v64;                          /* the last BP 0x64 value stored by the game */
 unsigned long long g_tsnap_used, g_tsnap_missed;      /* [perf] */
 
@@ -672,13 +706,18 @@ int gx_tlut_snapshot_copy(uint32_t v64, uint32_t v65, uint8_t* dst, uint32_t len
 /* ---- write-gather pipe ---- */
 static void pipe_write(uint32_t v, int size);
 /* the write-gather buffer (see pipe_flush below) */
-static uint8_t g_wg[32 + 4];  /* room for a store that crosses the 32-byte boundary */
-static int g_wg_n;
+/* PSO test 5: the stores collect into a 4 KB batch (GX_WG_BATCH, ppc.h) that goes to the GP thread
+ * in one piece, instead of a 32-byte hardware burst copied into the game's FIFO in RAM and pushed on
+ * its own. Nothing reads that RAM copy (the GP thread takes the stream from its ring); SR_FIFO_RAM=1
+ * puts it back. Register reads, sync points and the idle loop flush a partial batch (pipe_flush). */
+uint8_t g_wg[GX_WG_BATCH + 8];
+int g_wg_n;
+static int g_fifo_ram = -1;
 void gx_pipe_write(uint32_t v, int size) {
     /* the common case first (most of the ~50,000 stores a busy frame makes): a word that neither
      * follows a BP prefix byte (tlut_watch has nothing to do) nor completes a burst */
     if (__builtin_expect(g_gxstat == 1, 0)) gs_store();
-    if (size == 4 && !g_prev_bp_prefix && g_wg_n <= 24) {
+    if (size == 4 && !g_prev_bp_prefix && g_wg_n <= GX_WG_BATCH - 8) {
         uint32_t be = __builtin_bswap32(v);
         memcpy(g_wg + g_wg_n, &be, 4);
         g_wg_n += 4;
@@ -716,17 +755,31 @@ static void pipe_write(uint32_t v, int size) {
     } else {
         for (int k = 0; k < size; k++) g_wg[g_wg_n++] = (uint8_t)(v >> (8 * (size - 1 - k)));
     }
-    if (g_wg_n >= 32) {  /* a full burst; a store crossing the boundary carries over */
-        burst_out(g_wg, 32);
-        g_wg_n -= 32;
-        memmove(g_wg, g_wg + 32, (size_t)g_wg_n);
+    if (g_wg_n >= GX_WG_BATCH - 4) {  /* a full batch */
+        int n = g_wg_n;
+        g_wg_n = 0;
+        burst_out(g_wg, n);
     }
 }
 
 static void burst_out(const uint8_t* b, int size) {
-    /* into RAM at the PI write pointer: in one piece unless the FIFO wraps inside this burst */
+    if (g_fifo_ram < 0) { const char* e = getenv("SR_FIFO_RAM"); g_fifo_ram = e && *e == '1'; }
     uint32_t w = g_pi_wptr & 0x03FFFFFF;
     uint32_t end = g_pi_end ? (g_pi_end & 0x03FFFFFF) + 32 : 0;  /* end is inclusive of the last 32 bytes */
+    if (!g_fifo_ram && (CP_CR & 0x11) == 0x11) {  /* linked (immediate) mode: the GP takes the stream from the
+                                                  * ring; only the PI write pointer moves, wrapping as the FIFO does */
+        if (g_pi_end) {
+            uint32_t base = g_pi_base & 0x03FFFFFF, len = end > base ? end - base : 0;
+            uint32_t nw = w + (uint32_t)size;
+            if (nw >= end && len) {
+                nw = base + (nw - end) % len;
+                g_pi_wptr = nw | 0x04000000;
+            } else {
+                g_pi_wptr = (g_pi_wptr & 0x04000000) | nw;
+            }
+        }
+    } else
+    /* into RAM at the PI write pointer: in one piece unless the FIFO wraps inside this burst */
     if (g_pi_end && w + (uint32_t)size < end && w + (uint32_t)size <= GUEST_RAM_SIZE) {
         memcpy(mem_phys(w), b, (size_t)size);
         g_pi_wptr = (g_pi_wptr & 0x04000000) | (w + (uint32_t)size);
