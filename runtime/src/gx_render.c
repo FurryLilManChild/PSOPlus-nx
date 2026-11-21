@@ -913,29 +913,44 @@ static void ov_bbox(const GxFrame* f, const GxCmd* d, const GxUniforms* u, const
         if (y > b[3]) b[3] = y;
     }
 }
-/* cull.c: the box around the object-space positions of the vertices a display list just decoded
- * (gx_fifo.c's call_display_list), and the projection it used */
+/* cull.c: the box around the object-space positions of the vertices each display list decoded
+ * (gx_fifo.c's call_display_list notes the list's index range here). The vertices are unpacked by the
+ * decode helper (dj_queue) after the list is parsed, so the boxes are worked out when the frame is
+ * complete, after gx_decode_sync (gx_bounds_frame); test 7 read them too early and saw garbage. */
+typedef struct { uint32_t dl, a, b; } BoundsRange;
+static BoundsRange* g_bounds; static uint32_t g_nbounds, g_cap_bounds;
 uint32_t gx_bounds_mark(void) { return g_frame ? g_frame->nidx : 0; }
 void gx_bounds_record(uint32_t mark, uint32_t dl) {
-    void cull_store(uint32_t addr, const float bb[6], int ok);
     void cull_set_proj(const float p[4]);
     if (!g_frame || g_frame->nidx <= mark) return;
-    float bb[6] = {1e30f, 1e30f, 1e30f, -1e30f, -1e30f, -1e30f};
-    int ok = 1;
-    for (uint32_t i = mark; i < g_frame->nidx; i++) {
-        const GxVertex* v = &g_frame->verts[g_frame->idx[i]];
-        if (v->pos[3] != 0.0f) ok = 0;  /* another position matrix (skinned): never culled */
-        for (int k = 0; k < 3; k++) {
-            if (v->pos[k] < bb[k]) bb[k] = v->pos[k];
-            if (v->pos[k] > bb[k + 3]) bb[k + 3] = v->pos[k];
-        }
-    }
-    cull_store(dl, bb, ok);
+    g_bounds = grow(g_bounds, &g_cap_bounds, g_nbounds + 1, sizeof *g_bounds);
+    g_bounds[g_nbounds++] = (BoundsRange){dl, mark, g_frame->nidx};
     if (g_gx.xf_reg[0x26] == 0) {  /* a perspective projection */
         float p[4];
         for (int k = 0; k < 4; k++) p[k] = fbits(g_gx.xf_reg[0x20 + k]);
         cull_set_proj(p);
     }
+}
+static void gx_bounds_frame(const GxFrame* f) {
+    void cull_store(uint32_t addr, const float bb[6], int ok);
+    for (uint32_t r = 0; r < g_nbounds; r++) {
+        const BoundsRange* br = &g_bounds[r];
+        if (br->b > f->nidx) continue;
+        float bb[6] = {1e30f, 1e30f, 1e30f, -1e30f, -1e30f, -1e30f};
+        int ok = 1;
+        for (uint32_t i = br->a; i < br->b; i++) {
+            const GxVertex* v = &f->verts[f->idx[i]];
+            if (v->pos[3] != 0.0f) ok = 0;  /* another position matrix (skinned): never culled */
+            for (int k = 0; k < 3; k++) {
+                if (v->pos[k] < bb[k]) bb[k] = v->pos[k];
+                if (v->pos[k] > bb[k + 3]) bb[k + 3] = v->pos[k];
+            }
+        }
+        if (!(bb[0] <= bb[3] && bb[1] <= bb[4] && bb[2] <= bb[5]) || !isfinite(bb[0] + bb[1] + bb[2] + bb[3] + bb[4] + bb[5]))
+            ok = 0;
+        cull_store(br->dl, bb, ok);
+    }
+    g_nbounds = 0;
 }
 /* SR_GXSTAT: how many of a frame's 3D draws land wholly outside the view (every vertex past the same
  * edge of the view volume, or behind the camera): drawing the game sends that no one can see. Draws
@@ -1487,6 +1502,7 @@ static void efb_copy(uint32_t v) {
         for (uint32_t i = 0; i < g_frame->ncmds; i++) ndraws += g_frame->cmds[i].type == GXC_DRAW;
         uint64_t ts = rt_ticks();
         { extern int g_gxstat; if (g_gxstat == 1) gx_cull_stats(g_frame); }
+        gx_bounds_frame(g_frame);  /* after gx_decode_sync above: every vertex unpacked */
         render_submit(g_frame);
         { uint64_t d = rt_ticks() - ts; g_wait_ticks += d; g_wait_total += d; }
         g_frame = NULL;
