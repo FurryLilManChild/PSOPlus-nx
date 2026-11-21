@@ -345,6 +345,14 @@ void gx_stat_report(void) {
         rt_log("[gxstat] %s: %s; %llu draws, %llu vertices", d ? "inside display lists" : "immediate stream", line, gs_draws[d], gs_verts[d]);
     }
     rt_log("[gxstat] display list calls %llu, %llu KB run from them", gs_dl_calls, gs_dl_bytes >> 10);
+    {
+        extern unsigned long long g_cull_draws, g_cull_off, g_cull_behind, g_cull_verts, g_cull_off_verts;
+        if (g_cull_draws)
+            rt_log("[gxstat] 3D draws wholly outside the view: %llu of %llu (%.1f%%; %llu of them behind the camera), "
+                   "%.1f%% of their index count", g_cull_off, g_cull_draws, 100.0 * g_cull_off / g_cull_draws, g_cull_behind,
+                   g_cull_verts ? 100.0 * g_cull_off_verts / g_cull_verts : 0.0);
+        g_cull_draws = g_cull_off = g_cull_behind = g_cull_verts = g_cull_off_verts = 0;
+    }
     static const char* const an[] = {"position", "normal", "colour 0", "texcoord 0"};
     for (int a = 0; a < 4; a++)
         rt_log("[gxstat] vertices with %s: none %llu, direct %llu, 8-bit index %llu, 16-bit index %llu", an[a],

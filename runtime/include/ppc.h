@@ -187,14 +187,6 @@ static inline PPC_ALWAYS_INLINE uint64_t ld64(uint32_t ea) {
     if (PPC_MMIO_UNLIKELY(ea)) return ((uint64_t)mmio_read(ea, 4) << 32) | mmio_read(ea + 4, 4);
     uint64_t v; memcpy(&v, ppc_ptr(ea), 8); return __builtin_bswap64(v);
 }
-static inline PPC_ALWAYS_INLINE void st8(uint32_t ea, uint8_t v) {
-    if (PPC_MMIO_UNLIKELY(ea)) { mmio_write(ea, v, 1); return; }
-    *ppc_ptr(ea) = v;
-}
-static inline PPC_ALWAYS_INLINE void st16(uint32_t ea, uint16_t v) {
-    if (PPC_MMIO_UNLIKELY(ea)) { mmio_write(ea, v, 2); return; }
-    v = __builtin_bswap16(v); memcpy(ppc_ptr(ea), &v, 2);
-}
 /* stores to the GX write-gather pipe (0xCC008000-0xCC00801F): a plain append to gx_fifo.c's batch
  * buffer, inline, without the device dispatch (PSO makes about 200,000 a frame). The rare cases go to
  * gx_pipe_write: a BP register word after the 0x61 prefix (palette watch) and a full batch. */
@@ -216,6 +208,38 @@ static inline PPC_ALWAYS_INLINE void ppc_pipe32(uint32_t v) {
         return;
     }
     gx_pipe_write(v, 4);
+}
+/* one-byte stores: the command bytes before each CP, XF and BP load (about 50,000 a frame). The BP
+ * prefix 0x61 goes to gx_pipe_write, which watches the next word for palette loads. */
+static inline PPC_ALWAYS_INLINE void ppc_pipe8(uint32_t v) {
+    if (__builtin_expect((v & 0xFF) != 0x61 && !g_prev_bp_prefix && g_wg_n <= GX_WG_BATCH - 8, 1)) {
+        if (__builtin_expect(g_gxstat == 1, 0)) gs_store();
+        g_wg[g_wg_n++] = (uint8_t)v;
+        g_pipe_stores++;
+        g_pipe_bytes += 1;
+        return;
+    }
+    gx_pipe_write(v & 0xFF, 1);
+}
+static inline PPC_ALWAYS_INLINE void ppc_pipe16(uint32_t v) {
+    if (__builtin_expect(!g_prev_bp_prefix && g_wg_n <= GX_WG_BATCH - 8, 1)) {
+        if (__builtin_expect(g_gxstat == 1, 0)) gs_store();
+        g_wg[g_wg_n] = (uint8_t)(v >> 8);
+        g_wg[g_wg_n + 1] = (uint8_t)v;
+        g_wg_n += 2;
+        g_pipe_stores++;
+        g_pipe_bytes += 2;
+        return;
+    }
+    gx_pipe_write(v & 0xFFFF, 2);
+}
+static inline PPC_ALWAYS_INLINE void st8(uint32_t ea, uint8_t v) {
+    if (PPC_MMIO_UNLIKELY(ea)) { if (ppc_is_pipe(ea)) ppc_pipe8(v); else mmio_write(ea, v, 1); return; }
+    *ppc_ptr(ea) = v;
+}
+static inline PPC_ALWAYS_INLINE void st16(uint32_t ea, uint16_t v) {
+    if (PPC_MMIO_UNLIKELY(ea)) { if (ppc_is_pipe(ea)) ppc_pipe16(v); else mmio_write(ea, v, 2); return; }
+    v = __builtin_bswap16(v); memcpy(ppc_ptr(ea), &v, 2);
 }
 static inline PPC_ALWAYS_INLINE void st32(uint32_t ea, uint32_t v) {
     if (PPC_MMIO_UNLIKELY(ea)) { if (ppc_is_pipe(ea)) ppc_pipe32(v); else mmio_write(ea, v, 4); return; }

@@ -25,3 +25,7 @@
 # at boot by 803DD080), VIFlush, VIWaitForRetrace. hle_frame_end runs the game's own flip unchanged and
 # only adds the host pause, perftest marks and the [pace] log line.
 803DCF2C frame_end
+
+# --- GX: matrix writers (runtime/src/hle_gx.c): one copy into the pipe batch instead of 9-12 paired-single stores ---
+8038EA3C WriteMTXPS4x3   # called by GXLoadPosMtxImm 8038EAC8, GXLoadTexMtxImm 8038EB80 and others
+8038EA70 WriteMTXPS3x3   # called by GXLoadNrmMtxImm 8038EB04

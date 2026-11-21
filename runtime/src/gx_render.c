@@ -913,6 +913,47 @@ static void ov_bbox(const GxFrame* f, const GxCmd* d, const GxUniforms* u, const
         if (y > b[3]) b[3] = y;
     }
 }
+/* SR_GXSTAT: how many of a frame's 3D draws land wholly outside the view (every vertex past the same
+ * edge of the view volume, or behind the camera): drawing the game sends that no one can see. Draws
+ * inside the view but hidden behind walls or terrain are not detected here. */
+unsigned long long g_cull_draws, g_cull_off, g_cull_behind, g_cull_verts, g_cull_off_verts;
+static void gx_cull_stats(const GxFrame* f) {
+    int cu = -1, ct = -1;
+    for (uint32_t i = 0; i < f->ncmds; i++) {
+        const GxCmd* d = &f->cmds[i];
+        if (d->type == GXC_STATE) { cu = (int)d->a; ct = (int)d->b; continue; }
+        if (d->type != GXC_DRAW || cu < 0 || ct < 0 || d->b == 0) continue;
+        const GxUniforms* u = &f->unis[cu];
+        if (u->xfr[0x26] != 0) continue;  /* perspective draws only (the HUD and 2D are orthographic) */
+        const GxXTab* t = &f->xtabs[ct];
+        float P0 = fbits(u->xfr[0x20]), P1 = fbits(u->xfr[0x21]), P2 = fbits(u->xfr[0x22]), P3 = fbits(u->xfr[0x23]);
+        unsigned out_l = 1, out_r = 1, out_b = 1, out_t = 1, behind = 1;
+        for (uint32_t k = 0; k < d->b; k++) {
+            const GxVertex* v = &f->verts[f->idx[d->a + k]];
+            uint32_t pm = ((uint32_t)v->pos[3] * 4) & 0xFFC;
+            float r[12];
+            for (uint32_t j = 0; j < 12; j++) {
+                uint32_t w = pm + j;
+                r[j] = w / GX_XFM_CHUNK < GX_XFM_CHUNKS
+                           ? fbits(f->xchunks[(size_t)t->xtab[w / GX_XFM_CHUNK] * GX_XFM_CHUNK + w % GX_XFM_CHUNK]) : 0.0f;
+            }
+            float x = r[0] * v->pos[0] + r[1] * v->pos[1] + r[2] * v->pos[2] + r[3];
+            float y = r[4] * v->pos[0] + r[5] * v->pos[1] + r[6] * v->pos[2] + r[7];
+            float z = r[8] * v->pos[0] + r[9] * v->pos[1] + r[10] * v->pos[2] + r[11];
+            float cx = P0 * x + P1 * z, cy = P2 * y + P3 * z, cw = -z;  /* GX perspective: w = -z */
+            if (cw > 0.0f) behind = 0;
+            if (!(cx < -cw)) out_l = 0;
+            if (!(cx > cw)) out_r = 0;
+            if (!(cy < -cw)) out_b = 0;
+            if (!(cy > cw)) out_t = 0;
+            if (!(behind | out_l | out_r | out_b | out_t)) break;  /* a vertex inside: visible (or partly) */
+        }
+        g_cull_draws++;
+        g_cull_verts += d->b;
+        if (behind) { g_cull_behind++; g_cull_off++; g_cull_off_verts += d->b; }
+        else if (out_l | out_r | out_b | out_t) { g_cull_off++; g_cull_off_verts += d->b; }
+    }
+}
 /* Local split-screen HUD. The perspective viewports establish ownership; the HUD itself is drawn
  * later in one full-screen ortho pass. Work on the completed frame so neither letter runs nor bands
  * can join players. Projection copies translate whole groups; the existing shader preserves size.
@@ -1421,6 +1462,7 @@ static void efb_copy(uint32_t v) {
         uint32_t ndraws = 0;
         for (uint32_t i = 0; i < g_frame->ncmds; i++) ndraws += g_frame->cmds[i].type == GXC_DRAW;
         uint64_t ts = rt_ticks();
+        { extern int g_gxstat; if (g_gxstat == 1) gx_cull_stats(g_frame); }
         render_submit(g_frame);
         { uint64_t d = rt_ticks() - ts; g_wait_ticks += d; g_wait_total += d; }
         g_frame = NULL;
