@@ -29,3 +29,6 @@
 # --- GX: matrix writers (runtime/src/hle_gx.c): one copy into the pipe batch instead of 9-12 paired-single stores ---
 8038EA3C WriteMTXPS4x3   # called by GXLoadPosMtxImm 8038EAC8, GXLoadTexMtxImm 8038EB80 and others
 8038EA70 WriteMTXPS3x3   # called by GXLoadNrmMtxImm 8038EB04
+
+# --- The game's model routine (runtime/src/cull.c): models wholly outside the view skip their meshes ---
+803DB510 ModelDraw   # 803DC76C matrix load, 803DC600 state, 803DC460 meshes (display lists), 803DC6F4 restore

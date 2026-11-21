@@ -405,6 +405,18 @@ static void call_display_list(uint32_t addr, uint32_t size, int depth) {
     if (depth > 4 || size > 0x4000000) return;
     if (g_dff_active) gx_dff_memory(addr, size);
     const uint8_t* p = mem_phys(addr & 0x03FFFFFF);
+    int cull_enabled(void);
+    uint32_t gx_bounds_mark(void);
+    void gx_bounds_record(uint32_t mark, uint32_t dl);
+    if (cull_enabled() && !depth) {  /* cull.c: the list's bounding box, from what it decodes */
+        uint32_t mark = gx_bounds_mark();
+        if (g_gxstat == 1) { gs_dl_calls++; gs_dl_bytes += size; }
+        unsigned long long v0 = gs_verts[1];
+        parse(p, size, depth + 1);
+        gx_bounds_record(mark, addr);
+        if (g_gxstat == 1) gs_dl(addr, size, gs_verts[1] - v0);
+        return;
+    }
     if (g_gxstat == 1) {
         gs_dl_calls++;
         gs_dl_bytes += size;

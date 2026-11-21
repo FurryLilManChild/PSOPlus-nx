@@ -913,6 +913,30 @@ static void ov_bbox(const GxFrame* f, const GxCmd* d, const GxUniforms* u, const
         if (y > b[3]) b[3] = y;
     }
 }
+/* cull.c: the box around the object-space positions of the vertices a display list just decoded
+ * (gx_fifo.c's call_display_list), and the projection it used */
+uint32_t gx_bounds_mark(void) { return g_frame ? g_frame->nidx : 0; }
+void gx_bounds_record(uint32_t mark, uint32_t dl) {
+    void cull_store(uint32_t addr, const float bb[6], int ok);
+    void cull_set_proj(const float p[4]);
+    if (!g_frame || g_frame->nidx <= mark) return;
+    float bb[6] = {1e30f, 1e30f, 1e30f, -1e30f, -1e30f, -1e30f};
+    int ok = 1;
+    for (uint32_t i = mark; i < g_frame->nidx; i++) {
+        const GxVertex* v = &g_frame->verts[g_frame->idx[i]];
+        if (v->pos[3] != 0.0f) ok = 0;  /* another position matrix (skinned): never culled */
+        for (int k = 0; k < 3; k++) {
+            if (v->pos[k] < bb[k]) bb[k] = v->pos[k];
+            if (v->pos[k] > bb[k + 3]) bb[k + 3] = v->pos[k];
+        }
+    }
+    cull_store(dl, bb, ok);
+    if (g_gx.xf_reg[0x26] == 0) {  /* a perspective projection */
+        float p[4];
+        for (int k = 0; k < 4; k++) p[k] = fbits(g_gx.xf_reg[0x20 + k]);
+        cull_set_proj(p);
+    }
+}
 /* SR_GXSTAT: how many of a frame's 3D draws land wholly outside the view (every vertex past the same
  * edge of the view volume, or behind the camera): drawing the game sends that no one can see. Draws
  * inside the view but hidden behind walls or terrain are not detected here. */
