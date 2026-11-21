@@ -15,6 +15,7 @@
  *    SR_GX_SYNC=1 parses on the game thread instead, as before (comparisons, debugging).
  *
  * Command formats follow YAGCD / Dolphin's OpcodeDecoding and VertexLoader (vertex sizes). */
+#include <stdio.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -307,10 +308,69 @@ static void load_indexed(int array, uint32_t v) {
 
 static size_t parse(const uint8_t* p, size_t len, int depth);
 
+/* SR_GXSTAT=1 (env.txt on the Switch): what the GX command stream is made of, for the native GX plan
+ * (docs/design.md): bytes per command kind, immediate stream vs display lists, vertex attribute modes,
+ * and which game functions store into the write-gather pipe. Logged every 10 s by gx_stat_report. */
+int g_gxstat = -1;
+static unsigned long long gs_bytes[2][8], gs_cmds[2][8], gs_dl_calls, gs_dl_bytes, gs_verts[2], gs_draws[2];
+static unsigned long long gs_attr[4][4];  /* position, normal, colour 0, texcoord 0: none/direct/index8/index16, per vertex */
+enum { GS_CP, GS_XF, GS_INDX, GS_CALL, GS_BP, GS_DRAW, GS_OTHER };
+#define GS_FN_SLOTS 512
+static uint32_t gs_fn[GS_FN_SLOTS], gs_fn_n[GS_FN_SLOTS];
+static unsigned long long gs_fn_lost;
+static inline int gxstat_on(void) {
+    if (g_gxstat < 0) { const char* e = getenv("SR_GXSTAT"); g_gxstat = e && *e == '1'; }
+    return g_gxstat;
+}
+static void gs_store(void) {  /* game thread: a pipe store, charged to the last function entered */
+    uint32_t fn = g_ppc_cur_fn, h = (fn * 2654435761u) >> 23;
+    for (int k = 0; k < 16; k++, h = (h + 1) & (GS_FN_SLOTS - 1)) {
+        if (gs_fn[h] == fn) { gs_fn_n[h]++; return; }
+        if (!gs_fn[h]) { gs_fn[h] = fn; gs_fn_n[h] = 1; return; }
+    }
+    gs_fn_lost++;
+}
+void gx_stat_report(void) {
+    if (!gxstat_on()) return;
+    unsigned long long tot = 0;
+    for (int d = 0; d < 2; d++) for (int k = 0; k < 8; k++) tot += gs_bytes[d][k];
+    if (!tot) return;
+    static const char* const nm[] = {"CP regs", "XF regs", "indexed XF", "display list calls", "BP regs", "draws", "other"};
+    for (int d = 0; d < 2; d++) {
+        char line[512]; int o = 0;
+        for (int k = 0; k < 7; k++)
+            o += snprintf(line + o, sizeof line - o, "%s%s %llu KB (%llu)", k ? ", " : "", nm[k], gs_bytes[d][k] >> 10, gs_cmds[d][k]);
+        rt_log("[gxstat] %s: %s; %llu draws, %llu vertices", d ? "inside display lists" : "immediate stream", line, gs_draws[d], gs_verts[d]);
+    }
+    rt_log("[gxstat] display list calls %llu, %llu KB run from them", gs_dl_calls, gs_dl_bytes >> 10);
+    static const char* const an[] = {"position", "normal", "colour 0", "texcoord 0"};
+    for (int a = 0; a < 4; a++)
+        rt_log("[gxstat] vertices with %s: none %llu, direct %llu, 8-bit index %llu, 16-bit index %llu", an[a],
+               gs_attr[a][0], gs_attr[a][1], gs_attr[a][2], gs_attr[a][3]);
+    unsigned long long st = 0;
+    for (int i = 0; i < GS_FN_SLOTS; i++) st += gs_fn_n[i];
+    rt_log("[gxstat] pipe stores on the game thread: %llu (%llu not charged); by last function entered:", st, gs_fn_lost);
+    for (int k = 0; k < 25 && st; k++) {
+        uint32_t best = 0; int bi = -1;
+        for (int i = 0; i < GS_FN_SLOTS; i++) if (gs_fn_n[i] > best) { best = gs_fn_n[i]; bi = i; }
+        if (bi < 0) break;
+        rt_log("[gxstat]   %5.1f%%  %08X", 100.0 * best / st, gs_fn[bi]);
+        gs_fn_n[bi] = 0;
+    }
+    memset(gs_bytes, 0, sizeof gs_bytes); memset(gs_cmds, 0, sizeof gs_cmds); memset(gs_attr, 0, sizeof gs_attr);
+    memset(gs_verts, 0, sizeof gs_verts); memset(gs_draws, 0, sizeof gs_draws);
+    memset(gs_fn, 0, sizeof gs_fn); memset(gs_fn_n, 0, sizeof gs_fn_n);
+    gs_dl_calls = gs_dl_bytes = gs_fn_lost = 0;
+}
+static inline void gs_cmd(int depth, int kind, size_t n) {
+    if (g_gxstat == 1) { gs_bytes[depth > 0][kind] += n; gs_cmds[depth > 0][kind]++; }
+}
+
 static void call_display_list(uint32_t addr, uint32_t size, int depth) {
     if (depth > 4 || size > 0x4000000) return;
     if (g_dff_active) gx_dff_memory(addr, size);
     const uint8_t* p = mem_phys(addr & 0x03FFFFFF);
+    if (g_gxstat == 1) { gs_dl_calls++; gs_dl_bytes += size; }
     parse(p, size, depth + 1);
 }
 
@@ -335,6 +395,7 @@ static size_t parse(const uint8_t* p, size_t len, int depth) {
         if (cmd == 0x08) {                                              /* LOAD_CP_REG */
             if (left < 6) break;
             g_gx.cp[p[i + 1]] = rd32(p + i + 2);
+            gs_cmd(depth, GS_CP, 6);
             i += 6;
             continue;
         }
@@ -346,17 +407,20 @@ static size_t parse(const uint8_t* p, size_t len, int depth) {
                 break;
             }
             load_xf(h & 0xFFFF, p + i + 5, n);
+            gs_cmd(depth, GS_XF, 5 + 4 * n);
             i += 5 + 4 * n;
             continue;
         }
         if (cmd == 0x20 || cmd == 0x28 || cmd == 0x30 || cmd == 0x38) { /* LOAD_INDX_A..D */
             if (left < 5) break;
             load_indexed((cmd >> 3) & 3, rd32(p + i + 1));
+            gs_cmd(depth, GS_INDX, 5);
             i += 5;
             continue;
         }
         if (cmd == 0x40) {                                              /* CALL_DL */
             if (left < 9) break;
+            gs_cmd(depth, GS_CALL, 9);
             call_display_list(rd32(p + i + 1), rd32(p + i + 5), depth);
             i += 9;
             continue;
@@ -365,6 +429,7 @@ static size_t parse(const uint8_t* p, size_t len, int depth) {
         if (cmd == 0x61) {                                              /* LOAD_BP_REG */
             if (left < 5) break;
             load_bp(rd32(p + i + 1));
+            gs_cmd(depth, GS_BP, 5);
             i += 5;
             continue;
         }
@@ -379,9 +444,20 @@ static size_t parse(const uint8_t* p, size_t len, int depth) {
             }
             gx_draw(prim, vat, count, p + i + 3, (uint32_t)vsize);
             g_gx.draws++;
+            if (g_gxstat == 1) {
+                gs_cmd(depth, GS_DRAW, total);
+                gs_draws[depth > 0]++;
+                gs_verts[depth > 0] += count;
+                uint32_t lo = g_gx.cp[0x50], hi = g_gx.cp[0x60];
+                gs_attr[0][(lo >> 9) & 3] += count;
+                gs_attr[1][(lo >> 11) & 3] += count;
+                gs_attr[2][(lo >> 13) & 3] += count;
+                gs_attr[3][hi & 3] += count;
+            }
             i += total;
             continue;
         }
+        gs_cmd(depth, GS_OTHER, 1);
         if (!g_gx.bad_logged++)
             rt_log("[gx] unknown FIFO command %02X (depth %d); skipping a byte", cmd, depth);
         i++;
@@ -601,6 +677,7 @@ static int g_wg_n;
 void gx_pipe_write(uint32_t v, int size) {
     /* the common case first (most of the ~50,000 stores a busy frame makes): a word that neither
      * follows a BP prefix byte (tlut_watch has nothing to do) nor completes a burst */
+    if (__builtin_expect(g_gxstat == 1, 0)) gs_store();
     if (size == 4 && !g_prev_bp_prefix && g_wg_n <= 24) {
         uint32_t be = __builtin_bswap32(v);
         memcpy(g_wg + g_wg_n, &be, 4);

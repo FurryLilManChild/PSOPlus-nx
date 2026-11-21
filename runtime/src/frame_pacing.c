@@ -103,6 +103,7 @@ void hle_frame_end(Cpu* c) {
     if (!g_stat_field) g_stat_field = f;
     if (f - g_stat_field >= 600) {
         double s = (f - g_stat_field) / 59.94;
+        { void gx_stat_report(void); gx_stat_report(); }
         char clk[96];
         platform_clocks_str(clk, sizeof clk);
         rt_log("[pace] %.1f frames/s (game target 30), game work %.1f ms per frame, GPU %.1f ms per frame%s, %u s since the first frame",

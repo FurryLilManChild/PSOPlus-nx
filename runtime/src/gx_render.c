@@ -1479,7 +1479,7 @@ static void efb_copy(uint32_t v) {
                 double ms = 1000.0 / 40500000.0 / 120;
                 uint64_t idle, late_avg, late_max;
                 sched_stats(&idle, &late_avg, &late_max);
-                rt_log("[perf]   draws/frame using indirect textures %llu (dynamic matrices not implemented), fog %llu (drawn; range adjustment not), Z textures %llu (not implemented)",
+                rt_log("[perf]   draws/frame using indirect textures %llu (dynamic matrices not implemented), fog %llu (drawn), Z textures %llu (not implemented)",
                        g_feat_ind / 120, g_feat_fog / 120, g_feat_ztex / 120);
                 extern unsigned long long g_pipe_stores, g_pipe_bytes;
                 static unsigned long long st0, by0;

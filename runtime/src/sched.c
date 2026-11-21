@@ -365,10 +365,13 @@ void sched_interrupts_enabled(Cpu* c) {
     }
     os_irq_retry();
     if (g_core_preempt[0]) deliver(c);
-    if (ld32(OS_CURRENT_CONTEXT) == OS_IDLE_CONTEXT && ld32(OS_RUNQUEUE_BITS) == 0) {
+    /* PSO's idle loop (SelectThread) enables interrupts once, then spins on the run queue bits until a
+     * handler makes a thread ready: wait here, interrupt after interrupt, until one is ready (one wait per
+     * call let the game core spin from the first interrupt on, a third of its time in calm areas) */
+    while (ld32(OS_CURRENT_CONTEXT) == OS_IDLE_CONTEXT && ld32(OS_RUNQUEUE_BITS) == 0) {
         { int ppc_detclock(void); if (ppc_detclock()) { det_idle(c); return; } }
         { void di_det_poll(void); di_det_poll(); }
-        if (g_core_preempt[0]) { deliver(c); return; }
+        if (g_core_preempt[0]) { deliver(c); continue; }
         record_backtrace(c);
         uint32_t prof_prev = g_ppc_cur_fn;
         g_ppc_cur_fn = PROF_IDLE;
