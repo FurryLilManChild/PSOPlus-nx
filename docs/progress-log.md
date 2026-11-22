@@ -1,5 +1,20 @@
 # Progress log (newest first)
 
+## 2026-11-22: Switch test 10 (Build A, bd343d6) results
+
+- the owner: Forest 1 held a steady 30 fps, including the busy spot that dropped to 20-25 fps in tests 4-9. Stock
+  clocks (log: CPU 1020 / GPU 384 / memory 1331 MHz handheld), sys-clk off, SR_PROFILE=1 only.
+- Log (stamp bd343d66, about 180 s of frames): every [pace] line 28.9-30.0 frames/s. Game work in the busy
+  stretch 19.6-26.3 ms a frame (tests 4-9: about 29-34 ms), so about 7 ms of the 33.3 ms budget is left at the
+  worst 10 s window. GPU 7-11 ms.
+- The review's predictions held: render wait 0.01 ms a frame (test 9: 5.7), draw done reached by the GP thread
+  0.48-0.64 ms after issue (test 9: 6.4), game core idle with GP work queued 0.16-0.23 ms, [cull] off.
+- Hitches in play after frame 2000: four single frames of 50-67 ms (GX draws 7-12 ms with 1-2 new textures);
+  the rest are loading (disc reads) and the area entry (247 new textures in one frame).
+- Profile, top game functions: 803DB560 4.3% (from 803DBE50), 8038C50C 2.0%, 80389BD0 1.7%, 80376420 2.3% over
+  two callers, 8037653C 1.0%; idle 30.8%.
+- psoplus.prev.log in the folder is from test 9 (597c8f5), not from this build.
+
 ## 2026-11-21: Switch tests 4-9 (GX pipe and cull work), Build A (review fixes)
 
 - Tests 4-9 (commits 8b4e00c, a500102, 93c294c, 1756a8a, 7aa1264, 597c8f5): SR_GXSTAT stream survey (test 4:
@@ -9,8 +24,8 @@
   each logged 0.0% of models skipped.
 - An independent code review of tests 6-9 found:
   - The cull never ran in tests 7-9: the current matrix pointer (r13-0x2E8C) is always in the locked cache
-    (0xE0000000, the game's matrix stack set up by 803DEC98), and the check accepted RAM only. Tests 7 and 8
-    had their own faults too (boxes read before the decode; another pass's projection).
+    (0xE0000000, the game's matrix stack set up by 803DEC98), and the check accepted RAM only. Test 7 likely
+    also read the boxes before the decode finished; a projection fault in test 8 is possible but unproven.
   - The same RAM-only check made the native matrix writers fall back to the game's code for every model matrix.
   - The cull's bounds pass cost about 5.6 ms a frame inside the frame end path the game waits on (GXDrawDone),
     and the [perf] / [hitch] "waiting for the render thread" figure included it.
