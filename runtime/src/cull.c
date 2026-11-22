@@ -17,7 +17,8 @@
  * through the current matrix and the projection, and skips 803DC460 when every corner is outside the
  * same plane of a view volume widened by a margin (and by the wide screen factor sideways). The
  * matrix load and the state set and restore still run, so later draws see the same GX state.
- * A model with any list not seen yet is drawn. SR_CULL=0 (env.txt) turns this off. */
+ * A model with any list not seen yet is drawn. Off by default; SR_CULL=1 (env.txt) turns it on, and only
+ * then do the GP thread's bounds (gx_fifo.c, gx_render.c) run. */
 #include <math.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -49,8 +50,9 @@ static int g_cull_on = -1;
 unsigned long long g_cull_models, g_cull_skipped, g_cull_unknown;
 static int g_sample_due = 1;
 
+/* off unless SR_CULL=1: the bounds pass cost about 5.6 ms a frame at frame end (test 9) */
 int cull_enabled(void) {
-    if (g_cull_on < 0) { const char* e = getenv("SR_CULL"); g_cull_on = !(e && *e == '0'); }
+    if (g_cull_on < 0) { const char* e = getenv("SR_CULL"); g_cull_on = e && e[0] == '1' && e[1] == 0; }
     return g_cull_on;
 }
 
@@ -127,7 +129,7 @@ static int model_bounds(uint32_t model, float bb[6]) {
         uint32_t tab = ld32r(model + 0x08u + 4u * (uint32_t)list);
         uint32_t n = ld16r(model + 0x10u + 2u * (uint32_t)list);
         if (!n) continue;
-        if (n > 256 || PPC_IS_MMIO(tab) || (tab & 0x3FFFFFFFu) + 16u * n > GUEST_RAM_SIZE) return 0;
+        if (n > 256 || !guest_span_ok(tab, 16u * n)) return 0;
         for (uint32_t i = 0; i < n; i++) {
             uint32_t dl = ld32r(tab + 16u * i + 8u);
             float t[6];
@@ -143,19 +145,21 @@ static int model_bounds(uint32_t model, float bb[6]) {
 }
 
 static int model_hidden(Cpu* c, uint32_t model) {
-    if (PPC_IS_MMIO(model) || (model & 0x3FFFFFFFu) + 0x14u > GUEST_RAM_SIZE) return 0;
+    if (!guest_span_ok(model, 0x14u)) return 0;
     float bb[6], p[4];
     if (!model_bounds(model, bb)) { g_cull_unknown++; return 0; }
     /* the projection in force now: the GX library's own copy (GXSetProjection, the code before 0x8038E978, keeps it in
      * __GXData, pointer at r13-0x6078: +0x420 type, 0 = perspective, +0x424.. P0-P5). Test 8 used the
      * last perspective projection the GP thread saw, which is another pass's, and culled nothing. */
     uint32_t gx = ld32r(c->r[13] - 0x6078u);
-    if (PPC_IS_MMIO(gx) || (gx & 0x3FFFFFFFu) + 0x43Cu > GUEST_RAM_SIZE) return 0;
+    if (!guest_span_ok(gx, 0x43Cu)) return 0;
     if (ld32r(gx + 0x420u) != 0) return 0;  /* orthographic: 2D, never culled */
     for (int k = 0; k < 4; k++) p[k] = gf(gx + 0x424u + 4u * (uint32_t)k);
     (void)get_proj;
-    uint32_t mp = ld32r(c->r[13] - 0x2E8Cu);  /* the current matrix: 3x4, row-major floats */
-    if (PPC_IS_MMIO(mp) || (mp & 0x3FFFFFFFu) + 48u > GUEST_RAM_SIZE) return 0;
+    /* the current matrix: 3x4, row-major floats. The game keeps its matrix stack in the locked cache
+     * (803DEC98 stores 0xE0000000 to r13-0x2E90 / -0x2E8C); tests 7-9 accepted RAM only and never culled. */
+    uint32_t mp = ld32r(c->r[13] - 0x2E8Cu);
+    if (!guest_span_ok(mp, 48u)) return 0;
     float m[12];
     for (int i = 0; i < 12; i++) m[i] = gf(mp + 4u * (uint32_t)i);
     const float margin = 1.15f;
@@ -184,20 +188,45 @@ static int model_hidden(Cpu* c, uint32_t model) {
     return 1;
 }
 
+void f_803DC41C(Cpu* c);
+void f_803DC3BC(Cpu* c);
+
 void hle_ModelDraw(Cpu* c) {
     if (!cull_enabled()) { f_803DB510_orig(c); return; }
     g_cull_models++;
-    if (!model_hidden(c, c->r[3])) { f_803DB510_orig(c); return; }
+    uint32_t model = c->r[3];
+    if (!model_hidden(c, model)) { f_803DB510_orig(c); return; }
     g_cull_skipped++;
-    /* 803DB510 without 803DC460 (the meshes): the matrix load, state set and restore stay */
+    /* 803DB510 without its meshes: the matrix load (803DC76C), the state set (803DC600) and restore
+     * (803DC6F4) stay, and of 803DC460 the part before the meshes: 803DC41C (state bits) and, when
+     * model+0 is not 0, 803DC3BC with r3 = that word (the model's GXSetArray calls), so later models see
+     * the same array bindings. Stack frames as the original's: 0x10 for 803DB510, 0x20 for 803DC460. */
+    uint32_t sp = c->r[1], r31 = c->r[31], lr = c->lr;
+    c->r[1] = sp - 0x10u; st32r(c->r[1], sp);
+    st32r(sp + 4u, lr); st32r(sp - 0x10u + 0xCu, r31);  /* 803DB518 / 803DB51C */
+    c->r[31] = model;
     c->r[3] = 0;
     c->lr = 0x803DB52Cu; f_803DC76C(c);
     c->lr = 0x803DB530u; f_803DC600(c);
+    {
+        uint32_t sp1 = c->r[1];
+        c->r[1] = sp1 - 0x20u; st32r(c->r[1], sp1);
+        st32r(sp1 + 4u, 0x803DB538u);  /* 803DC468: its return address */
+        c->lr = 0x803DC480u; f_803DC41C(c);
+        uint32_t arrays = ld32(model + 0x00u);  /* 803DC480: lwz r0,0(r31) */
+        if (arrays) { c->r[3] = arrays; c->lr = 0x803DC494u; f_803DC3BC(c); }
+        c->r[1] = sp1;
+        c->r[31] = model;
+    }
     c->lr = 0x803DB53Cu; f_803DC6F4(c);
+    c->r[31] = r31;
+    c->r[0] = lr;  /* 803DB540-803DB548: lr and r1 as the original leaves them */
+    c->lr = lr;
+    c->r[1] = sp;
 }
 
 void cull_report(void) {
-    if (!cull_enabled()) { rt_log("[cull] off (SR_CULL=0)"); return; }
+    if (!cull_enabled()) { rt_log("[cull] off (SR_CULL=1 turns it on)"); return; }
     if (g_cull_models)
         rt_log("[cull] models %llu, skipped as wholly outside the view %llu (%.1f%%), drawn because a display list was not "
                "seen yet or is skinned %llu", g_cull_models, g_cull_skipped, 100.0 * g_cull_skipped / g_cull_models, g_cull_unknown);

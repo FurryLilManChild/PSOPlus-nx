@@ -1,5 +1,32 @@
 # Progress log (newest first)
 
+## 2026-11-21: Switch tests 4-9 (GX pipe and cull work), Build A (review fixes)
+
+- Tests 4-9 (commits 8b4e00c, a500102, 93c294c, 1756a8a, 7aa1264, 597c8f5): SR_GXSTAT stream survey (test 4:
+  about 11,000 matrix loads a frame in the Forest's busy spots, a fifth of all pipe stores); pipe stores as
+  inline appends into a 4 KB batch (5); native matrix writers 8038EA3C / 8038EA70 and an off-screen draw count
+  (6: 50-64% of 3D draws wholly outside the view in busy spots); the model cull in cull.c (7-9). Tests 7, 8 and 9
+  each logged 0.0% of models skipped.
+- An independent code review of tests 6-9 found:
+  - The cull never ran in tests 7-9: the current matrix pointer (r13-0x2E8C) is always in the locked cache
+    (0xE0000000, the game's matrix stack set up by 803DEC98), and the check accepted RAM only. Tests 7 and 8
+    had their own faults too (boxes read before the decode; another pass's projection).
+  - The same RAM-only check made the native matrix writers fall back to the game's code for every model matrix.
+  - The cull's bounds pass cost about 5.6 ms a frame inside the frame end path the game waits on (GXDrawDone),
+    and the [perf] / [hitch] "waiting for the render thread" figure included it.
+  - sched.c's idle wait could spin forever inside an interrupt handler (deliver() refuses there and leaves the
+    pending flag set).
+- Build A fixes: guest_span_ok (runtime.h) accepts RAM and the 16 KiB locked cache, used by cull.c and
+  hle_gx.c; SR_CULL is off unless SR_CULL=1, and then no bounds work runs on either thread; the cull's skip path
+  also runs 803DC41C and 803DC3BC (the model's GXSetArray calls, r3 = model+0) as 803DC460 does; the idle wait
+  returns at once inside a handler; the render-thread wait timer covers render_submit alone.
+- Evidence (cloud): tools/tests/run_mtx_writer_diff.sh links the recompiled originals with hle_gx.c and the
+  runtime's guest window: 100,000 random cases (half in the locked cache, about 9% straddling a batch flush),
+  0 mismatches, 0 fall backs. Signalling NaN inputs differ only in the quiet bit (the original goes through the
+  host FPU; the native copy keeps the bits, as the GameCube's paired-single store does). guest_span_ok passed
+  16 of 16 edge cases. The changed files compile for the Switch with no warnings.
+- Not verifiable in the cloud: anything at run time (the cull's effect with SR_CULL=1, frame times).
+
 ## 2026-11-20: Switch test 2 results, test 3 (range fog, game-thread profile)
 
 - Test 2 (2a6e50e, handheld, stock CPU 1020 / GPU 384 / memory 1331 MHz): precompiled shaders from the 7

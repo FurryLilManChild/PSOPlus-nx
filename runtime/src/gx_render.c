@@ -933,6 +933,8 @@ void gx_bounds_record(uint32_t mark, uint32_t dl) {
 }
 static void gx_bounds_frame(const GxFrame* f) {
     void cull_store(uint32_t addr, const float bb[6], int ok);
+    int cull_enabled(void);
+    if (!cull_enabled()) { g_nbounds = 0; return; }  /* SR_CULL unset: no bounds work at all */
     for (uint32_t r = 0; r < g_nbounds; r++) {
         const BoundsRange* br = &g_bounds[r];
         if (br->b > f->nidx) continue;
@@ -1500,9 +1502,11 @@ static void efb_copy(uint32_t v) {
         if (own) ownview_frame(g_frame, p);
         uint32_t ndraws = 0;
         for (uint32_t i = 0; i < g_frame->ncmds; i++) ndraws += g_frame->cmds[i].type == GXC_DRAW;
-        uint64_t ts = rt_ticks();
         { extern int g_gxstat; if (g_gxstat == 1) gx_cull_stats(g_frame); }
-        gx_bounds_frame(g_frame);  /* after gx_decode_sync above: every vertex unpacked */
+        { int cull_enabled(void); if (cull_enabled()) gx_bounds_frame(g_frame); }  /* after gx_decode_sync: every vertex unpacked */
+        /* "waiting for the render thread" in [perf] / [hitch]: render_submit alone (tests 7-9 counted the
+         * bounds pass and SR_GXSTAT's count here too) */
+        uint64_t ts = rt_ticks();
         render_submit(g_frame);
         { uint64_t d = rt_ticks() - ts; g_wait_ticks += d; g_wait_total += d; }
         g_frame = NULL;

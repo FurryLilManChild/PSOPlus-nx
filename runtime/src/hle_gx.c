@@ -9,8 +9,9 @@
  * The data goes to the pipe in the order and format the game's code writes it: memory holds the floats
  * big-endian, as the command stream does, so the matrix is one copy into the batch buffer. The
  * registers the original leaves behind (f0-f5 loaded, r3 and r4 unchanged) are set the same way.
- * When the target is not the pipe, or GQR0 is not the plain-float setting the SDK relies on, the
- * game's own code runs. */
+ * The source is RAM or the locked cache (the game's matrix stack at 0xE0000000), checked by
+ * guest_span_ok (runtime.h) for the whole 48 bytes. When the target is not the pipe, the source is
+ * anything else, or GQR0 is not the plain-float setting the SDK relies on, the game's own code runs. */
 #include <stdint.h>
 #include <string.h>
 
@@ -34,15 +35,9 @@ static inline void pipe_copy(uint32_t src, int n) {
     for (int i = 0; i < n; i++) ppc_pipe32(ld32r(src + 4u * (uint32_t)i));  /* batch boundary, statistics on */
 }
 
-/* the matrix source is ordinary RAM (cached or uncached mirror), never a device */
-static inline int ram_src(uint32_t a, uint32_t len) {
-    uint32_t p = a & 0x3FFFFFFFu;
-    return !PPC_IS_MMIO(a) && p + len <= GUEST_RAM_SIZE;
-}
-
 void hle_WriteMTXPS4x3(Cpu* c) {
     uint32_t src = c->r[3], dst = c->r[4];
-    if (c->gqr[0] != 0 || !ppc_is_pipe(dst) || !ram_src(src, 48)) { f_8038EA3C_orig(c); return; }
+    if (c->gqr[0] != 0 || !ppc_is_pipe(dst) || !guest_span_ok(src, 48)) { f_8038EA3C_orig(c); return; }
     pipe_copy(src, 12);
     for (int i = 0; i < 6; i++) {  /* f0-f5 = the six float pairs */
         c->f[i].ps0 = f32_at(src + 8u * (uint32_t)i);
@@ -52,7 +47,7 @@ void hle_WriteMTXPS4x3(Cpu* c) {
 
 void hle_WriteMTXPS3x3(Cpu* c) {
     uint32_t src = c->r[3], dst = c->r[4];
-    if (c->gqr[0] != 0 || !ppc_is_pipe(dst) || !ram_src(src, 48)) { f_8038EA70_orig(c); return; }
+    if (c->gqr[0] != 0 || !ppc_is_pipe(dst) || !guest_span_ok(src, 48)) { f_8038EA70_orig(c); return; }
     for (int row = 0; row < 3; row++) {  /* each row of the 3x4 source: its first three floats */
         uint32_t r = src + 16u * (uint32_t)row;
         pipe_copy(r, 3);

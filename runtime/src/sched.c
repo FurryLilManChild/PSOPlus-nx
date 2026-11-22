@@ -365,6 +365,9 @@ void sched_interrupts_enabled(Cpu* c) {
     }
     os_irq_retry();
     if (g_core_preempt[0]) deliver(c);
+    /* inside a handler deliver() returns at once and leaves g_core_preempt set: the wait loop below
+     * would spin on it forever, so a handler's own interrupt enable returns here, as before the loop */
+    if (t_in_irq) return;
     /* PSO's idle loop (SelectThread) enables interrupts once, then spins on the run queue bits until a
      * handler makes a thread ready: wait here, interrupt after interrupt, until one is ready (one wait per
      * call let the game core spin from the first interrupt on, a third of its time in calm areas) */

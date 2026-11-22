@@ -47,6 +47,16 @@ _Noreturn void rt_exit(int status);
 #define GUEST_RAM_SIZE 0x01C00000u   /* backed: MEM1 + room above it for the REL (see gcrecomp.py) */
 #define LOCKED_CACHE_PHYS 0x20000000u
 #define LOCKED_CACHE_SIZE 0x4000u
+/* 1 when the len bytes at guest address ea lie wholly in backed memory: RAM below GUEST_RAM_SIZE (any
+ * mirror: 0x0, 0x8, 0xC) or the 16 KiB locked cache (0xE0000000, physical LOCKED_CACHE_PHYS), never a
+ * device and never across the end of either window. ppc_ptr / mem_phys map both. */
+static inline int guest_span_ok(uint32_t ea, uint32_t len) {
+    if (PPC_IS_MMIO(ea)) return 0;
+    uint32_t p = ea & PPC_PHYS_MASK;
+    if (p < GUEST_RAM_SIZE) return len <= GUEST_RAM_SIZE - p;
+    uint32_t lc = p - LOCKED_CACHE_PHYS;
+    return lc < LOCKED_CACHE_SIZE && len <= LOCKED_CACHE_SIZE - lc;
+}
 void mem_init(void);
 static inline uint8_t* mem_phys(uint32_t pa) { return ppc_mem_base_var + (pa & PPC_PHYS_MASK); }
 void mem_write_bytes(uint32_t ea, const void* src, size_t n);
