@@ -1,5 +1,34 @@
 # Progress log (newest first)
 
+## 2026-11-22: Build B (an indirect-call cache); the matrix functions measured and left as they are
+
+- Reading test 10's profile: the Switch profiler charges each sample to the function entered last, so a
+  caller's code after a call returns counts for the callee. 803DB560 (4.3%, from 803DBE50) is a 15-instruction
+  state compare; what follows it in the material loop of 803DBE1C is the indirect call to the state handler
+  (table at 0x804FC540) through ppc_dispatch, a binary search over the 28,864-entry function table (460 KB,
+  about 15 dependent loads and unpredictable branches). The generated code has 5,911 such indirect call sites.
+- Build B: runtime/src/dispatch.c (ppc_dispatch moved out of cpu.c) puts a 4096-entry direct-mapped cache in
+  front of the search: one 64-bit word per entry (guest address, host function as a 32-bit offset), relaxed
+  atomics, only results of the search are cached, non-entries are never cached and still end in rt_fatal.
+  No guest-visible change: the same function runs for every address. A [dispatch] line (every 16.7 million
+  indirect calls) logs the count and the cache misses, so test 11 shows how often the game calls indirectly.
+- Evidence (cloud): tools/tests/run_dispatch_cache_test.sh links dispatch.c with the real table and one stub
+  per function: 20,000,000 lookups (90% from 600 hot targets, the rest the whole table and 391,482 non-entries)
+  returned what the binary search returns, 0 wrong; 1,225,433 calls through ppc_dispatch ran the right stub;
+  4 threads at once, 20,000,000 lookups, 0 wrong. Host speed per lookup: binary search 90.7 ns, cache 12.1 ns.
+- The matrix functions were written natively and not kept. PSMTXConcat 80376420, PSMTXInverse 8037653C and the
+  transpose 803764EC passed a differential test (300,000 cases, the whole Cpu struct and memory windows,
+  locked cache and RAM, aliasing, against the game's code in both generated forms; NaN cases apart), but an
+  hle.txt entry makes the recompiler emit the original in its plain form and compile every caller to read
+  back any register, so the native code must write every register the original changes (17 register pairs
+  for Concat) where the optimised generated code wrote 5. Host timing against the optimised form that ran in
+  test 10: Concat 51.0 vs 43.1 ns (slower), Inverse 83.8 vs 68.5 ns (slower; 21.9 ns when the input repeats,
+  but its input is the current node's matrix and 803DC904 makes a new one for every node), transpose 9.7 vs
+  11.3 ns. The generated code for these leaf functions is already straight-line C.
+- GX library functions (8038C50C, 80389BD0, 8038C0B4, 8038EB80, 803897D8) skipped: their buckets also hold the
+  caller's code after they return, and their own work is mostly pipe writes, already inline appends.
+- Not verifiable in the cloud: the effect on the Switch's frame times; how many indirect calls a frame makes.
+
 ## 2026-11-22: Switch test 10 (Build A, bd343d6) results
 
 - the owner: Forest 1 held a steady 30 fps, including the busy spot that dropped to 20-25 fps in tests 4-9. Stock

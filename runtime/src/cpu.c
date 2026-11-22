@@ -11,20 +11,7 @@ int g_ppc_trace;
 volatile uint32_t g_ppc_cur_fn, g_ppc_cur_lr;
 uint8_t* g_mod_hook_flags;
 
-/* ---- dispatch: guest address -> recompiled function ---- */
-void ppc_dispatch(Cpu* c) {
-    uint32_t a = c->pc;
-    unsigned lo = 0, hi = g_recomp_func_count;
-    while (lo < hi) {
-        unsigned mid = (lo + hi) / 2;
-        if (g_recomp_funcs[mid].addr < a) lo = mid + 1; else hi = mid;
-    }
-    if (lo < g_recomp_func_count && g_recomp_funcs[lo].addr == a) {
-        g_recomp_funcs[lo].fn(c);
-        return;
-    }
-    rt_fatal("dispatch to %08X: not a function entry (lr %08X)", a, c->lr);
-}
+/* ---- dispatch (guest address -> recompiled function): runtime/src/dispatch.c ---- */
 
 void ppc_host_call(Cpu* c, PpcFunc fn) { fn(c); }
 void ppc_mod_run(Cpu* c) { ppc_dispatch(c); }
