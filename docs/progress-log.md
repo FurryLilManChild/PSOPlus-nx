@@ -1,5 +1,21 @@
 # Progress log (newest first)
 
+## 2026-11-23: Switch test 11 (Build B, 82495e2) results
+
+- the owner played Forest 1 and then Episode II, part of it with sys-clk at CPU 1428 MHz (the log's [pace] lines show
+  the clocks, so the two are separated below). Log stamp 82495e29, about 550 s.
+- Stock clocks (1020 MHz), Forest 1 busy stretch: 29.9-30.0 fps, game work 26.2-27.9 ms a frame (test 10:
+  19.6-26.3 ms; a different play-through, so not a like-for-like comparison).
+- Stock clocks, Episode II (from about 330 s): 23.8-30 fps, game work up to 32.7 ms in the worst 10 s windows,
+  GPU 21-24 ms a frame (Forest: 7-16). The stock-clock goal is not met there yet.
+- CPU 1428 MHz, Episode II: 29.2-30 fps, game work 13.9-24.4 ms.
+- [dispatch]: 167,772,160 indirect calls in about 550 s (about 10,000 a frame), 341,361 (0.2%) missed the cache.
+- Profile: 803DB560's bucket fell from 4.3% (test 10) to 1.4-2.0% of samples in matching windows, consistent with
+  the search no longer running; the game-work figure did not show a clear drop. Episode II's top game buckets:
+  803D64C0 3.8-4.6% (from 802A8DA0 and 802A8F2C), 802A9478 1.8-2.5%, 803BEEFC 2.1-2.4%, 80376420 1.7-2.3%,
+  8038C50C 2.0-2.2%. Apart from idle the profile is flat: no single function above 5%.
+- Render wait 0.01 ms a frame and draw done 0.3-0.6 ms throughout, as in test 10.
+
 ## 2026-11-22: Build B (an indirect-call cache); the matrix functions measured and left as they are
 
 - Reading test 10's profile: the Switch profiler charges each sample to the function entered last, so a
