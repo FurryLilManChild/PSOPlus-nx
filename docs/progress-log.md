@@ -1,5 +1,18 @@
 # Progress log (newest first)
 
+## 2026-11-23: Switch test 14 (0.5.0 build, ff131ea) results
+
+- Log stamp ff131ea6 (version 0.5.0), about 410 s, mostly stock clocks. The first log line and [build] show
+  0.5.0; one "priority 0x3B is already the lowest" line and no svcSetThreadPriority failures.
+- The menu's CPU clock setting works: "CPU 1224 MHz requested (menu setting): rc 0x0, reads back 1224 MHz", and
+  "set back to stock 1020 MHz", each logged and read back.
+- Menu closed, normal play: 28.9-30.0 fps; game work up to 30 ms in the busiest windows; GP thread 12-21 ms a
+  frame on average, worst frames 20-27 ms (on the CPU 17-23). [hitch] counts per 10 s were 0 in most windows
+  after 90 s (10 at 320 s); the early ones are loading (texture lookups 16-26 ms in the worst frames).
+- Menu open (about 200-260 s): still 25-28 fps. Menu pictures took up to 73-77 ms each (25-49 per 10 s), and
+  the GP thread's worst frames were 40-52 ms busy with only 14-19 ms on the CPU, so the GP thread still lost its
+  core for 25-35 ms while the menu was drawing. The 0.25 ms yield did not stop it; cause not yet proven.
+
 ## 2026-11-23: Build 0.5.0 (the GP thread's long frames at stock clocks, [pace] GP and menu lines, version 0.5.0)
 
 - Why: tests 12 and 13 at stock CPU 1020 MHz: stretches of 28-29 fps with single 57-70 ms frames whose [hitch]
