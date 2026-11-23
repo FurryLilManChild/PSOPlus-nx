@@ -55,7 +55,7 @@
 
 ## 2026-11-23: Switch tests 12 and 13 (Build C a90788b, Build D 989bc96) results
 
-- the owner: FPS counter fine; button map, Reset and saving all work; the CPU menu setting works (his test; the
+- The owner: FPS counter fine; button map, Reset and saving all work; the CPU menu setting works (his test; the
   session where he set it is not in the two logs he sent); FSR at 50% looked sharper and seemed to hold 30.
 - Build C log (a90788ba): sys-clk held 1428 MHz while the menu said Stock, and the watch logged "another tool
   sets the clock (sys-clk?)", then "reads 1020 MHz again" when sys-clk was turned off. Detection works.
@@ -147,7 +147,7 @@
 
 ## 2026-11-23: Switch test 11 (Build B, 82495e2) results
 
-- the owner played Forest 1 and then Episode II, part of it with sys-clk at CPU 1428 MHz (the log's [pace] lines show
+- The owner played Forest 1 and then Episode II, part of it with sys-clk at CPU 1428 MHz (the log's [pace] lines show
   the clocks, so the two are separated below). Log stamp 82495e29, about 550 s.
 - Stock clocks (1020 MHz), Forest 1 busy stretch: 29.9-30.0 fps, game work 26.2-27.9 ms a frame (test 10:
   19.6-26.3 ms; a different play-through, so not a like-for-like comparison).
@@ -192,7 +192,7 @@
 
 ## 2026-11-22: Switch test 10 (Build A, bd343d6) results
 
-- the owner: Forest 1 held a steady 30 fps, including the busy spot that dropped to 20-25 fps in tests 4-9. Stock
+- The owner: Forest 1 held a steady 30 fps, including the busy spot that dropped to 20-25 fps in tests 4-9. Stock
   clocks (log: CPU 1020 / GPU 384 / memory 1331 MHz handheld), sys-clk off, SR_PROFILE=1 only.
 - Log (stamp bd343d66, about 180 s of frames): every [pace] line 28.9-30.0 frames/s. Game work in the busy
   stretch 19.6-26.3 ms a frame (tests 4-9: about 29-34 ms), so about 7 ms of the 33.3 ms budget is left at the
@@ -259,7 +259,7 @@
 
 ## 2026-11-19: test 3 result, test 4 (interrupt-delivery diagnostics)
 
-- Test 3 (3d6b7ff4): sound works (the owner). Black screen right after choosing offline mode, with no movie.rel
+- Test 3 (3d6b7ff4): sound works (owner). Black screen right after choosing offline mode, with no movie.rel
   link this time, so the movie player is not the cause. [stall] report after 6 s:
   - game thread 80543FC8 (prio 16) asleep in GXDrawDone (parked 80375D1C 8038A0B0 803DCEFC, the flip);
   - thread 80575E80 (prio 24, started at 803CBA58) suspended itself; no thread ready; the host thread
@@ -276,7 +276,7 @@
 
 - Test 2 first run failed in configure (no baserom/movie.rel): build_pc.ps1's step 1 updated the script but
   PowerShell ran the old copy. build_pc now restarts itself when the fast-forward changed it (0e733963).
-- Test 2 (0e733963): boots, 30 fps, but no sound (the owner). Character creation: OSLink of movie.rel logged, then
+- Test 2 (0e733963): boots, 30 fps, but no sound (owner). Character creation: OSLink of movie.rel logged, then
   no [pace]/[perf] line until the window was closed (black screen; frozen or not drawing unknown).
 - No sound, cause proven: the DSP image's Dolphin hash (HashEctor over 6624 bytes at 0x804F7980) is 0x4E8A8B21,
   the older AX microcode; Riders' stand-in implements 0x3DAF59B9. In the older one mixer control is route flags
@@ -315,7 +315,7 @@
 
 ## 2026-11-19: phase 1 analysis
 
-- the owner approved MPL-2.0, our own copy of the runtime, and matching the original frame rate.
+- The owner approved MPL-2.0, our own copy of the runtime, and matching the original frame rate.
 - Copied sonic-riders-recomp (commit 75380c0) runtime, recompiler and tools; the game-data guard now knows
   PSO's hashes.
 - decomp-toolkit 1.8.4 on PsoV3.dol stopped with "Unpaired epilogue 3:0x8042EA04": the DOL chain loader at

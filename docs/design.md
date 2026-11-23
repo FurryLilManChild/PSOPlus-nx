@@ -75,7 +75,7 @@ Unknown, to measure later: CPU load on the original hardware, how far below 30 f
 4. **First Switch build**: deko3d with the starter shader cache, logs, crash handler, port menu.
 5. **Performance at stock clocks**, then split screen (2 to 4 players), then a test release.
 
-## Decisions (the owner, 2026-11-19)
+## Decisions (owner, 2026-11-19)
 
 1. **License**: MPL-2.0 throughout (required for the files forked from sonic-riders-recomp).
 2. **Base strategy**: our own copy of sonic-riders-recomp's runtime and recompiler in this repo, changed freely,

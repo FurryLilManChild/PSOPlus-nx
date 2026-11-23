@@ -5,8 +5,7 @@ GPOE8P revision 2), by static recompilation. Offline modes first; online play is
 
 ## Who does what
 
-- the owner: owns the disc, runs PC builds in PowerShell on his PC, tests on his Switch (Atmosphere, sys-clk) and
-  PC (PC), sends logs. He writes no code.
+- The owner: owns the disc, runs PC builds in PowerShell on his PC, tests on his Switch and PC, sends logs. He writes no code.
 - Claude: writes all code, scripts and docs, reads logs, builds Switch NROs in the cloud when that is quicker.
 - Instructions for the owner: numbered, click by click, copy-paste PowerShell.
 
