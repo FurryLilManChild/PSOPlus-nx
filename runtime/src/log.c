@@ -79,6 +79,7 @@ _Noreturn void rt_fatal(const char* fmt, ...) {
     vfprintf(stderr, fmt, ap);
     va_end(ap);
     fputc('\n', stderr);
+    platform_clock_release_at_exit();  /* Switch: no CPU override left behind */
     fflush(stderr);
     abort();
 }

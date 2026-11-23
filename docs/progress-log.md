@@ -1,5 +1,39 @@
 # Progress log (newest first)
 
+## 2026-11-23: Build C (the port menu overhauled, a CPU clock setting)
+
+- Why: test 11 showed Episode II at 24-30 fps at stock CPU 1020 MHz and 29-30 fps at 1428 MHz (sys-clk), and
+  the menu had no clock choice. The project goal stays stock clocks: Stock is the default.
+- Menu before: Display (4:3 / "Fit to screen", field of view, resolution with Riders race wording, FSR
+  sharpness, bloom, colour presets and sliders), Performance (a frame rate note, the FPS counter, the 384 MHz
+  handheld graphics profile), Controls, About (version, screenshot); Sonic colours (navy, blue, gold) and a
+  "Sonic Riders - Settings" title; dead Riders code (Gameplay and Mods pages, phone and iOS text, update check).
+- Menu now (runtime/src/menu.cpp): Performance (CPU clock: Stock 1020 / 1224 / 1428 / 1785 MHz, the clocks
+  read now, a warning when another tool sets the clock, the handheld graphics profile, the performance
+  readout), Display (field of view, resolution, sharpness, colour), Controls (buttons, controller setup,
+  how to work the menu), System (build stamp, the clocks now, the CPU setting, where settings are saved,
+  screenshot). Plain dark grey with a muted cyan accent; title "PSO Episode I and II Plus: port settings".
+  Opened as before (hold Minus 0.5 s; a single Joy-Con: + or -), pad only.
+- Removed as Riders leftovers: "Fit to screen" (PSO has no camera patch, so it only stretched the 3D picture;
+  a saved wide mode now loads as 4:3, logged), bloom (never ran in PSO: no game-state probe), the PC
+  in-between picture rate (assumes a 60-picture game; a saved rate is reset to the game's own, logged), the
+  Chaos Emerald and ring cap settings.
+- CPU clock (platform_switch.c): clkrstSetClockRate on a PcvModuleId_CpuBus session (system 8.0+), else
+  pcvSetClockRate. Set only while the game has focus; focus lost (HOME, sleep, a system applet), exit
+  (atexit) and rt_fatal set 1020 MHz back; focus back, resume and docked / handheld changes set it again.
+  clock_override.txt exists while an override is set; a start that finds it sets 1020 MHz first and logs it.
+  Each change logs the request, the result code and the clock read back. A once-a-second watch (stall
+  thread, only while an override is set or the menu or readout shows clocks) sets it once more after a
+  mismatch, then reports "another tool sets the clock (sys-clk?)" in the log and the menu. No sys-clk IPC.
+- Performance readout (off by default): fps, game work per frame (30-frame average from frame_pacing.c,
+  computed only while on), GPU ms, CPU MHz; laid out again only when its text changes (about once a second).
+- settings.ini: new keys cpu_clock and perf_overlay (old show_fps is ignored); written to settings.ini.tmp,
+  then the old file removed and the new one renamed (FAT refuses a rename onto a file); a start that finds
+  only the .tmp reads it.
+- Evidence (cloud): the changed files compile for the Switch with -Wall, no warnings; menu.cpp also passes a
+  host syntax check. Not verifiable in the cloud: anything on the console (whether clkrst accepts the rates
+  from a homebrew NRO, the focus messages, sys-clk interplay, the menu's look and pad navigation).
+
 ## 2026-11-23: Switch test 11 (Build B, 82495e2) results
 
 - the owner played Forest 1 and then Episode II, part of it with sys-clk at CPU 1428 MHz (the log's [pace] lines show

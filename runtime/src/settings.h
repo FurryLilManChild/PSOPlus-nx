@@ -1,4 +1,5 @@
-/* User options (the hold-Minus menu, overlay.c), saved as settings.ini next to the memory card. */
+/* User options (the hold-Minus menu, menu.cpp), saved as settings.ini in the game's folder (Switch:
+ * sdmc:/switch/psoplus/settings.ini). A missing file means the defaults. */
 #pragma once
 
 #ifdef __cplusplus
@@ -11,9 +12,8 @@ enum { SCREEN_4_3, SCREEN_WIDE, SCREEN_REMOVED_2, SCREEN_FIT, SCREEN_MODES };
 
 typedef struct Settings {
     int screen;    /* SCREEN_*: 4:3 letterboxed, 16:9 widescreen (patched cameras), 16:9 stretched, fit window */
-    int show_fps;  /* frame counter in the corner */
+    int perf_overlay;  /* the performance readout in the corner (frame rate, game work, GPU, CPU clock); off by default */
     int resolution;  /* RES_*: internal resolution of the Switch renderer (the PC build keeps 2x) */
-    int chaos_emerald;  /* the Chaos Emerald gear (Super Sonic) is unlocked; nothing else is (gx_render.c) */
     int fullscreen;     /* PC: borderless fullscreen window (F11 / Alt+Enter, or the menu); unused on the Switch */
     int framerate;      /* FR_*: what happens when a frame takes longer than a 60 Hz retrace (frame_pacing.c) */
     int handheld_gpu;   /* Switch: Nintendo's 384 MHz handheld GPU configuration (platform_set_handheld_gpu) */
@@ -34,8 +34,8 @@ typedef struct Settings {
     int pad_background; /* PC: controllers keep working while the window is not focused (SDL hint) */
     int sharpness;      /* PC: FSR 1 RCAS sharpening of the final picture in percent, 0 (off)..100 */
     int update_check;   /* PC: ask GitHub at start-up whether a newer release exists (update_check.c) */
-    int ring_cap_999;   /* races: a racer holds up to 999 rings (default) instead of the original 100
-                           (g_ring_cap, read by the cap checks in config/GXEE8P/patches.txt) */
+    int cpu_clock;      /* Switch: CPU clock in MHz while the game has focus, 0 = stock (1020, the system decides);
+                           else 1224, 1428 or 1785 (platform_set_cpu_clock) */
 } Settings;
 
 enum { FR_60, FR_AUTO, FR_30, FR_MODES };
@@ -51,8 +51,8 @@ enum { FOV_MIN = 80, FOV_MAX = 130 };
 enum { PC_SCALE_MIN = 1, PC_SCALE_MAX = 4 };  /* 5x-6x tanked the fps on the maintainer's PC (2026-11-07) */
 
 extern Settings g_settings;
-extern volatile double g_aspect_scale;  /* camera aspect multiplier (config/GXEE8P/patches.txt) */
-extern volatile double g_fov_scale;     /* camera field of view multiplier (config/GXEE8P/patches.txt) */
+extern volatile double g_aspect_scale;  /* camera aspect factor (gx_render.c, GX_XR_ASPECT) */
+extern volatile double g_fov_scale;     /* field of view multiplier (gx_render.c, GX_XR_FOV; gx.vert) */
 
 void settings_load(void);   /* at start-up: reads the file, applies */
 int settings_handheld_pc(void);  /* Steam Deck / gamescope (first-run defaults, window size) */
@@ -69,9 +69,7 @@ const char* settings_screen_name(int mode);
  * for the whole run, the same on every machine (EFB width factor k; 0 = not fixed). Screen settings
  * and window size changes then only change how the picture is shown. */
 void settings_fix_wide_k(float k);
-/* the ring cap from a recording or the online host (999 or 100): game state, kept for this run */
-void settings_fix_ring_cap(int cap);
-int settings_ring_cap(void);  /* the cap in effect: 999 or 100 */
+int settings_cpu_clock_valid(int mhz);  /* 0 (stock), 1224, 1428 or 1785 */
 int settings_wide_k_fixed(void);
 const char* settings_resolution_name(int res);
 const char* settings_framerate_name(int mode);

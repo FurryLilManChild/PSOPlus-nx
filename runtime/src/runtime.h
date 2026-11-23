@@ -16,6 +16,20 @@ const char* platform_settings_path(void);   /* settings.ini (settings.c) */
 const char* platform_mods_dir(void);        /* the mods folder (mods.c, docs/MODDING.md) */
 void platform_set_handheld_gpu(int on);  /* Switch: the 384 MHz handheld GPU configuration on/off; elsewhere nothing */
 void platform_clocks_str(char* out, size_t n);  /* Switch: ", CPU x / GPU y / memory z MHz docked"; elsewhere "" */
+/* the CPU clock setting (Settings.cpu_clock; Switch: set only while the game has focus, set back to stock on
+ * focus loss and exit; elsewhere nothing). mhz 0 = stock (the system decides) */
+void platform_set_cpu_clock(int mhz);
+typedef struct PlatformClockInfo {
+    int available;   /* the clocks can be read and set (Switch: clkrst or pcv) */
+    unsigned cpu_mhz, gpu_mhz, mem_mhz;  /* last read, about once a second while asked for (0: not read yet) */
+    int docked;
+    int other_tool;  /* the CPU clock differs from the setting: another tool (sys-clk?) sets it */
+    int overridden;  /* the port's CPU setting is in force now */
+    int set_failed;  /* the system refused the last CPU setting */
+} PlatformClockInfo;
+/* cheap (no system calls); calling it asks for fresh reads for the next few seconds */
+void platform_clock_info(PlatformClockInfo* out);
+void platform_clock_release_at_exit(void);  /* Switch: exit and rt_fatal set the CPU back to stock */
 double platform_gpu_frame_ms(void);  /* GPU time of recent frames (Switch: timestamps, render_deko.c); < 0: unknown */
 void platform_local_time(int* year, int* month, int* day, int* hour, int* minute, int* second);  /* local wall clock */
 uint64_t platform_now_ns(void);  /* monotonic, cheap (called thousands of times a frame) */

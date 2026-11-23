@@ -9,6 +9,7 @@
  *   - mark one game frame for perftest.c,
  *   - log the frame rate every 10 s ([pace] lines): frames flipped per second and the game thread's
  *     work per frame (the flip's own wait left out);
+ *   - give the menu's performance readout its game work figure (only while the readout is on);
  *   - watch for a stall: no flip for 5 s while the host is not pausing the game logs [stall] with the last
  *     function entries (the trace ring, on from the first flip), the hardware registers and every guest
  *     thread with where it is parked, once per stall, and the game keeps running (test 2's black screen
@@ -21,6 +22,7 @@
 
 #include "runtime.h"
 #include "game_addrs.h"
+#include "overlay.h"
 #include "settings.h"
 
 void f_803DCF2C_orig(Cpu* c);  /* the game's display flip (generated) */
@@ -88,7 +90,18 @@ void hle_frame_end(Cpu* c) {
     static uint64_t idle_at_return;
     if (g_last_return_ns) {  /* game work since the last flip returned, less the time it waited idle */
         uint64_t busy = now - g_last_return_ns, idle = (sched_idle_total() - idle_at_return) * 1000000ull / 40500;
-        g_work_ns += idle < busy ? busy - idle : 0;
+        uint64_t work = idle < busy ? busy - idle : 0;
+        g_work_ns += work;
+        if (g_settings.perf_overlay) {  /* the menu's performance readout: the average of 30 frames */
+            static uint64_t ro_ns;
+            static unsigned ro_n;
+            ro_ns += work;
+            if (++ro_n == 30) {
+                overlay_set_work_ms((float)(ro_ns / 1e6 / 30));
+                ro_ns = 0;
+                ro_n = 0;
+            }
+        }
     }
     f_803DCF2C_orig(c);  /* the game's own flip: waits for its retraces */
     g_last_return_ns = platform_now_ns();

@@ -37,6 +37,7 @@ int timespec_get(struct timespec* ts, int base) {
  * shows whether the counter runs on while the console sleeps). */
 static AppletHookCookie g_hook;
 _Atomic int g_switch_log_input;  /* input_hid.c logs the next button press */
+static void clk_on_applet(AppletHookType type);  /* the CPU clock setting, below */
 static void applet_hook(AppletHookType type, void* param) {
     (void)param;
     static uint64_t last;
@@ -48,6 +49,9 @@ static void applet_hook(AppletHookType type, void* param) {
     last = now;
     if (type == AppletHookType_OnResume || (type == AppletHookType_OnFocusState && appletGetFocusState() == AppletFocusState_InFocus))
         g_switch_log_input = 1;
+    if (type == AppletHookType_OnFocusState || type == AppletHookType_OnResume || type == AppletHookType_OnOperationMode ||
+        type == AppletHookType_OnPerformanceMode)
+        clk_on_applet(type);
     fflush(stderr);  /* rare; the log must hold it if the game hangs right after */
 }
 
@@ -85,27 +89,217 @@ void platform_set_handheld_gpu(int on) {
     rt_log("[switch] handheld performance configuration -> 0x%08X (%s): rc 0x%X", want, on ? "GPU 384 MHz" : "system default", rc);
 }
 
-/* the clocks the console actually runs at (sys-clk or other overclock tools included), for the [pace]
- * lines: clkrst (system 8.0+), else pcv; "" when neither answers */
-void platform_clocks_str(char* out, size_t n) {
-    static int mode = -1;  /* -1 not tried, 0 none, 1 clkrst, 2 pcv */
-    static ClkrstSession ses[3];
-    if (mode < 0) {
-        mode = 0;
-        if (R_SUCCEEDED(clkrstInitialize()) && R_SUCCEEDED(clkrstOpenSession(&ses[0], PcvModuleId_CpuBus, 3)) &&
-            R_SUCCEEDED(clkrstOpenSession(&ses[1], PcvModuleId_GPU, 3)) && R_SUCCEEDED(clkrstOpenSession(&ses[2], PcvModuleId_EMC, 3)))
-            mode = 1;
-        else if (R_SUCCEEDED(pcvInitialize()))
-            mode = 2;
-        rt_log("[clocks] read through %s", mode == 1 ? "clkrst" : mode == 2 ? "pcv" : "nothing (unavailable)");
+/* ---- clocks: reading them ([pace] lines, the menu) and the menu's CPU clock setting ----
+ * clkrst (system 8.0+) or pcv (older systems), one session per clock, shared by every caller under
+ * g_clk_lock (the game thread's [pace] line, the render thread's menu and applet messages, the watch on
+ * the stall thread).
+ *
+ * The CPU setting (Settings.cpu_clock, 0 = stock): set with clkrstSetClockRate / pcvSetClockRate only while
+ * the game has focus. Focus lost (HOME menu, sleep, a system screen such as the controller setup) or exit:
+ * the CPU is set back to 1020 MHz, the clock every game profile uses; focus back, a resume or a docked /
+ * handheld change: set again. While an override is set, clock_override.txt exists, so a launch after a
+ * crash sets the CPU back to stock first and logs it. Another tool (sys-clk with a profile) can set the
+ * clock after us: the watch (once a second, clock_watch) reads it back, sets it once more after a mismatch
+ * (a docked / handheld change can land after our message), and when it still differs reports another tool
+ * in the log and the menu. Nothing here talks to sys-clk. */
+#define CPU_STOCK_HZ 1020000000u
+#define CLOCK_MARKER BASE_DIR "/clock_override.txt"
+static Mutex g_clk_lock;
+static int g_clk_mode = -1;  /* -1 not tried, 0 none, 1 clkrst, 2 pcv */
+static ClkrstSession g_clk_ses[3];
+static u32 g_cpu_want_hz;     /* the menu's choice, 0 = stock (nothing set) */
+static volatile int g_cpu_applied;  /* our rate is set now */
+static int g_cpu_reset_done;  /* the watch set it again once since the last event */
+static int g_cpu_mismatch;    /* reads in a row that differ */
+static _Atomic int g_clk_other;  /* another tool sets the CPU clock */
+static _Atomic int g_clk_failed;  /* the last attempt to set the CPU clock was refused */
+static _Atomic u32 g_clk_now[3];  /* last read: CPU, GPU, memory (Hz; 0 unknown) */
+static _Atomic u64 g_clk_asked;  /* tick of the last platform_clock_info call (the menu or readout wants reads) */
+
+static void clk_init_locked(void) {
+    if (g_clk_mode >= 0) return;
+    g_clk_mode = 0;
+    if (hosversionAtLeast(8, 0, 0) && R_SUCCEEDED(clkrstInitialize())) {
+        if (R_SUCCEEDED(clkrstOpenSession(&g_clk_ses[0], PcvModuleId_CpuBus, 3)) &&
+            R_SUCCEEDED(clkrstOpenSession(&g_clk_ses[1], PcvModuleId_GPU, 3)) &&
+            R_SUCCEEDED(clkrstOpenSession(&g_clk_ses[2], PcvModuleId_EMC, 3)))
+            g_clk_mode = 1;
     }
-    u32 hz[3] = {0, 0, 0};
-    if (mode == 1) for (int i = 0; i < 3; i++) clkrstGetClockRate(&ses[i], &hz[i]);
-    else if (mode == 2) {
+    if (!g_clk_mode && R_SUCCEEDED(pcvInitialize())) g_clk_mode = 2;
+    rt_log("[clocks] read and set through %s", g_clk_mode == 1 ? "clkrst" : g_clk_mode == 2 ? "pcv" : "nothing (unavailable)");
+}
+
+static void clk_read_locked(u32 hz[3]) {
+    hz[0] = hz[1] = hz[2] = 0;
+    if (g_clk_mode == 1) {
+        for (int i = 0; i < 3; i++) clkrstGetClockRate(&g_clk_ses[i], &hz[i]);
+    } else if (g_clk_mode == 2) {
         pcvGetClockRate(PcvModule_CpuBus, &hz[0]);
         pcvGetClockRate(PcvModule_GPU, &hz[1]);
         pcvGetClockRate(PcvModule_EMC, &hz[2]);
     }
+    for (int i = 0; i < 3; i++) g_clk_now[i] = hz[i];
+}
+
+static Result clk_set_cpu_locked(u32 hz) {
+    if (g_clk_mode == 1) return clkrstSetClockRate(&g_clk_ses[0], hz);
+    if (g_clk_mode == 2) return pcvSetClockRate(PcvModule_CpuBus, hz);
+    return MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
+}
+
+static int clk_has_focus(void) {
+    AppletFocusState st = appletGetFocusState();
+    return st != AppletFocusState_OutOfFocus && st != AppletFocusState_Background;
+}
+
+static int mhz_close(u32 a, u32 b) { return (a > b ? a - b : b - a) < 2000000u; }
+
+/* sets or releases the CPU clock as the setting and the focus ask; force: set again even if set */
+static void clk_apply_locked(const char* why, int force) {
+    clk_init_locked();
+    if (!g_clk_mode) return;
+    g_cpu_reset_done = 0;
+    g_cpu_mismatch = 0;
+    u32 hz[3];
+    if (g_cpu_want_hz && clk_has_focus()) {
+        if (g_cpu_applied && !force) return;
+        if (!g_cpu_applied) {  /* before the change: a crash from here on leaves the marker */
+            FILE* m = fopen(CLOCK_MARKER, "w");
+            if (m) {
+                fprintf(m, "CPU %u MHz set by PSO Episode I and II Plus; removed when set back to stock\n", g_cpu_want_hz / 1000000);
+                fclose(m);
+            }
+        }
+        Result rc = clk_set_cpu_locked(g_cpu_want_hz);
+        g_clk_failed = R_FAILED(rc);
+        g_cpu_applied = R_SUCCEEDED(rc);
+        if (!g_cpu_applied) remove(CLOCK_MARKER);
+        clk_read_locked(hz);
+        rt_log("[clocks] CPU %u MHz requested (%s): rc 0x%X%s, reads back %u MHz", g_cpu_want_hz / 1000000, why, rc,
+               g_cpu_applied ? "" : " (refused: the clock stays as it is)", hz[0] / 1000000);
+    } else if (g_cpu_applied) {
+        Result rc = clk_set_cpu_locked(CPU_STOCK_HZ);
+        g_cpu_applied = 0;
+        remove(CLOCK_MARKER);
+        clk_read_locked(hz);
+        rt_log("[clocks] CPU set back to stock %u MHz (%s): rc 0x%X, reads back %u MHz", CPU_STOCK_HZ / 1000000, why, rc,
+               hz[0] / 1000000);
+    }
+}
+
+void platform_set_cpu_clock(int mhz) {
+    mutexLock(&g_clk_lock);
+    u32 want = mhz > 0 ? (u32)mhz * 1000000u : 0;
+    int changed = want != g_cpu_want_hz;
+    g_cpu_want_hz = want;
+    if (changed) {
+        g_clk_other = 0;
+        g_clk_failed = 0;
+    }
+    /* forced: apply() selects the apm configuration just before, which can set the CPU back to 1020 MHz */
+    clk_apply_locked(changed ? "menu setting" : "settings applied", 1);
+    mutexUnlock(&g_clk_lock);
+}
+
+/* applet messages (render thread, inside appletMainLoop) */
+static void clk_on_applet(AppletHookType type) {
+    const char* why = type == AppletHookType_OnFocusState     ? (clk_has_focus() ? "focus back" : "focus lost")
+                      : type == AppletHookType_OnResume        ? "resume"
+                      : type == AppletHookType_OnOperationMode ? "docked / handheld change"
+                                                               : "performance mode change";
+    mutexLock(&g_clk_lock);
+    if (g_cpu_want_hz || g_cpu_applied) clk_apply_locked(why, type != AppletHookType_OnFocusState);
+    mutexUnlock(&g_clk_lock);
+}
+
+/* exit (atexit) and rt_fatal: set back without waiting for the lock (a thread may hold it while it dies) */
+void platform_clock_release_at_exit(void) {
+    if (!g_cpu_applied || g_clk_mode <= 0) return;
+    g_cpu_applied = 0;
+    Result rc = clk_set_cpu_locked(CPU_STOCK_HZ);
+    remove(CLOCK_MARKER);
+    rt_log("[clocks] exit: CPU set back to stock %u MHz: rc 0x%X", CPU_STOCK_HZ / 1000000, rc);
+}
+
+/* start-up: an override left by a session that did not end normally */
+static void clk_startup_check(void) {
+    FILE* m = fopen(CLOCK_MARKER, "r");
+    if (!m) return;
+    char line[128] = "";
+    if (!fgets(line, sizeof line, m)) line[0] = 0;
+    fclose(m);
+    line[strcspn(line, "\r\n")] = 0;
+    mutexLock(&g_clk_lock);
+    clk_init_locked();
+    Result rc = clk_set_cpu_locked(CPU_STOCK_HZ);
+    u32 hz[3];
+    clk_read_locked(hz);
+    mutexUnlock(&g_clk_lock);
+    remove(CLOCK_MARKER);
+    rt_log("[clocks] the last session ended with a CPU override still set (%s): set back to stock %u MHz first: rc 0x%X, reads back %u MHz",
+           line, CPU_STOCK_HZ / 1000000, rc, hz[0] / 1000000);
+}
+
+/* once a second (stall thread): reads the clocks while the menu or the readout shows them or an override
+ * is set; checks the override held */
+static void clock_watch(void) {
+    int asked = armTicksToNs(armGetSystemTick() - g_clk_asked) < 3000000000ull;
+    if (!asked && !g_cpu_want_hz) return;
+    mutexLock(&g_clk_lock);
+    clk_init_locked();
+    if (!g_clk_mode) {
+        mutexUnlock(&g_clk_lock);
+        return;
+    }
+    u32 hz[3];
+    clk_read_locked(hz);
+    if (clk_has_focus()) {
+        u32 expect = g_cpu_applied ? g_cpu_want_hz : CPU_STOCK_HZ;
+        if (g_cpu_want_hz && !g_cpu_applied) expect = 0;  /* not set yet (no focus message yet): nothing to check */
+        if (expect && hz[0] && !mhz_close(hz[0], expect)) {
+            if (++g_cpu_mismatch >= 2) {
+                if (g_cpu_applied && !g_cpu_reset_done) {
+                    g_cpu_reset_done = 1;
+                    g_cpu_mismatch = 0;
+                    Result rc = clk_set_cpu_locked(g_cpu_want_hz);
+                    rt_log("[clocks] CPU reads %u MHz, wanted %u MHz: set again: rc 0x%X", hz[0] / 1000000,
+                           g_cpu_want_hz / 1000000, rc);
+                } else if (!g_clk_other) {
+                    g_clk_other = 1;
+                    rt_log("[clocks] CPU reads %u MHz, the menu's setting is %u MHz (%s): another tool sets the clock (sys-clk?)",
+                           hz[0] / 1000000, expect / 1000000, g_cpu_applied ? "set by the port" : "stock");
+                }
+            }
+        } else if (expect && hz[0]) {
+            if (g_clk_other) rt_log("[clocks] CPU reads %u MHz again, as the menu's setting", hz[0] / 1000000);
+            g_clk_other = 0;
+            g_cpu_mismatch = 0;
+        }
+    }
+    mutexUnlock(&g_clk_lock);
+}
+
+void platform_clock_info(PlatformClockInfo* out) {
+    g_clk_asked = armGetSystemTick();
+    out->available = g_clk_mode != 0;  /* -1 (not tried yet) counts as available */
+    out->cpu_mhz = g_clk_now[0] / 1000000;
+    out->gpu_mhz = g_clk_now[1] / 1000000;
+    out->mem_mhz = g_clk_now[2] / 1000000;
+    out->docked = appletGetOperationMode() == AppletOperationMode_Console;
+    out->other_tool = g_clk_other;
+    out->overridden = g_cpu_applied;
+    out->set_failed = g_clk_failed;
+}
+
+/* the clocks the console actually runs at (sys-clk or other overclock tools included), for the [pace]
+ * lines: "" when neither clkrst nor pcv answers */
+void platform_clocks_str(char* out, size_t n) {
+    u32 hz[3];
+    mutexLock(&g_clk_lock);
+    clk_init_locked();
+    int mode = g_clk_mode;
+    clk_read_locked(hz);
+    mutexUnlock(&g_clk_lock);
     if (!mode) { if (n) out[0] = 0; return; }
     snprintf(out, n, ", CPU %u / GPU %u / memory %u MHz %s", hz[0] / 1000000, hz[1] / 1000000, hz[2] / 1000000,
              appletGetOperationMode() == AppletOperationMode_Console ? "docked" : "handheld");
@@ -136,6 +330,8 @@ void platform_init(void) {
         }
         fclose(f);
     }
+    clk_startup_check();
+    atexit(platform_clock_release_at_exit);
 }
 
 const char* platform_disc_path(void) {
@@ -367,6 +563,7 @@ static int stall_thread(void* arg) {
     uint64_t prev = armGetSystemTick();
     for (;;) {
         svcSleepThread(1000000000);
+        clock_watch();
         uint64_t now = armGetSystemTick();
         double gap = armTicksToNs(now - prev) / 1e9;
         if (gap > 3.0) rt_log("[clock] the tick counter moved %.1f s during a 1 s wait (sleep or suspension)", gap);

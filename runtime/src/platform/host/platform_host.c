@@ -559,6 +559,9 @@ void rt_thread_raise_priority(void) {
 }
 #endif
 void platform_set_handheld_gpu(int on) { (void)on; }
+void platform_set_cpu_clock(int mhz) { (void)mhz; }  /* PC: the clocks are the OS's */
+void platform_clock_info(PlatformClockInfo* out) { memset(out, 0, sizeof *out); }
+void platform_clock_release_at_exit(void) {}
 
 /* ---- "Save a bug report" (settings menu, About): one zip in the game folder with what a report needs:
  * psoplus.log (this run, flushed first), psoplus.prev.log (.prev2-.prev4 on PC), setup.log, saves/settings.ini, crash.txt
