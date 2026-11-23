@@ -89,7 +89,7 @@ static int game_thread(void* arg) {
     rt_fatal("the game's entry point returned");
 }
 
-extern const char g_build_version[]; /* build/<target>/gen/version.c, written by configure.py */
+extern const char g_build_version[], g_port_version[]; /* build/<target>/gen/version.c, written by configure.py */
 
 #if defined(__ANDROID__) || defined(SR_IOS)
 #include <SDL_main.h>  /* SDLActivity (Android) / SDL's UIKit app delegate (iOS) start the program at SDL_main */
@@ -114,7 +114,7 @@ int main(int argc, char** argv) {
     argc = platform_android_args(argc, argv);  /* launch arguments KEY=VALUE -> environment */
 #endif
     platform_init();
-    rt_log("[build] %s", g_build_version);
+    rt_log("[build] %s (version %s)", g_build_version, g_port_version);  /* tools/read_log.py finds the commit here */
     const char* disc = argc > 1 ? argv[1] : platform_disc_path();
     mem_init();
     settings_load();

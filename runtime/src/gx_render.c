@@ -45,6 +45,8 @@ uint64_t gx_render_wait_total(void) { return g_wait_total; }  /* read by the GP 
 static unsigned long long g_verts_total;  /* vertices emitted (after primitive expansion) */
 static uint64_t g_draw_total;              /* time in gx_draw (decode, state, lookups) */
 static uint64_t g_decode_ticks, g_state_ticks;  /* parts of it: vertex decode, state snapshots ([perf]) */
+static uint64_t g_decode_all, g_state_all, g_decwait_all;  /* the same, never reset, and of the decode the wait
+                                                             * for the helper's job in progress ([pace] GP lines) */
 static unsigned g_state_pushes;
 static unsigned long long g_feat_ind, g_feat_fog, g_feat_ztex;  /* draws using unimplemented features */
 static unsigned long long g_feat_copies, g_feat_copy_z;            /* EFB copies to textures, from depth */
@@ -442,6 +444,7 @@ static mtx_t g_dj_lock;
 static cnd_t g_dj_cv;
 static int g_dj_on = -1;
 static _Atomic uint64_t g_dj_helper_ticks;         /* decode time on the helper ([perf]) */
+static _Atomic uint64_t g_dj_helper_all;           /* the same, never reset ([pace] GP lines) */
 
 static int dj_run_one(int helper) {
     uint32_t i = atomic_load_explicit(&g_dj_next, memory_order_relaxed);
@@ -452,7 +455,11 @@ static int dj_run_one(int helper) {
     const DecJob* j = &g_dj[i];
     const uint8_t* p = g_dj_bytes + j->src;
     for (uint32_t k = 0; k < j->count; k++) decode_fast(&p, &j->fp, j->out + k);
-    if (helper) atomic_fetch_add_explicit(&g_dj_helper_ticks, rt_ticks() - t, memory_order_relaxed);
+    if (helper) {
+        uint64_t d = rt_ticks() - t;
+        atomic_fetch_add_explicit(&g_dj_helper_ticks, d, memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_dj_helper_all, d, memory_order_relaxed);
+    }
     atomic_fetch_add_explicit(&g_dj_done, 1, memory_order_release);
     return 1;
 }
@@ -484,8 +491,12 @@ void gx_decode_sync(void) {
     if (!pub) return;
     uint64_t t = rt_ticks();
     while (dj_run_one(0)) {}
+    uint64_t tw = rt_ticks();
     while (atomic_load_explicit(&g_dj_done, memory_order_acquire) != pub) {}  /* the helper's one job in progress: short */
-    g_decode_ticks += rt_ticks() - t;
+    uint64_t te = rt_ticks();
+    g_decode_ticks += te - t;
+    g_decode_all += te - t;
+    g_decwait_all += te - tw;
     atomic_store(&g_dj_pub, 0);
     atomic_store(&g_dj_next, 0);
     atomic_store(&g_dj_done, 0);
@@ -706,7 +717,9 @@ static void draw_impl(int prim, int vat, uint32_t count, const uint8_t* vertices
     if (g_state_dirty) {
         uint64_t ts = rt_ticks();
         push_state();
-        g_state_ticks += rt_ticks() - ts;
+        uint64_t d = rt_ticks() - ts;
+        g_state_ticks += d;
+        g_state_all += d;
         g_state_pushes++;
     }
     GxFrame* f = frame();
@@ -730,7 +743,7 @@ static void draw_impl(int prim, int vat, uint32_t count, const uint8_t* vertices
     fast_plan_init(&fplan, &plan);
     static int check = -1;
     if (check < 0) check = getenv("SR_DECODECHECK") != NULL;
-    uint64_t td = rt_ticks();
+    uint64_t td = rt_ticks(), dec0 = g_decode_all;  /* a full helper queue syncs inside: counted once below */
     /* 2D in a wide mode: decoded here, the anchor needs the positions (wide_anchor) */
     int anchor = g_gx.xf_reg[0x26] != 0 && (g_gx.xf_reg[GX_XR_WIDE_FLAGS] & GX_WIDE_HUD_43) && f->wide_k > 1.0f;
     if (!check) {
@@ -756,7 +769,7 @@ static void draw_impl(int prim, int vat, uint32_t count, const uint8_t* vertices
             rt_log("[decodecheck] %llu vertices compared, %llu mismatches", checked, bad);
     }
     if (anchor) wide_anchor(f, f->nverts, count);
-    g_decode_ticks += rt_ticks() - td;
+    { uint64_t d = rt_ticks() - td; g_decode_ticks += d; g_decode_all = dec0 + d; }
     f->idx = grow(f->idx, &f->cap_idx, f->nidx + out_n, sizeof(uint32_t));
     uint32_t* o = f->idx + f->nidx;
     const uint32_t v0 = f->nverts;
@@ -1451,6 +1464,94 @@ static void ownview_frame(GxFrame* f, int me) {
     free(vp); free(tx); free(bb); free(out);
 }
 
+/* [pace] GP lines: the GP thread's work per presented frame, over each 10 s, and its worst frame with its
+ * parts (frame_pacing.c calls gx_pace_report after its own [pace] line). Measured at each frame's end on
+ * the GP thread from counters kept anyway, plus one kernel call for the thread's CPU time (Switch): a
+ * frame whose work took far longer on the wall clock than on the CPU waited for its core. */
+typedef struct {
+    uint64_t draw, busy, cpu, dec, decwait, state, tex, wait;  /* ticks (40.5 MHz); cpu in ns */
+} GpFrame;
+static struct {
+    unsigned frames, worst_frame;
+    int cpu_unknown;
+    uint64_t draw, busy, cpu, helper;
+    GpFrame worst;
+} g_gps;
+static mtx_t g_gps_lock;
+static once_flag g_gps_once = ONCE_FLAG_INIT;
+static void gps_init(void) { mtx_init(&g_gps_lock, mtx_plain); }
+
+static void gp_frame_stats(void) {
+    static GpFrame prev;
+    static uint64_t helper0;
+    static int have;
+    uint64_t gx_gp_busy_now(void);
+    GpFrame now = {g_draw_total, gx_gp_busy_now(), rt_thread_cpu_ns(), g_decode_all, g_decwait_all, g_state_all,
+                   g_tex_total, g_wait_total};
+    uint64_t helper = atomic_load_explicit(&g_dj_helper_all, memory_order_relaxed);
+    if (!have) {
+        have = 1;
+        prev = now;
+        helper0 = helper;
+        call_once(&g_gps_once, gps_init);
+        return;
+    }
+    GpFrame d = {now.draw - prev.draw, now.busy - prev.busy, now.cpu - prev.cpu, now.dec - prev.dec,
+                 now.decwait - prev.decwait, now.state - prev.state, now.tex - prev.tex, now.wait - prev.wait};
+    int cpu_ok = now.cpu && prev.cpu && now.cpu >= prev.cpu;
+    prev = now;
+    mtx_lock(&g_gps_lock);
+    g_gps.frames++;
+    g_gps.draw += d.draw;
+    g_gps.busy += d.busy;
+    if (cpu_ok) g_gps.cpu += d.cpu;
+    else g_gps.cpu_unknown = 1;
+    g_gps.helper += helper - helper0;
+    if (g_gps.frames == 1 || d.draw > g_gps.worst.draw) {
+        g_gps.worst = d;
+        if (!cpu_ok) g_gps.worst.cpu = 0;
+        g_gps.worst_frame = (unsigned)g_frames;
+    }
+    mtx_unlock(&g_gps_lock);
+    helper0 = helper;
+}
+
+void gx_pace_report(void) {
+    call_once(&g_gps_once, gps_init);
+    mtx_lock(&g_gps_lock);
+    __typeof__(g_gps) s = g_gps;
+    memset(&g_gps, 0, sizeof g_gps);
+    mtx_unlock(&g_gps_lock);
+    const double ms = 1000.0 / 40500000.0;
+    if (s.frames) {
+        double n = s.frames;
+        char cpu[48], wcpu[48];
+        if (s.cpu_unknown) snprintf(cpu, sizeof cpu, "unknown");
+        else snprintf(cpu, sizeof cpu, "%.2f", s.cpu / 1e6 / n);
+        if (s.worst.cpu) snprintf(wcpu, sizeof wcpu, "%.1f", s.worst.cpu / 1e6);
+        else snprintf(wcpu, sizeof wcpu, "unknown");
+        rt_log("[pace] %s: %u frames; per frame busy %.2f ms (on the CPU %s), draw processing %.2f; decode helper %.2f",
+               gx_async() ? "GP thread" : "GX work (game thread)", s.frames, s.busy * ms / n, cpu, s.draw * ms / n, s.helper * ms / n);
+        /* the parts: decode on this thread (the frame end's sync included) and of it the wait for the helper's
+         * job in progress, state snapshots, texture lookups, waits for the render thread (a free frame, the
+         * submission): what a frame's busy time is made of, apart from parsing the FIFO */
+        rt_log("[pace]   worst frame %u: draw processing %.1f ms (GP busy %.1f, on the CPU %s); vertex decode %.1f (of it "
+               "waiting for the helper %.1f), state snapshots %.1f, texture lookups %.1f, waiting for the render thread %.1f",
+               s.worst_frame, s.worst.draw * ms, s.worst.busy * ms, wcpu, s.worst.dec * ms, s.worst.decwait * ms,
+               s.worst.state * ms, s.worst.tex * ms, s.worst.wait * ms);
+    }
+    OverlayStats o;
+    overlay_take_stats(&o);
+    if (o.pictures || o.open) {
+        char mcpu[48];
+        if (o.cpu_known && o.pictures) snprintf(mcpu, sizeof mcpu, "%.1f ms", o.draw_cpu_ms);
+        else snprintf(mcpu, sizeof mcpu, "unknown");
+        rt_log("[pace]   menu %s now: %u pictures drawn (helper thread %.1f ms in all, longest %.1f, on the CPU %s), "
+               "%u ImGui frames on the render thread (%.1f ms in all, longest %.2f)", o.open ? "open" : "closed", o.pictures,
+               o.draw_ms, o.draw_max_ms, mcpu, o.ui_frames, o.ui_ms, o.ui_max_ms);
+    }
+}
+
 static void efb_copy(uint32_t v) {
     uint32_t tl = g_gx.bp[0x49], wh = g_gx.bp[0x4A];
     uint32_t x = tl & 0x3FF, y = (tl >> 10) & 0x3FF, w = (wh & 0x3FF) + 1, h = ((wh >> 10) & 0x3FF) + 1;
@@ -1511,6 +1612,7 @@ static void efb_copy(uint32_t v) {
         { uint64_t d = rt_ticks() - ts; g_wait_ticks += d; g_wait_total += d; }
         g_frame = NULL;
         g_frames++;
+        gp_frame_stats();
         { void gx_dff_frame_end(unsigned frames); gx_dff_frame_end((unsigned)g_frames); }
         /* [hitch]: a presented frame that took over 50 ms, and what the game thread spent it on */
         {

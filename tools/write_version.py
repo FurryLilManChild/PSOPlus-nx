@@ -1,4 +1,4 @@
-"""Write the build id the log prints first (const char g_build_version[]).
+"""Write the build id the log prints first (const char g_build_version[]) and the port's version (g_port_version).
 
 configure.py calls this once, and build.ninja runs it before every build so the id follows git without a
 re-configure. The file is rewritten only when the id changes, so an unchanged id rebuilds nothing.
@@ -9,6 +9,10 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# the port's version: the NRO's title info (configure.py, nacptool), the log's first lines and the menu's
+# System page (g_port_version); the build stamp (the commit, below) is shown beside it
+PORT_VERSION = "0.5.0"
 
 
 def build_version():
@@ -30,7 +34,8 @@ def build_version():
 def write(out):
     path = os.path.join(ROOT, out)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    text = 'const char g_build_version[] = "%s";\n' % build_version().replace("\\", "").replace('"', "")
+    text = 'const char g_build_version[] = "%s";\nconst char g_port_version[] = "%s";\n' % (
+        build_version().replace("\\", "").replace('"', ""), PORT_VERSION)
     try:
         with open(path, encoding="utf-8") as f:
             if f.read() == text:

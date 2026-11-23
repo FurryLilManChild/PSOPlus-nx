@@ -116,6 +116,7 @@ void hle_frame_end(Cpu* c) {
         rt_log("[pace] %.1f frames/s (game target 30), game work %.1f ms per frame (idle waits left out), GPU %.1f ms per frame%s, %u s since the first frame",
                g_n_frames / s, g_n_frames ? g_work_ns / 1e6 / g_n_frames : 0.0, platform_gpu_frame_ms(), clk,
                (unsigned)((platform_now_ns() - g_t0_ns) / 1000000000ull));
+        { void gx_pace_report(void); gx_pace_report(); }  /* the GP thread's frames and the menu's cost (gx_render.c) */
         g_stat_field = f; g_n_frames = 0; g_work_ns = 0;
     }
 }

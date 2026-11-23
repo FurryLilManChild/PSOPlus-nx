@@ -1,5 +1,58 @@
 # Progress log (newest first)
 
+## 2026-11-23: Build 0.5.0 (the GP thread's long frames at stock clocks, [pace] GP and menu lines, version 0.5.0)
+
+- Why: tests 12 and 13 at stock CPU 1020 MHz: stretches of 28-29 fps with single 57-70 ms frames whose [hitch]
+  "GX draws" (the GP thread's draw processing) was 20-60 ms, while that work averages about 8 ms a frame.
+- Cause found (code and logs): the GP thread, the vertex decode helper and the menu's picture thread were meant to
+  run one priority step below the other threads on their cores, but they never did on the Switch. libnx starts
+  every thread at priority 0x3B (its pthread_create, read from libnx.a), 0x3B is the lowest this NRO may use, and
+  every rt_thread_lower_priority call failed: both logs have "[switch] svcSetThreadPriority(60) failed (0xE001)"
+  four times (Build D lines 12, 26, 27, 30; Build C 11, 26, 1334, 1335), 0xE001 being the kernel's invalid
+  priority. So the menu's picture thread (pinned to core 2 with the GP thread) had the GP thread's priority, and a
+  ready thread of equal priority does not take a core from a running one. A picture takes 25-38 ms ("[menu]
+  picture drawn in 35.42 / 36.51 / 37.68 ms", Build D lines 61, 62, 136; 25.84-28.26 ms in Build C) and is drawn
+  again whenever the menu's look changes (each button press).
+- Log evidence that it is the menu: Build D's two 10 s windows ending lines 955 and 1088 had 39 and 29 slow
+  frames, 35 and 28 of them with GX draws over 15 ms; the menu was open for most of them (its settings were saved
+  at line 997, when it closed; 2 slow frames came after that). The windows around the button map changes (ending
+  lines 1421-1799) had 3-24 (3-14 over 15 ms). The seven windows after the last menu use (ending lines
+  1901-2548, 70 s, game work 16.2-23.0 ms a frame, the FPS counter on) had none. Not explained by this: Build D
+  frames 4081-4316 (after the last logged settings change; the menu may have been open without a change, which
+  logs nothing) and 6631-6661 (after the last [pace] line, just before the log ends); Build C's 2-12 slow frames
+  with GX draws over 15 ms per 10 s (windows ending lines 2476-3408) with its bigger performance readout on
+  (redrawn about once a second: the same mechanism is possible but not shown). Build C's minutes before the menu
+  was first opened were at 1428 MHz, so they do not separate menu and no menu.
+- Change 1 (menu.cpp, menu_raster.cpp): the picture thread gives way. Every 16 shapes and every 32 rows of a big
+  one it checks the clock; after 0.25 ms of work it yields (svcSleepThread(0): any ready thread of its priority on
+  core 2 runs first, the GP thread included; none ready: it goes on at once). The GP thread should then wait at
+  most about 0.25 ms for it; a picture takes longer when core 2 is busy. Pixels drawn: unchanged (the yield
+  touches nothing). The device threads on core 2 (retrace, disc and audio timers) gain the same.
+- Change 2 (platform_switch.c): rt_thread_lower_priority no longer asks the kernel for 0x3C; one log line says
+  the thread stays at 0x3B. Behaviour unchanged (the call failed before). The decode helper still shares core 1
+  with the render thread at equal priority, as in tests 10-13.
+- Not changed: vertex decode. A version with a template vertex and inline readers instead of function pointers
+  was written and gave the same output bit for bit (a host differential test: 10.6 million vertices, random
+  registers and 16 common GX layouts, 0 mismatches), but host timing was mixed (-30% to +20% per layout), so it is
+  not in this build: no shown gain for a change in the hottest path before a release.
+- Logging ([pace], every 10 s, from counters kept anyway plus one kernel call per frame): "[pace] GP thread: N
+  frames; per frame busy X ms (on the CPU Y), draw processing Z; decode helper W" and "[pace]   worst frame F:
+  draw processing, busy, on the CPU, vertex decode (of it waiting for the helper's job in progress), state
+  snapshots, texture lookups, waiting for the render thread". CPU time is the GP thread's own (svcGetInfo thread
+  tick count): a worst frame with much more busy time than CPU time waited for its core. "[pace]   menu open /
+  closed now: pictures drawn, helper thread ms in all, longest, on the CPU; ImGui frames on the render thread"
+  (only while the menu is open or pictures were drawn, e.g. the FPS counter's about once a second). The
+  "waiting for the helper" part is new: in tests 12 and 13 it was inside "vertex decode".
+- Version 0.5.0: tools/write_version.py PORT_VERSION feeds the NRO's NACP version (nacptool), the first log line
+  ("[switch] PSO Episode I and II Plus native port 0.5.0 (build <stamp>); log started"), the [build] line
+  ("[build] <stamp> (version 0.5.0)"; tools/read_log.py still finds the commit) and the menu's System page
+  ("Version 0.5.0 (build <stamp>)"); the PC bug report header too. The NACP holds the version alone (16 bytes,
+  made when configure.py runs).
+- Evidence (cloud): the changed files compile for the Switch with -Wall, no warnings; gx_render.c, frame_pacing.c,
+  main.c, platform_host.c, menu.cpp and menu_raster.cpp pass a PC (llvm-mingw) syntax check (menu.cpp's older
+  unused-function warning for warn() on PC stays). Not verifiable in the cloud: everything on the console (whether
+  the slow frames with the menu open are gone, the yield's effect, the thread tick count call's result).
+
 ## 2026-11-23: Switch tests 12 and 13 (Build C a90788b, Build D 989bc96) results
 
 - the owner: FPS counter fine; button map, Reset and saving all work; the CPU menu setting works (his test; the

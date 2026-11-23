@@ -36,7 +36,7 @@
 #endif
 
 extern "C" {
-extern const char g_build_version[];
+extern const char g_build_version[], g_port_version[];
 /* picture options (Display page): each one shows only where the renderer does it */
 #if !defined(__SWITCH__)
 #define PIC_SCALE_SLIDER 1  /* render_gl.c: 1x-4x */
@@ -95,7 +95,8 @@ struct Job {
     ImDrawData dd;
     int buf;
     int box[4];
-    double ms;
+    double ms;      /* wall time on the helper thread */
+    double cpu_ms;  /* of it running on the CPU (< 0: unknown) */
     bool open;  /* the picture shows the menu */
 };
 bool g_front_open;  /* g_front's picture shows the menu */
@@ -140,15 +141,43 @@ void content_box(const ImDrawData* dd, int box[4]) {
     if (box[0] >= box[2] || box[1] >= box[3]) box[0] = box[1] = box[2] = box[3] = 0;
 }
 
-void clear_box(uint8_t* img, const int b[4]) {
-    for (int y = b[1]; y < b[3]; y++) memset(img + ((size_t)y * OVERLAY_W + b[0]) * 4, 0, (size_t)(b[2] - b[0]) * 4);
+/* The helper thread gives way. It shares core 2 with the GP thread (gx_fifo.c) and the device timers, and
+ * was meant to run below them, but on the Switch every thread here has the same priority (0x3B, the lowest
+ * this program may use: platform_switch.c rt_thread_lower_priority), and a thread of equal priority that
+ * wakes does not take the core from a running one. Tests 12 and 13: a menu picture took 25-38 ms, and with
+ * the menu open the GP thread's frame often took 30-60 ms instead of about 11 (the [hitch] lines' "GX
+ * draws"). So the drawing stops every 0.25 ms to let any thread of its priority that is ready on its core
+ * run first (rt_thread_yield; none ready: it goes on at once). The GP thread then waits at most about
+ * 0.25 ms for it, and the picture takes longer when the core is busy. */
+uint64_t g_pace_ns;  /* the helper thread's last yield */
+void raster_pace() {
+    uint64_t t = platform_now_ns();
+    if (t - g_pace_ns < 250000) return;
+    rt_thread_yield();
+    g_pace_ns = platform_now_ns();
 }
 
-/* off the game's core and below the GP thread there (gx_fifo.c): it only uses spare time */
+void clear_box(uint8_t* img, const int b[4]) {
+    for (int y = b[1]; y < b[3]; y++) {
+        if (((y - b[1]) & 31) == 31) raster_pace();
+        memset(img + ((size_t)y * OVERLAY_W + b[0]) * 4, 0, (size_t)(b[2] - b[0]) * 4);
+    }
+}
+
+/* [pace] menu figures (overlay_take_stats): pictures drawn and their cost, ImGui's frames on the render
+ * thread. Written by the render thread (collect, overlay_image), read and reset by the game thread. */
+std::atomic<unsigned> g_st_pics{0}, g_st_ui_frames{0};
+std::atomic<uint64_t> g_st_draw_us{0}, g_st_draw_max_us{0}, g_st_cpu_us{0}, g_st_ui_us{0}, g_st_ui_max_us{0};
+std::atomic<int> g_st_cpu_unknown{0};
+void st_max(std::atomic<uint64_t>& m, uint64_t v) {
+    uint64_t cur = m.load(std::memory_order_relaxed);
+    while (v > cur && !m.compare_exchange_weak(cur, v, std::memory_order_relaxed)) {}
+}
+
+/* off the game's core; gives way to the GP thread there (raster_pace) */
 int raster_thread(void*) {
     rt_thread_pin(2);
-    rt_thread_lower_priority();
-    rt_thread_lower_priority();
+    rt_thread_lower_priority();  /* nothing on the Switch (see raster_pace); lower elsewhere */
     for (;;) {
         Job* j;
         {
@@ -158,11 +187,14 @@ int raster_thread(void*) {
             j = g_job;
             g_job = nullptr;
         }
-        uint64_t t0 = platform_now_ns();
+        uint64_t t0 = platform_now_ns(), c0 = rt_thread_cpu_ns();
+        g_pace_ns = t0;
         uint8_t* img = g_img[j->buf];
         clear_box(img, g_box[j->buf]);
-        menu_raster(&j->dd, img, OVERLAY_W, OVERLAY_H);
+        menu_raster(&j->dd, img, OVERLAY_W, OVERLAY_H, raster_pace);
+        uint64_t c1 = rt_thread_cpu_ns();
         j->ms = (platform_now_ns() - t0) / 1e6;
+        j->cpu_ms = c0 && c1 >= c0 ? (c1 - c0) / 1e6 : -1.0;
         std::lock_guard<std::mutex> lk(g_mx);
         g_done = j;
     }
@@ -620,7 +652,7 @@ void tab_controls() {
 
 void tab_system() {
     heading("PSO Episode I and II Plus native port");
-    ImGui::Text("Build: %s", g_build_version);
+    ImGui::Text("Version %s (build %s)", g_port_version, g_build_version);
     note("A fan-made native port built from your own disc. Not affiliated with SEGA or Nintendo.");
 #ifdef __SWITCH__
     heading("Clocks now");
@@ -804,8 +836,15 @@ void collect() {
     static int logged;
     if (logged < 3 && g_open) {
         logged++;
-        rt_log("[menu] picture drawn in %.2f ms (helper thread)", j->ms);
+        if (j->cpu_ms >= 0.0) rt_log("[menu] picture drawn in %.2f ms (helper thread; %.2f ms of it on the CPU)", j->ms, j->cpu_ms);
+        else rt_log("[menu] picture drawn in %.2f ms (helper thread)", j->ms);
     }
+    g_st_pics.fetch_add(1, std::memory_order_relaxed);
+    uint64_t us = (uint64_t)(j->ms * 1000.0);
+    g_st_draw_us.fetch_add(us, std::memory_order_relaxed);
+    st_max(g_st_draw_max_us, us);
+    if (j->cpu_ms >= 0.0) g_st_cpu_us.fetch_add((uint64_t)(j->cpu_ms * 1000.0), std::memory_order_relaxed);
+    else g_st_cpu_unknown.store(1, std::memory_order_relaxed);
     job_free(j);
 }
 
@@ -870,6 +909,18 @@ void feed(ImGuiKey k, unsigned held, unsigned changed, unsigned bit) {
 extern "C" {
 
 void overlay_set_fps(float fps) { g_fps10.store((int)(fps * 10.0f + 0.5f)); }
+
+void overlay_take_stats(OverlayStats* s) {
+    s->pictures = g_st_pics.exchange(0, std::memory_order_relaxed);
+    s->draw_ms = g_st_draw_us.exchange(0, std::memory_order_relaxed) / 1000.0;
+    s->draw_max_ms = g_st_draw_max_us.exchange(0, std::memory_order_relaxed) / 1000.0;
+    s->draw_cpu_ms = g_st_cpu_us.exchange(0, std::memory_order_relaxed) / 1000.0;
+    s->cpu_known = !g_st_cpu_unknown.exchange(0, std::memory_order_relaxed);
+    s->ui_frames = g_st_ui_frames.exchange(0, std::memory_order_relaxed);
+    s->ui_ms = g_st_ui_us.exchange(0, std::memory_order_relaxed) / 1000.0;
+    s->ui_max_ms = g_st_ui_max_us.exchange(0, std::memory_order_relaxed) / 1000.0;
+    s->open = g_open;
+}
 
 void overlay_set_banner(const char* text) {
     std::lock_guard<std::mutex> l(g_banner_lock);
@@ -1062,7 +1113,14 @@ const uint8_t* overlay_image(unsigned* version, int box[4]) {
     if (g_busy) collect();  /* nothing can be waiting unless a job is out */
     /* a picture left waiting because the helper was busy is made again too */
     bool open_before = g_open;
-    if (g_open || ro_changed || banner_changed || was_open != g_open || g_retry) frame();
+    if (g_open || ro_changed || banner_changed || was_open != g_open || g_retry) {
+        uint64_t t0 = platform_now_ns();
+        frame();
+        uint64_t us = (platform_now_ns() - t0) / 1000;
+        g_st_ui_frames.fetch_add(1, std::memory_order_relaxed);
+        g_st_ui_us.fetch_add(us, std::memory_order_relaxed);
+        st_max(g_st_ui_max_us, us);
+    }
     /* Close (or Quit) closes the menu inside frame(): that picture still shows the menu, so the next call
      * draws again without it */
     was_open = open_before;

@@ -549,6 +549,18 @@ uint64_t gx_gp_busy_ticks(void) { return atomic_exchange(&g_gp_busy, 0); }
 uint64_t gx_gp_wait_ticks(void) { return atomic_exchange(&g_gp_wait, 0); }
 static _Atomic uint64_t g_gp_busy_all;  /* never reset (frame_pacing.c measures it per frame) */
 uint64_t gx_gp_busy_total(void) { return atomic_load_explicit(&g_gp_busy_all, memory_order_relaxed); }
+/* the same up to now, the piece being processed included (GP thread only: gx_render.c's frame end, which
+ * runs inside gp_feed; the [pace] GP lines) */
+static uint64_t g_feed_t0, g_feed_w0;
+static int g_in_feed;
+uint64_t gx_gp_busy_now(void) {
+    uint64_t b = atomic_load_explicit(&g_gp_busy_all, memory_order_relaxed);
+    if (g_in_feed) {
+        uint64_t d = rt_ticks() - g_feed_t0, w = gx_render_wait_total() - g_feed_w0;
+        b += d > w ? d - w : 0;
+    }
+    return b;
+}
 /* FIFO bytes written but not yet processed by the GP thread (0 in synchronous mode) */
 size_t gx_gp_backlog(void) {
     return atomic_load_explicit(&g_ring_head, memory_order_relaxed) - atomic_load_explicit(&g_ring_tail, memory_order_relaxed);
@@ -627,7 +639,9 @@ static int gp_thread(void* arg) {
         if (n > RING_SIZE - off) n = RING_SIZE - off;  /* up to the end of the ring; the rest next time */
         if (n > 65536) n = 65536;
         uint64_t t0 = rt_ticks(), w0 = gx_render_wait_total();
+        g_feed_t0 = t0, g_feed_w0 = w0, g_in_feed = 1;
         gp_feed(g_ring + off, n);
+        g_in_feed = 0;
         if (gp_slow > 1.0) {  /* SR_GPSLOW: emulate a slower CPU (the Switch) on the PC */
             uint64_t until = t0 + (uint64_t)((rt_ticks() - t0) * gp_slow);
             while (rt_ticks() < until) {}

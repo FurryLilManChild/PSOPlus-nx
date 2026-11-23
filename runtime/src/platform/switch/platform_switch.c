@@ -437,7 +437,8 @@ void platform_init(void) {
     if (!freopen(BASE_DIR "/psoplus.log", "w", stderr)) return;
     static char logbuf[64 * 1024];
     setvbuf(stderr, logbuf, _IOFBF, sizeof logbuf);  /* flushed by rt_log at most once a second */
-    rt_log("[switch] PSO Episode I and II Plus native port; log started");
+    extern const char g_build_version[], g_port_version[];  /* build/<target>/gen/version.c (tools/write_version.py) */
+    rt_log("[switch] PSO Episode I and II Plus native port %s (build %s); log started", g_port_version, g_build_version);
     /* debugging switches (SR_WATCHDOG, ...) as KEY=VALUE lines in env.txt, there being no environment */
     FILE* f = fopen(BASE_DIR "/env.txt", "r");
     if (f) {
@@ -515,14 +516,38 @@ void rt_thread_start(int (*fn)(void*), void* arg) {
     pthread_attr_destroy(&a);
 }
 
-/* Horizon runs the highest-priority ready thread of a core and does not time-slice equal ones: a busy
- * thread one step below the others yields to them whenever they wake */
+/* Horizon runs the highest-priority ready thread of a core: a busy thread one step below the others
+ * yields to them whenever they wake. But threads start at 0x3B (libnx's pthread_create), and 0x3B is the
+ * lowest priority this NRO may use: the console logs of tests 12 and 13 show every call failing with
+ * 0xE001 (invalid priority 0x3C), so the "lower" threads (the GP thread, the vertex decode helper, the
+ * menu's picture thread) have always run at 0x3B like the others on their cores. Since 0.5.0 nothing is
+ * asked of the kernel (the result is the same) and one line says so; threads that must give way do it
+ * themselves (menu.cpp's picture thread yields between pieces of work). */
 void rt_thread_lower_priority(void) {
-    s32 prio = 0x2C;
+    s32 prio = 0x3B;
     svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    if (prio >= 0x3B) {
+        static _Atomic int logged;
+        if (!atomic_exchange(&logged, 1))
+            rt_log("[switch] thread priority 0x%X is already the lowest this program may use: threads asked to run "
+                   "lower stay there (equal to the others on their core)", prio);
+        return;
+    }
     Result rc = svcSetThreadPriority(CUR_THREAD_HANDLE, (u32)prio + 1);
     if (R_FAILED(rc)) rt_log("[switch] svcSetThreadPriority(%d) failed (0x%X)", prio + 1, rc);
 }
+
+/* time the calling thread has run on a CPU (all cores), in ns; 0 when the kernel cannot tell. Against the
+ * wall clock it shows how long a thread was ready but not running (another thread had its core). */
+uint64_t rt_thread_cpu_ns(void) {
+    u64 ticks = 0;
+    Result rc = hosversionAtLeast(13, 0, 0) ? svcGetInfo(&ticks, InfoType_ThreadTickCount, CUR_THREAD_HANDLE, TickCountInfo_Total)
+                                            : svcGetInfo(&ticks, InfoType_ThreadTickCountDeprecated, CUR_THREAD_HANDLE, TickCountInfo_Total);
+    return R_SUCCEEDED(rc) ? armTicksToNs(ticks) : 0;
+}
+
+/* let another ready thread of the same priority on this core run (none ready: returns at once) */
+void rt_thread_yield(void) { svcSleepThread(YieldType_WithoutCoreMigration); }
 
 /* one step above: preempts the render thread on its core whenever it wakes (the audio mixer must
  * finish each 5 ms frame in time; the render thread can run for a whole video frame) */

@@ -68,6 +68,7 @@ struct Clip {
 struct Target {
     uint8_t* px;
     int w, h;
+    void (*pace)(void);  /* menu_raster's pace: called every 32 rows of a shape, and between shapes */
 };
 
 /* an axis-aligned rectangle with one colour and a linear texture mapping */
@@ -89,6 +90,7 @@ void fill_rect(const Target& T, const Clip& c, const Tex& tex, const ImDrawVert&
         if (p.a == 0) return;
         const uint32_t word = p.r | p.g << 8 | p.b << 16 | p.a << 24;
         for (int y = iy0; y < iy1; y++) {
+            if (T.pace && ((y - iy0) & 31) == 31) T.pace();
             uint8_t* row = T.px + ((size_t)y * T.w + ix0) * 4;
             if (p.a == 255) {
                 for (int x = ix0; x < ix1; x++, row += 4) memcpy(row, &word, 4);
@@ -100,6 +102,7 @@ void fill_rect(const Target& T, const Clip& c, const Tex& tex, const ImDrawVert&
     }
     const float du = x1 > x0 ? (u1 - u0) / (x1 - x0) : 0.0f, dv = y1 > y0 ? (v1 - v0) / (y1 - y0) : 0.0f;
     for (int y = iy0; y < iy1; y++) {
+        if (T.pace && ((y - iy0) & 31) == 31) T.pace();
         const float v = v0 + dv * (y + 0.5f - y0);
         uint8_t* row = T.px + ((size_t)y * T.w + ix0) * 4;
         float u = u0 + du * (ix0 + 0.5f - x0);
@@ -147,6 +150,7 @@ void fill_tri(const Target& T, const Clip& c, const Tex& tex, const ImDrawVert* 
     if (flat_col && flat_uv) fp = modulate(ca, tex.texel(A->uv.x, A->uv.y), tex.a8);
     const Edge* edges[3] = {&e0, &e1, &e2};
     for (int y = iy0; y < iy1; y++) {
+        if (T.pace && ((y - iy0) & 31) == 31) T.pace();
         const float py = y + 0.5f;
         uint8_t* row = T.px + ((size_t)y * T.w) * 4;
         /* this row's span: each edge function is linear in x (e = k - dy * px), so it bounds px on one
@@ -213,8 +217,9 @@ void menu_raster_textures(ImDrawData* dd) {
     }
 }
 
-void menu_raster(const ImDrawData* dd, uint8_t* px, int w, int h) {
-    Target T{px, w, h};
+void menu_raster(const ImDrawData* dd, uint8_t* px, int w, int h, void (*pace)(void)) {
+    Target T{px, w, h, pace};
+    unsigned shapes = 0;
     const ImVec2 off = dd->DisplayPos;
     for (const ImDrawList* list : dd->CmdLists) {
         const ImDrawVert* vtx = list->VtxBuffer.Data;
@@ -230,6 +235,7 @@ void menu_raster(const ImDrawData* dd, uint8_t* px, int w, int h) {
             const ImDrawIdx* ix = idx + cmd.IdxOffset;
             unsigned n = cmd.ElemCount;
             for (unsigned i = 0; i + 3 <= n;) {
+                if (pace && (++shapes & 15) == 0) pace();
                 if (is_rect(v, ix, n, i)) {
                     fill_rect(T, c, tex, v[ix[i]], v[ix[i + 2]]);
                     i += 6;

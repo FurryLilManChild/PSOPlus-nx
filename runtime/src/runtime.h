@@ -45,6 +45,8 @@ void platform_sample_threads(void);  /* debugging: log where every other host th
 void rt_thread_pin(int core);  /* run the calling thread on CPU core `core` (Switch: 0 guest, 1 render, 2 timers) */
 void rt_thread_lower_priority(void);
 void rt_thread_raise_priority(void);  /* one step above the other threads: short, deadline-bound work (the audio mixer) */
+uint64_t rt_thread_cpu_ns(void);  /* the calling thread's CPU time in ns (Switch); 0 = unknown (elsewhere) */
+void rt_thread_yield(void);       /* Switch: let a ready thread of the same priority on this core run; elsewhere nothing */
 void game_mods_linked(void);  /* game_mods.c: _Main.rel is linked; apply the gameplay options */
 void game_mods_apply(void);   /* after a settings change */
 void game_mods_frame(void);   /* once a presented frame (gx_render.c) */  /* below the device threads sharing its core (Switch); no-op elsewhere */

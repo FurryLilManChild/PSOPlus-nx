@@ -121,7 +121,7 @@ if args.target in ("android", "ios"):
 rt_m = sorted(os.path.relpath(p, ROOT).replace("\\", "/") for p in glob.glob(os.path.join(ROOT, "runtime/src/platform/ios/*.m"))) \
     if args.target == "ios" else []
 
-from write_version import build_version, write as write_version  # noqa: E402
+from write_version import PORT_VERSION, build_version, write as write_version  # noqa: E402
 
 # the build id for the log's first line; build.ninja refreshes it before every build (tools/write_version.py)
 version_c = OUT + "/gen/version.c"
@@ -440,7 +440,9 @@ with open(os.path.join(ROOT, "build.ninja"), "w") as f:
     else:
         n.build(exe, "link", objs, implicit=[android_build.sdl_lib(args.abi)] if args.target == "android" else None)
     if args.target == "switch":
-        n.rule("nacp", "%s --create \"PSO Ep I&II Plus\" \"native port (own disc image required)\" 0.0.1 $out" % dkp_tool("nacptool"),
+        # the version shown in the Homebrew Menu (PORT_VERSION, tools/write_version.py); the commit stamp is in the
+        # log and the menu's System page (the NACP keeps 16 bytes and is made only when configure.py runs)
+        n.rule("nacp", "%s --create \"PSO Ep I&II Plus\" \"native port (own disc image required)\" %s $out" % (dkp_tool("nacptool"), PORT_VERSION),
                description="NACP $out")
         n.build(OUT + "/psoplus.nacp", "nacp")
         # the Homebrew Menu icon: setup/icon_256.jpg (256 x 256 JPEG; our own art, tools/make_app_icon.py)

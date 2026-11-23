@@ -115,7 +115,7 @@ void platform_sample_threads(void) {}
 void cpu_dump_trace(void);
 void mmio_dump(void);
 void sched_dump(void);
-extern const char g_build_version[];
+extern const char g_build_version[], g_port_version[];
 
 /* a native crash (Android, Linux), as the Windows crash_handler: the report goes to crash.txt first
  * (plain write(), works even if the log's stdio lock is held), then to logcat and the log, then the
@@ -558,6 +558,8 @@ void rt_thread_raise_priority(void) {
 #endif
 }
 #endif
+uint64_t rt_thread_cpu_ns(void) { return 0; }  /* not measured on PC / phones ([pace] says "unknown") */
+void rt_thread_yield(void) {}                   /* plenty of cores there; menu.cpp only needs it on the Switch */
 void platform_set_handheld_gpu(int on) { (void)on; }
 void platform_set_cpu_clock(int mhz) { (void)mhz; }  /* PC: the clocks are the OS's */
 void platform_clock_info(PlatformClockInfo* out) { memset(out, 0, sizeof *out); }
@@ -568,7 +570,7 @@ void platform_clock_release_at_exit(void) {}
  * and info.txt (version, system). Stored (uncompressed) zip: no library needed. Not on Android (its own
  * crash reports, CrashReport.java). Returns 0 and the file's name, or -1. */
 #ifndef __ANDROID__
-extern const char g_build_version[];
+extern const char g_build_version[], g_port_version[];
 static uint32_t zip_crc(const uint8_t* p, size_t n) {
     uint32_t c = 0xFFFFFFFFu;
     for (size_t i = 0; i < n; i++) {
@@ -592,7 +594,8 @@ static uint8_t* slurp(const char* path, size_t* n) {
     return b;
 }
 static void system_info(char* out, size_t n) {
-    size_t k = (size_t)snprintf(out, n, "PSO Episode I and II Plus native port bug report\r\nversion: %s\r\n", g_build_version);
+    size_t k = (size_t)snprintf(out, n, "PSO Episode I and II Plus native port bug report\r\nversion: %s (build %s)\r\n",
+                                g_port_version, g_build_version);
     time_t t = time(NULL);
     k += strftime(out + k, n - k, "saved: %Y-%m-%d %H:%M:%S\r\n", localtime(&t));
 #ifdef _WIN32

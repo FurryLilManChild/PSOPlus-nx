@@ -37,6 +37,14 @@ void overlay_request_quit(void);
 /* Render thread only, after its last overlay call: stop the raster helper before ImGui/SDL teardown. */
 void overlay_shutdown(void);
 int overlay_menu_open(void);
+/* the menu's cost since the last call, for the [pace] lines (any thread): pictures drawn by the helper
+ * thread (wall ms in all and the longest; CPU ms when cpu_known), ImGui frames run on the render thread */
+typedef struct OverlayStats {
+    unsigned pictures, ui_frames;
+    double draw_ms, draw_max_ms, draw_cpu_ms, ui_ms, ui_max_ms;
+    int cpu_known, open;
+} OverlayStats;
+void overlay_take_stats(OverlayStats* s);
 void overlay_menu_toggle(void);                    /* touch controls: open/close the menu at once */
 void overlay_pointer(float x, float y, int down);  /* touch on the open menu (overlay pixels) */
 /* PC mouse on the open menu (overlay pixels; button 0 left, 1 right, 2 middle; wheel in lines, + = up) */
