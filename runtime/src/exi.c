@@ -13,6 +13,7 @@
 #include <threads.h>
 #include <time.h>
 
+#include "net_native.h"
 #include "runtime.h"
 
 #define OS_INTERRUPT_EXI_0_EXI 9   /* +3 per channel: EXI, TC, EXT */
@@ -99,6 +100,23 @@ static int card_writer(void* arg) {
 
 static void card_flush_at_exit(void) {
     if (atomic_load(&g_card_a.dirty)) card_write_file(&g_card_a);
+}
+
+/* net_native.c, before the first online connection of a session: the slot A card as it is now (the
+ * in-memory image, which the card file catches up with 0.5 s after the game's last write) into `path`.
+ * Returns 0 written, 1 no card file is in use (a fresh card in memory), -1 a write error. */
+int exi_card_backup(const char* path) {
+    Card* c = &g_card_a;
+    if (!c->mem || c->path[0] == '(') return 1;  /* "(a fresh card in memory)": card_init without a file */
+    static uint8_t snap[CARD_SIZE];
+    mtx_lock(&c->lock);
+    memcpy(snap, c->mem, CARD_SIZE);
+    mtx_unlock(&c->lock);
+    FILE* f = fopen(path, "wb");
+    if (!f) return -1;
+    size_t n = fwrite(snap, 1, CARD_SIZE, f);
+    if (fclose(f) || n != CARD_SIZE) return -1;
+    return 0;
 }
 
 static void card_raise(Card* c) {

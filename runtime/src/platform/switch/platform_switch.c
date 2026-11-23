@@ -20,6 +20,7 @@
 #include <sys/stat.h>
 #include <switch.h>
 
+#include "net_native.h"
 #include "runtime.h"
 
 #define BASE_DIR "sdmc:/switch/psoplus"
@@ -475,6 +476,44 @@ const char* platform_disc_path(void) {
 }
 
 /* SR_CARD=<file> (env.txt): another memory card image (determinism tests run every machine on the same save) */
+/* online play (net_native.c): libnx's BSD sockets (bsd:u) and nifm (nifm:u) for the connection's settings.
+ * Both are services every homebrew NRO may use (no extra permissions); started once, ended at exit. */
+static int g_nifm_ok;
+int platform_net_init(void) {
+    Result r = socketInitializeDefault();
+    Result rn = nifmInitialize(NifmServiceType_User);
+    g_nifm_ok = R_SUCCEEDED(rn);
+    rt_log("[switch] sockets: socketInitializeDefault 0x%X, nifmInitialize 0x%X", r, rn);
+    return R_SUCCEEDED(r) ? 0 : -1;
+}
+void platform_net_exit(void) {
+    if (g_nifm_ok) nifmExit();
+    g_nifm_ok = 0;
+    socketExit();
+}
+int platform_net_ipconfig(NetIpConfig* out) {
+    if (!g_nifm_ok) return 0;
+    u32 ip = 0, mask = 0, gw = 0, d1 = 0, d2 = 0;  /* network byte order, as in_addr.s_addr */
+    Result r = nifmGetCurrentIpConfigInfo(&ip, &mask, &gw, &d1, &d2);
+    if (R_FAILED(r)) {
+        rt_log("[switch] nifmGetCurrentIpConfigInfo 0x%X (no connection?)", r);
+        return 0;
+    }
+    memcpy(out->ip, &ip, 4);
+    memcpy(out->mask, &mask, 4);
+    memcpy(out->gateway, &gw, 4);
+    memcpy(out->dns1, &d1, 4);
+    memcpy(out->dns2, &d2, 4);
+    return 1;
+}
+/* linked = the console has an address. Not nifm's internet status: that also needs Nintendo's connection test
+ * to pass, which a DNS that blocks Nintendo (90DNS and the like) makes fail on a working network */
+int platform_net_link(void) {
+    if (!g_nifm_ok) return -1;
+    u32 ip = 0;
+    return R_SUCCEEDED(nifmGetCurrentIpAddress(&ip)) && ip != 0;
+}
+
 const char* platform_save_path(void) { return getenv("SR_CARD") ? getenv("SR_CARD") : BASE_DIR "/saves/card_a.raw"; }
 const char* platform_settings_path(void) { return BASE_DIR "/settings.ini"; }
 const char* platform_mods_dir(void) { return BASE_DIR "/mods"; }

@@ -2,7 +2,7 @@
  *
  * Opened by holding Minus (Switch; on a single Joy-Con held sideways its + or -) or Back / F1 (PC) for half
  * a second; while it is open the game sees no buttons. Pages: Performance (Switch: the CPU clock, the
- * handheld graphics profile; the FPS counter), Display, Controls, System (build, the clocks now, screenshot).
+ * handheld graphics profile; the FPS counter), Display, Controls, System (build, the clocks now, online status, screenshot).
  * L / R (ZL / ZR) switch pages, the D-pad or left stick moves, A chooses, B or Minus closes. Every item works
  * with a controller alone, handheld or docked. The Switch has no Quit: HOME closes games there.
  *
@@ -28,6 +28,7 @@
 #include "imgui.h"
 #include "imgui_internal.h"  /* NavMoveRequestTryWrapping */
 #include "menu_raster.h"
+#include "net_native.h"
 #include "overlay.h"
 #include "runtime.h"
 #include "settings.h"
@@ -665,6 +666,13 @@ void tab_system() {
     else ImGui::TextUnformatted("CPU setting: stock (the system decides)");
     if (ci.other_tool) warn("Clock is being set by another tool (sys-clk?).");
 #endif
+    heading("Online");
+    NetStatus ns;
+    net_status(&ns);
+    ImGui::Text("Server DNS: %s", ns.dns);
+    ImGui::Text("Connection: %s", ns.state);
+    if (!ns.sockets_ok) warn("Network not available: online play will fail (see the log).");
+    note("Change the DNS server with net_dns= in settings.ini (default 144.217.87.48, Schtserv).");
     heading("Settings");
     ImGui::Text("Saved in %s", platform_settings_path());
     heading("Bug reports");

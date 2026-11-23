@@ -21,6 +21,7 @@
 
 #include "runtime.h"
 #include "game_addrs.h"
+#include "net_native.h"
 #include "settings.h"
 
 void f_803DCF2C_orig(Cpu* c);  /* the game's display flip (generated) */
@@ -93,6 +94,7 @@ void hle_frame_end(Cpu* c) {
     f_803DCF2C_orig(c);  /* the game's own flip: waits for its retraces */
     g_last_return_ns = platform_now_ns();
     idle_at_return = sched_idle_total();
+    net_frame(c);  /* online: sends what is queued, delivers receive callbacks (net_native.c); nothing when offline */
     if (!g_last_flip_ns) g_t0_ns = g_last_return_ns;
     if (!g_last_flip_ns) {  /* first flip: start the stall watch and the function-entry trace it reports */
 #ifdef __SWITCH__

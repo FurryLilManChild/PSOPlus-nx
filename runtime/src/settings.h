@@ -45,6 +45,9 @@ typedef struct Settings {
     int cpu_clock;      /* Switch: CPU clock in MHz while the game has focus, 0 = stock (1020, the system decides);
                            else 1224, 1428 or 1785 (platform_set_cpu_clock) */
     int pad_map[GC_INPUTS];  /* Switch: SW_* for each GC_IN_*; saved as map_<input>=<button> (settings.c) */
+    /* online play (net_native.c): the DNS server asked for the game's server names, "a.b.c.d" or
+     * "a.b.c.d:port" (default Schtserv's, 144.217.87.48); saved as net_dns=... */
+    char net_dns[48];
 } Settings;
 
 enum { FR_60, FR_AUTO, FR_30, FR_MODES };
@@ -78,7 +81,8 @@ const char* settings_screen_name(int mode);
  * for the whole run, the same on every machine (EFB width factor k; 0 = not fixed). Screen settings
  * and window size changes then only change how the picture is shown. */
 void settings_fix_wide_k(float k);
-int settings_cpu_clock_valid(int mhz);  /* 0 (stock), 1224, 1428 or 1785 */
+int settings_cpu_clock_valid(int mhz);
+#define SETTINGS_NET_DNS_DEFAULT "144.217.87.48"  /* Schtserv's DNS server */  /* 0 (stock), 1224, 1428 or 1785 */
 extern const int settings_pad_map_default[GC_INPUTS];  /* the original layout (A = A, Z = R, L / R = ZL / ZR, ...) */
 const char* settings_gc_input_label(int in);   /* "A", "START", "D-pad up" */
 const char* settings_sw_button_label(int sw);  /* "ZR", "+ (Plus)", "None" */

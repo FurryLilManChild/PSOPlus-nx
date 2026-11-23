@@ -1,5 +1,48 @@
 # Progress log (newest first)
 
+## 2026-11-23: Online build 1 (native sockets in place of the game's network library, option A)
+
+- Goal: from the title screen's online option, connect to Schtserv and reach its lobby with libnx BSD sockets.
+  No Broadband Adapter is modelled and the game's AVE-TCP stack, BBA driver and modem driver never run:
+  config/GPOE8P/hle.txt points all 51 library functions the game's code calls (plus the game's own PPPoE
+  connect 0x80146314) at runtime/src/net_native.c. The game's connection manager, socket classes and protocol
+  run as recompiled.
+- Adapter: ntUtl 0x8042EE4C is replaced (type 5, Broadband Adapter, also written to its cache 0x805D7CC8) rather
+  than giving EXI channel 0 device 2 the BBA ID: the function has four callers and no side effects, while an
+  EXI device would also answer the BBA driver's register traffic and the EXI library's attach path, which this
+  build never wants to run. Link status 0x80426BD8 = the console has an address (nifm), asked once a second.
+- IP set-up: the DHCP calls report the Switch's own address, mask, gateway and DNS servers from nifm
+  (nifmGetCurrentIpConfigInfo); with no system address (PC) the address the host routes from, mask
+  255.255.255.0, gateway .1 (only the game's screens show these). A PPPoE setting is connected as DHCP.
+- DNS: the three names of the server table 0x804A6FD8 are asked of settings.ini net_dns (default 144.217.87.48;
+  "a.b.c.d" or "a.b.c.d:port") with our own A query (runtime/src/net_dns.c), 1 s retries, 3.5 s timeout
+  (-0x45 to the game), no such name -0x42. Other names: the system's DNS server (Switch), getaddrinfo (PC).
+- TCP and UDP: non-blocking sockets; receive callbacks from a pump run after each display flip
+  (frame_pacing.c, net_frame) on the game thread, on the caller's registers (saved and put back) in a
+  0x80-byte frame below its stack pointer. One callback per arming, as the library (the game re-arms from
+  0x801DEA7C). Sends that the socket cannot take at once are queued and sent from the pump.
+- Save safety: before the first TCP connect of a session the slot A card (the in-memory image) is written to
+  saves/card_a.before-online.raw (exi_card_backup). Port menu, System page: "Online": server DNS and
+  connection state. Log: [net] lines (first call of each replacement, every lookup and answer, connect
+  attempts and results with IP:port and errno, disconnects, traffic per 10 s).
+- Analysis re-read for this build (new findings, all in the disassembly): ports given to the library are
+  plain numbers that go on the wire as they are (the library's own DNS opens UDP port 0x35 at 0x8040AB88), so
+  the game's peer UDP ports are byte-swapped by 0x801E3EFC (4000 + id becomes 0xA00F for id 0); a second UDP
+  open on the same local port gets -3 (0x804212E4); the game drops the connection when the status call's send
+  space is not larger than the packet (0x800786B0); the game configures one TCP endpoint (0x80146934); the
+  object handler at +0x880 is only ever set to 0 (0x80079020); the library's error names (0x8048D3F8): -1
+  PENDING, -4 INVALIDHANDLE, -6 CONNRESET, -7 UNREACHABLE, -8 RECVFIN, -11 TIMEOUT, -12 NOBUF.
+- Tests: tools/tests/run_net_native_test.sh (host, loopback servers): 70 checks pass (gcc and clang): DNS
+  codec against hand-built packets, lookups (answer, NXDOMAIN, timeout after 4 queries, system resolver),
+  TCP connect, one-shot receive 3000 bytes as 2048 + 952, send, server close as -8, refused connect, UDP open,
+  duplicate port -3, two-phase callback, registers put back after callbacks.
+- Not testable from the cloud: the cloud answers every outgoing UDP port 53 itself (144.217.87.48,
+  3.18.217.27, 3.18.217.28 and 93.184.215.14 all gave the same ordinary answers, NXDOMAIN for
+  game04.st-pso.games.sega.net), and outgoing TCP is refused, so Schtserv's DNS answer and the game server are
+  first seen on the console. A Schtserv admin's forum post gives 3.18.217.27 as the current DNS
+  (schtserv.com/forums viewtopic p=14183); if 144.217.87.48 fails, net_dns=3.18.217.27 is the next try.
+- Not in this build: the software keyboard for chat (next build).
+
 ## 2026-11-23: Switch test 14 (0.5.0 build, ff131ea) results
 
 - Log stamp ff131ea6 (version 0.5.0), about 410 s, mostly stock clocks. The first log line and [build] show

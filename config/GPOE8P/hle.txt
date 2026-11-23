@@ -32,3 +32,66 @@
 
 # --- The game's model routine (runtime/src/cull.c): models wholly outside the view skip their meshes ---
 803DB510 ModelDraw   # 803DC76C matrix load, 803DC600 state, 803DC460 meshes (display lists), 803DC6F4 restore
+
+# --- Online play (runtime/src/net_native.c): native sockets in place of the Network SDK (avetcp.a 1.16.1) ---
+# Every library function the game's code calls (docs/online-research.md, "Findings: network library map").
+# The game's own stack, BBA driver and modem driver never run; no BBA is modelled on EXI.
+# Adapter and link
+8042EE4C net_adapter_type    # ntUtl: type 5 (Broadband Adapter); callers 0x80145ACC 0x80145DCC 0x80146168 0x8014619C
+80426BD8 net_link_status     # BBA driver link status; 0x8014626C (link wait), 0x80146878 (every frame online)
+80426C34 net_media_mode      # 0x80146B94 (mode 4)
+# Stack lifecycle (0x80146908 start, 0x801468A0 stop)
+803F8470 net_stack_memory    # 0x80146964: the game's heap for the stack (pool set-up)
+80421674 net_stack_init      # 0x80146968: avetcp init (banner, module inits, BBA attach)
+80421620 net_stack_term      # 0x801468D0
+804073B8 net_module_init     # 0x80146B3C
+80407358 net_module_term     # 0x80146AE8
+8040876C net_iface_open      # 0x80146B4C: interface id (0x805D2D00)
+8040874C net_iface_close     # 0x80146ACC
+804150EC net_ip_init         # 0x80146B98 (must return 0)
+8041509C net_ip_term         # 0x80146AB0
+# DHCP and interface set-up (BBA path 0x80146B08, DHCP 0x801465C0)
+80424E44 net_dhcp_start      # 0x801465E4
+8042455C net_dhcp_hostname   # 0x8014661C
+80424D58 net_dhcp_request    # 0x80146660: IP to *r7 (0x805D56D8), mask to *r8
+8042489C net_dhcp_gateway    # 0x8014667C: gateway to *r4 (0x805D56E4)
+8042474C net_dhcp_lease      # 0x8014669C
+80424910 net_dhcp_dns        # 0x801466C8: DNS servers to *r5, *r6 (0x805D56DC, 0x805D56E0)
+804245DC net_dhcp_state      # 0x80146760 (read every frame online by 0x80139770; < 0 = lost)
+80424CF4 net_dhcp_release    # 0x80146A1C
+80424CA8 net_dhcp_stop       # 0x80146A2C
+8042315C net_if_addr_set     # 0x80146C38, 0x801477FC
+80423064 net_if_addr_remove  # 0x80146A54, 0x801472A4
+80421A50 net_route_add       # 0x80146300
+804219D0 net_route_delete    # 0x801462B8
+# DNS (game lookup 0x80078D54, resolver set-up 0x801471A0)
+8040A45C net_dns_init        # 0x801471B0
+8040A3C0 net_dns_term        # 0x80147184
+8040AD64 net_dns_clear       # 0x80147180
+8040ADE8 net_dns_add_server  # 0x801471F0, 0x8014721C
+8040A8B0 net_dns_start       # 0x80078DB8
+8040A698 net_dns_poll        # 0x80078E0C (polled every frame, up to 5400 times)
+8040A630 net_dns_free        # 0x80078F30
+# TCP (game class 0x8048D494; connect 0x80078A88, receive 0x80078514, send 0x80078620 / 0x8007877C, close 0x80078A14)
+80422DE4 net_tcp_create      # 0x80078AC0
+8042284C net_tcp_option      # 0x80078B00
+80422CFC net_tcp_bind        # 0x80078B20
+80422B8C net_tcp_connect     # 0x80078B5C
+804228E8 net_tcp_status      # 0x800789F4
+8042213C net_tcp_receive     # 0x80078560 (callback 0x80078578)
+80422448 net_tcp_send        # 0x80078710, 0x80078858
+804229F8 net_tcp_close       # 0x80078A34
+8042298C net_tcp_delete      # 0x80078A3C
+# UDP (game class 0x8048D43C; peer sockets 0x80135208)
+80421DEC net_udp_open        # 0x80078330 (callback 0x80078378)
+80421BAC net_udp_send        # 0x800781A0, 0x8007824C
+80421B3C net_udp_close       # 0x80078284
+# PPP and modem: fail (only the modem and PPPoE paths use them); the game's PPPoE connect runs its DHCP path
+803FB01C net_ppp_init        # 0x80146328, 0x80146998
+803FAFDC net_ppp_term        # 0x80146A8C, 0x801472C8
+803FB280 net_ppp_start       # 0x80146414, 0x801476F8
+803FAEA0 net_ppp_mode        # 0x8014640C
+803FB120 net_ppp_modem       # 0x801475C4
+803FB184 net_ppp_status      # 7 callers (0x80328590 only on the modem path)
+803FB1A4 net_ppp_disconnect  # 5 callers
+80146314 net_pppoe_as_dhcp   # game code: the PPPoE connect (0x80146BEC); calls the game's DHCP path 0x801465C0

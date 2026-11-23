@@ -16,6 +16,7 @@ Settings g_settings = {
     .grade_contrast = 100, .grade_sat = 100, .grade_warm = 0, .char_light = 0, .pc_fps = 0, .pad_background = 1,
     .sharpness = 0, .update_check = 0, .cpu_clock = 0,
     .pad_map = {SW_A, SW_B, SW_X, SW_Y, SW_R, SW_ZL, SW_ZR, SW_PLUS, SW_UP, SW_DOWN, SW_LEFT, SW_RIGHT},
+    .net_dns = SETTINGS_NET_DNS_DEFAULT,
 };
 const int settings_pad_map_default[GC_INPUTS] = {SW_A, SW_B, SW_X, SW_Y, SW_R, SW_ZL, SW_ZR, SW_PLUS,
                                                  SW_UP, SW_DOWN, SW_LEFT, SW_RIGHT};
@@ -172,6 +173,14 @@ void settings_load(void) {
             char* eq = strchr(line, '=');
             if (!eq) continue;
             *eq = 0;
+            if (!strcmp(line, "net_dns")) {  /* checked by net_native.c, which logs and falls back to the default */
+                char* v = eq + 1;
+                v += strspn(v, " \t");
+                v[strcspn(v, "\r\n \t")] = 0;
+                if (*v && strlen(v) < sizeof g_settings.net_dns) snprintf(g_settings.net_dns, sizeof g_settings.net_dns, "%s", v);
+                else rt_log("[settings] net_dns \"%s\" is empty or too long: %s is used", v, g_settings.net_dns);
+                continue;
+            }
             if (!strncmp(line, "map_", 4)) {
                 eq[1 + strcspn(eq + 1, "\r\n \t")] = 0;
                 load_map_entry(line + 4, eq + 1);
@@ -284,6 +293,7 @@ void settings_apply(void) {
         int b = g_settings.pad_map[i];
         fprintf(f, "map_%s=%s\n", k_gc_key[i], b >= 0 && b < SW_BUTTONS ? k_sw_key[b] : k_sw_key[settings_pad_map_default[i]]);
     }
+    fprintf(f, "net_dns=%s\n", g_settings.net_dns);
     int ok = fflush(f) == 0 && !ferror(f);
     if (fclose(f) != 0) ok = 0;
     if (!ok) {

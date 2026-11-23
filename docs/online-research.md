@@ -348,3 +348,27 @@ callbacks), the calling style is simple (game-thread calls, polling, two callbac
 trivial. Open items for the first online build: the exact meaning of TCP option 0x2001, the status call's
 fourth output, the stack's error numbers the game maps (DNS: -0x42, -0x45, -0x47, -1, -2), and confirming the
 callbacks are safe to call from the game thread.
+
+## First online build (2026-11-23)
+
+Option A is built: runtime/src/net_native.c, the net_* lines in config/GPOE8P/hle.txt, and the progress log
+entry "Online build 1". Findings made while building it (read in the disassembly, **proven** unless marked):
+
+- Ports passed to the library are plain numbers that go on the wire unchanged: the library's own resolver
+  opens UDP with remote port 0x35 (53) at 0x8040AB88. The game byte-swaps its peer UDP ports (0x801E3EFC on
+  +0x20 and +0x22 before 0x80421DEC), so peer sockets use the swapped numbers on the wire (4000 + id = 0x0FA0 + id
+  becomes 0xA00F, 0xA10F, ...); TCP ports are not swapped (9103 from the server table goes straight to 0x80422B8C).
+- Addresses: the 4 bytes after the length word are the address in network order. The game's debug line
+  "udp open %d %d.%d.%d.%d" (0x8043EE30) prints +0x1C..+0x1F in that order, and the DNS result is byte-swapped
+  twice on its way to +0x1C (0x801E3F08, then 0x80078D24).
+- TCP status (0x8041E068): state is a halfword, the send space (0x530 - 0x20 of the endpoint) a word; the
+  game closes the connection when that space is not larger than the packet it sends (0x800786B0).
+- TCP receive callbacks are (length or error, handle) (the library's 0x80422368); one per arming; the game
+  re-arms in its update 0x801DEA7C. The object handler at +0x880 is only ever set to 0 (0x80079020).
+- UDP: a second open on a local port already open gets -3 (0x804212E4). The receive callback's info block
+  (0x80421F10): +0 handle, +2 length, +4 buffer (filled by the game's phase 0), +8 source address, +0x1C
+  destination address, +0x30 source port; the library copies min(length, buffer) and calls phase 1.
+- The game configures the stack for one TCP endpoint (0x80146934 stores 1 at the configuration's +6, the
+  count 0x803F861C multiplies by 0x544, the endpoint size) (**inferred** from the layout).
+- DNS poll results (0x80078E6C): -0x45 and the game's own 5400-poll limit give one game code, -2, -0x42,
+  -0x44, -0x46 another, -0x47 a third, anything else a fourth (meanings **inferred**: timeout, no such name).
