@@ -1,5 +1,19 @@
 # Progress log (newest first)
 
+## 2026-11-23: Switch tests 12 and 13 (Build C a90788b, Build D 989bc96) results
+
+- the owner: FPS counter fine; button map, Reset and saving all work; the CPU menu setting works (his test; the
+  session where he set it is not in the two logs he sent); FSR at 50% looked sharper and seemed to hold 30.
+- Build C log (a90788ba): sys-clk held 1428 MHz while the menu said Stock, and the watch logged "another tool
+  sets the clock (sys-clk?)", then "reads 1020 MHz again" when sys-clk was turned off. Detection works.
+- Build D log (989bc966): button map changes logged as expected; FSR 640x480 -> 960x720, measured GPU cost
+  5.3 ms a frame at 50% (EASU 4.0, RCAS 1.3); Forest GPU 12-16 ms a frame with it on.
+- At stock clocks both logs show stretches of 28-29 fps with frequent single 57-70 ms frames while game work
+  averaged only 15-19 ms. In most of those frames "GX draws" (GP thread draw processing) was 20-60 ms, so the
+  GP thread, not game code, missed the frame. The worst run (frames 2220-2349, Build D) was with the port menu
+  open. GP thread average 10.7 ms a frame (vertex decode 4.75 ms plus 3.69 on the helper thread). None of this
+  at 1428 MHz.
+
 ## 2026-11-23: Build D (FPS counter, a button map, the clock set back on a crash)
 
 - Why: the owner's review of Build C: the performance readout was too big and too busy; he asked for the frame rate
