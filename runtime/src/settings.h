@@ -10,9 +10,17 @@ extern "C" {
 /* 2 was "16:9 stretched" (removed 2026-11-06): a saved 2 reads as SCREEN_WIDE */
 enum { SCREEN_4_3, SCREEN_WIDE, SCREEN_REMOVED_2, SCREEN_FIT, SCREEN_MODES };
 
+/* Switch button map (menu > Controls): for each GameCube input, the Switch button that presses it. Used for
+ * the Pro Controller, a Joy-Con pair and handheld mode, all four players; a single Joy-Con held sideways keeps
+ * its fixed layout (input_hid.c). Minus is not offered: holding it always opens the menu. */
+enum { GC_IN_A, GC_IN_B, GC_IN_X, GC_IN_Y, GC_IN_Z, GC_IN_L, GC_IN_R, GC_IN_START, GC_IN_UP, GC_IN_DOWN, GC_IN_LEFT,
+       GC_IN_RIGHT, GC_INPUTS };
+enum { SW_NONE, SW_A, SW_B, SW_X, SW_Y, SW_L, SW_R, SW_ZL, SW_ZR, SW_PLUS, SW_LSTICK, SW_RSTICK, SW_UP, SW_DOWN,
+       SW_LEFT, SW_RIGHT, SW_BUTTONS };
+
 typedef struct Settings {
     int screen;    /* SCREEN_*: 4:3 letterboxed, 16:9 widescreen (patched cameras), 16:9 stretched, fit window */
-    int perf_overlay;  /* the performance readout in the corner (frame rate, game work, GPU, CPU clock); off by default */
+    int perf_overlay;  /* the frame rate counter ("30 FPS") in the top left corner; off by default */
     int resolution;  /* RES_*: internal resolution of the Switch renderer (the PC build keeps 2x) */
     int fullscreen;     /* PC: borderless fullscreen window (F11 / Alt+Enter, or the menu); unused on the Switch */
     int framerate;      /* FR_*: what happens when a frame takes longer than a 60 Hz retrace (frame_pacing.c) */
@@ -36,6 +44,7 @@ typedef struct Settings {
     int update_check;   /* PC: ask GitHub at start-up whether a newer release exists (update_check.c) */
     int cpu_clock;      /* Switch: CPU clock in MHz while the game has focus, 0 = stock (1020, the system decides);
                            else 1224, 1428 or 1785 (platform_set_cpu_clock) */
+    int pad_map[GC_INPUTS];  /* Switch: SW_* for each GC_IN_*; saved as map_<input>=<button> (settings.c) */
 } Settings;
 
 enum { FR_60, FR_AUTO, FR_30, FR_MODES };
@@ -70,6 +79,9 @@ const char* settings_screen_name(int mode);
  * and window size changes then only change how the picture is shown. */
 void settings_fix_wide_k(float k);
 int settings_cpu_clock_valid(int mhz);  /* 0 (stock), 1224, 1428 or 1785 */
+extern const int settings_pad_map_default[GC_INPUTS];  /* the original layout (A = A, Z = R, L / R = ZL / ZR, ...) */
+const char* settings_gc_input_label(int in);   /* "A", "START", "D-pad up" */
+const char* settings_sw_button_label(int sw);  /* "ZR", "+ (Plus)", "None" */
 int settings_wide_k_fixed(void);
 const char* settings_resolution_name(int res);
 const char* settings_framerate_name(int mode);

@@ -592,7 +592,7 @@ static uint8_t* slurp(const char* path, size_t* n) {
     return b;
 }
 static void system_info(char* out, size_t n) {
-    size_t k = (size_t)snprintf(out, n, "Sonic Riders native port bug report\r\nversion: %s\r\n", g_build_version);
+    size_t k = (size_t)snprintf(out, n, "PSO Episode I and II Plus native port bug report\r\nversion: %s\r\n", g_build_version);
     time_t t = time(NULL);
     k += strftime(out + k, n - k, "saved: %Y-%m-%d %H:%M:%S\r\n", localtime(&t));
 #ifdef _WIN32

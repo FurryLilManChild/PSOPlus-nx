@@ -114,7 +114,7 @@ static int g_cpu_mismatch;    /* reads in a row that differ */
 static _Atomic int g_clk_other;  /* another tool sets the CPU clock */
 static _Atomic int g_clk_failed;  /* the last attempt to set the CPU clock was refused */
 static _Atomic u32 g_clk_now[3];  /* last read: CPU, GPU, memory (Hz; 0 unknown) */
-static _Atomic u64 g_clk_asked;  /* tick of the last platform_clock_info call (the menu or readout wants reads) */
+static _Atomic u64 g_clk_asked;  /* tick of the last platform_clock_info call (the menu wants reads) */
 
 static void clk_init_locked(void) {
     if (g_clk_mode >= 0) return;
@@ -221,6 +221,128 @@ void platform_clock_release_at_exit(void) {
     rt_log("[clocks] exit: CPU set back to stock %u MHz: rc 0x%X", CPU_STOCK_HZ / 1000000, rc);
 }
 
+/* ---- a crash (data abort, bad instruction, ...): the CPU clock back to stock first ----
+ * The kernel hands a CPU exception to the program's entry point; nx-hbloader forwards it to the NRO, whose
+ * libnx start code jumps to __libnx_exception_entry. libnx's own version (no __libnx_exception_handler
+ * defined, as in this port until now) passes it straight back with svcReturnFromException(0xF801,
+ * "unhandled"), and the system then handles the crash as usual (Atmosphere: the error screen and the crash
+ * report). The version below does the same, after one thing: if the menu's CPU clock is set, one IPC
+ * message to clkrst (or pcv) sets it back to 1020 MHz.
+ *
+ * Why not libnx's __libnx_exception_handler: libnx runs that after telling the kernel the exception was
+ * handled, on another stack, and then calls svcBreak; the crash would then be reported as a break at that
+ * point, not as the original fault with its registers. Here the fault is still the one reported: the
+ * kernel's saved frame (x0-x8, lr, sp, pc) is never touched, and every other register (x1-x6, x8-x30,
+ * sp, q0-q31, fpcr, fpsr) is saved before the call and put back before svcReturnFromException. Only x0
+ * (the result code, as in libnx) and x7 (nx-hbloader's forwarding already overwrites it) differ, and the
+ * kernel keeps both in the saved frame.
+ *
+ * The call runs on a stack of its own (the crashing thread's stack may be the fault), takes no lock, does
+ * no allocation, file or log output: it reads two variables and sends one message through the crashing
+ * thread's own IPC buffer. The kernel lets one thread at a time handle an exception, so one static stack
+ * and save area are enough. clock_override.txt is left in place (no file access here), so the next start
+ * logs that the last session ended with the override set and sets stock again. If the call itself faulted,
+ * the kernel would treat that second fault as unhandled: still a crash report, of the second fault. */
+void psoplus_exc_release_clock(void) {
+    if (!g_cpu_applied || g_clk_mode <= 0) return;
+    g_cpu_applied = 0;
+    clk_set_cpu_locked(CPU_STOCK_HZ);
+}
+__attribute__((aligned(16))) u8 psoplus_exc_stack[16 * 1024];
+__attribute__((aligned(16))) u64 psoplus_exc_save[96];  /* x1-x6, x8-x30, sp, fpcr, fpsr; q0-q31 from byte 256 */
+__asm__(
+    ".section .text.__libnx_exception_entry, \"ax\", %progbits\n"
+    ".align 2\n"
+    ".global __libnx_exception_entry\n"
+    ".type __libnx_exception_entry, %function\n"
+    "__libnx_exception_entry:\n"
+    "    adrp x7, psoplus_exc_save\n"
+    "    add  x7, x7, #:lo12:psoplus_exc_save\n"
+    "    stp  x1, x2, [x7, #0]\n"
+    "    stp  x3, x4, [x7, #16]\n"
+    "    stp  x5, x6, [x7, #32]\n"
+    "    stp  x8, x9, [x7, #48]\n"
+    "    stp  x10, x11, [x7, #64]\n"
+    "    stp  x12, x13, [x7, #80]\n"
+    "    stp  x14, x15, [x7, #96]\n"
+    "    stp  x16, x17, [x7, #112]\n"
+    "    stp  x18, x19, [x7, #128]\n"
+    "    stp  x20, x21, [x7, #144]\n"
+    "    stp  x22, x23, [x7, #160]\n"
+    "    stp  x24, x25, [x7, #176]\n"
+    "    stp  x26, x27, [x7, #192]\n"
+    "    stp  x28, x29, [x7, #208]\n"
+    "    mov  x8, sp\n"
+    "    stp  x30, x8, [x7, #224]\n"
+    "    mrs  x8, fpcr\n"
+    "    mrs  x9, fpsr\n"
+    "    stp  x8, x9, [x7, #240]\n"
+    "    add  x8, x7, #256\n"
+    "    stp  q0, q1, [x8, #0]\n"
+    "    stp  q2, q3, [x8, #32]\n"
+    "    stp  q4, q5, [x8, #64]\n"
+    "    stp  q6, q7, [x8, #96]\n"
+    "    stp  q8, q9, [x8, #128]\n"
+    "    stp  q10, q11, [x8, #160]\n"
+    "    stp  q12, q13, [x8, #192]\n"
+    "    stp  q14, q15, [x8, #224]\n"
+    "    stp  q16, q17, [x8, #256]\n"
+    "    stp  q18, q19, [x8, #288]\n"
+    "    stp  q20, q21, [x8, #320]\n"
+    "    stp  q22, q23, [x8, #352]\n"
+    "    stp  q24, q25, [x8, #384]\n"
+    "    stp  q26, q27, [x8, #416]\n"
+    "    stp  q28, q29, [x8, #448]\n"
+    "    stp  q30, q31, [x8, #480]\n"
+    "    adrp x8, psoplus_exc_stack\n"
+    "    add  x8, x8, #:lo12:psoplus_exc_stack\n"
+    "    add  x8, x8, #0x4000\n"  /* the top of psoplus_exc_stack (16 KB) */
+    "    mov  sp, x8\n"
+    "    bl   psoplus_exc_release_clock\n"
+    "    adrp x7, psoplus_exc_save\n"
+    "    add  x7, x7, #:lo12:psoplus_exc_save\n"
+    "    add  x8, x7, #256\n"
+    "    ldp  q0, q1, [x8, #0]\n"
+    "    ldp  q2, q3, [x8, #32]\n"
+    "    ldp  q4, q5, [x8, #64]\n"
+    "    ldp  q6, q7, [x8, #96]\n"
+    "    ldp  q8, q9, [x8, #128]\n"
+    "    ldp  q10, q11, [x8, #160]\n"
+    "    ldp  q12, q13, [x8, #192]\n"
+    "    ldp  q14, q15, [x8, #224]\n"
+    "    ldp  q16, q17, [x8, #256]\n"
+    "    ldp  q18, q19, [x8, #288]\n"
+    "    ldp  q20, q21, [x8, #320]\n"
+    "    ldp  q22, q23, [x8, #352]\n"
+    "    ldp  q24, q25, [x8, #384]\n"
+    "    ldp  q26, q27, [x8, #416]\n"
+    "    ldp  q28, q29, [x8, #448]\n"
+    "    ldp  q30, q31, [x8, #480]\n"
+    "    ldp  x8, x9, [x7, #240]\n"
+    "    msr  fpcr, x8\n"
+    "    msr  fpsr, x9\n"
+    "    ldp  x30, x8, [x7, #224]\n"
+    "    mov  sp, x8\n"
+    "    ldp  x28, x29, [x7, #208]\n"
+    "    ldp  x26, x27, [x7, #192]\n"
+    "    ldp  x24, x25, [x7, #176]\n"
+    "    ldp  x22, x23, [x7, #160]\n"
+    "    ldp  x20, x21, [x7, #144]\n"
+    "    ldp  x18, x19, [x7, #128]\n"
+    "    ldp  x16, x17, [x7, #112]\n"
+    "    ldp  x14, x15, [x7, #96]\n"
+    "    ldp  x12, x13, [x7, #80]\n"
+    "    ldp  x10, x11, [x7, #64]\n"
+    "    ldp  x8, x9, [x7, #48]\n"
+    "    ldp  x5, x6, [x7, #32]\n"
+    "    ldp  x3, x4, [x7, #16]\n"
+    "    ldp  x1, x2, [x7, #0]\n"
+    "    mov  w0, #0xf801\n"  /* KERNELRESULT(UnhandledUserInterrupt), as libnx and nx-hbloader */
+    "    svc  0x28\n"          /* svcReturnFromException: does not come back */
+    "    b    .\n"
+    ".size __libnx_exception_entry, . - __libnx_exception_entry\n"
+    ".previous\n");
+
 /* start-up: an override left by a session that did not end normally */
 static void clk_startup_check(void) {
     FILE* m = fopen(CLOCK_MARKER, "r");
@@ -240,7 +362,7 @@ static void clk_startup_check(void) {
            line, CPU_STOCK_HZ / 1000000, rc, hz[0] / 1000000);
 }
 
-/* once a second (stall thread): reads the clocks while the menu or the readout shows them or an override
+/* once a second (stall thread): reads the clocks while the menu shows them or an override
  * is set; checks the override held */
 static void clock_watch(void) {
     int asked = armTicksToNs(armGetSystemTick() - g_clk_asked) < 3000000000ull;

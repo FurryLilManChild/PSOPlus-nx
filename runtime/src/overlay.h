@@ -1,9 +1,9 @@
-/* The port's menu and performance readout drawn over the game's picture (runtime/src/menu.cpp: Dear
+/* The port's menu and frame rate counter drawn over the game's picture (runtime/src/menu.cpp: Dear
  * ImGui). Hold Minus (Switch) / Back or F1 (desktop) for half a second to open it; while it is open the
  * game sees no buttons. L / R switch pages, the D-pad moves, A chooses, B closes.
  * The image is drawn in software (menu_raster.cpp) and composited by the backend over the presented
  * picture, scaled to the whole screen. Everything here runs on the render thread (which also pumps
- * input), except overlay_set_fps and overlay_set_work_ms. On the Switch the menu has no Quit Game (HOME closes games). */
+ * input), except overlay_set_fps and overlay_set_banner. On the Switch the menu has no Quit Game (HOME closes games). */
 #pragma once
 #include <stdint.h>
 
@@ -22,9 +22,7 @@ int overlay_input(unsigned held);
  * show; *version changes whenever the pixels do. box (may be NULL) gets the rectangle x0, y0, x1, y1
  * outside which the image is transparent (all 0: nothing to draw) */
 const uint8_t* overlay_image(unsigned* version, int box[4]);
-void overlay_set_fps(float fps);  /* any thread */
-/* the game thread's work per frame for the performance readout (frame_pacing.c, only while it is on) */
-void overlay_set_work_ms(float ms);
+void overlay_set_fps(float fps);  /* any thread: the frame rate counter's figure (gx_render.c, every 30 frames) */
 /* a message across the top of the screen until replaced; NULL or "" removes it (any thread) */
 void overlay_set_banner(const char* text);
 /* the menu's "Save screenshot": 1 once after it was chosen (the backend saves the next picture) */

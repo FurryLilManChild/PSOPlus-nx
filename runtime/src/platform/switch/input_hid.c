@@ -4,11 +4,16 @@
  * slots 2-4. Port 1 always reports a controller; ports 2-4 report one only while that player's
  * controller is connected (the game's PAD library sees it plugged in or out).
  *
- * Pro Controller / Joy-Con pair / handheld: A B X Y = A B X Y, + = START, ZL / ZR = L / R (full
- * press), R = Z, D-pad = D-pad, left stick = main stick, right stick = C stick.
+ * Pro Controller / Joy-Con pair / handheld: the button map from the menu (settings.h pad_map; by default
+ * A B X Y = A B X Y, + = START, ZL / ZR = L / R, R = Z, D-pad = D-pad), left stick = main stick, right
+ * stick = C stick. The Switch has no analog triggers: a button that presses GameCube L or R presses it
+ * fully (0xFF), as before. The map is one table lookup per GameCube input per poll, read on this (the
+ * render) thread, where the menu also changes it. Menu buttons (Minus held, A / B, D-pad, L / R / ZL / ZR)
+ * are read from the buttons themselves, not through the map, so a map can never lock the menu out.
  * Single Joy-Con held sideways: the four face buttons by position (right = A, bottom = B, left = Y,
  * top = X), + or - = START, SL / SR = L / R, stick click = Z; the stick is rotated to match. The
- * system does not rotate a sideways Joy-Con itself (same mapping as RetroArch's Switch driver).
+ * system does not rotate a sideways Joy-Con itself (same mapping as RetroArch's Switch driver). This
+ * layout is fixed: the menu's button map does not apply to it (the menu says so).
  *
  * Minus held on player 1's controller (on a single Joy-Con: its + or -, which is also START) opens
  * the settings menu; its "Controllers" item shows the system's controller screen (pair / split Joy-Cons,
@@ -19,6 +24,7 @@
 
 #include "overlay.h"
 #include "runtime.h"
+#include "settings.h"
 
 enum { B_LEFT = 0x1, B_RIGHT = 0x2, B_DOWN = 0x4, B_UP = 0x8, B_Z = 0x10, B_R = 0x20, B_L = 0x40,
        B_A = 0x100, B_B = 0x200, B_X = 0x400, B_Y = 0x800, B_START = 0x1000 };
@@ -42,6 +48,13 @@ static uint64_t pack(const GcPad* p) {
 }
 
 static const GcPad k_neutral = {0, 0x80, 0x80, 0x80, 0x80, 0, 0};
+
+/* the button map: SW_* -> the Switch button, GC_IN_* -> the GameCube button bit (settings.h) */
+static const u64 k_sw_hid[SW_BUTTONS] = {
+    0, HidNpadButton_A, HidNpadButton_B, HidNpadButton_X, HidNpadButton_Y, HidNpadButton_L, HidNpadButton_R,
+    HidNpadButton_ZL, HidNpadButton_ZR, HidNpadButton_Plus, HidNpadButton_StickL, HidNpadButton_StickR,
+    HidNpadButton_Up, HidNpadButton_Down, HidNpadButton_Left, HidNpadButton_Right};
+static const uint16_t k_gc_bit[GC_INPUTS] = {B_A, B_B, B_X, B_Y, B_Z, B_L, B_R, B_START, B_UP, B_DOWN, B_LEFT, B_RIGHT};
 
 void input_init(void) {
     padConfigureInput(PLAYERS, HidNpadStyleSet_NpadStandard);
@@ -136,18 +149,12 @@ static GcPad read_player(int i, unsigned* ov) {
     } else {
         HidAnalogStickState l = padGetStickPos(pad, 0), r = padGetStickPos(pad, 1);
         p.stick_x = axis8(l.x); p.stick_y = axis8(l.y); p.c_x = axis8(r.x); p.c_y = axis8(r.y);
-        if (b & HidNpadButton_A) p.buttons |= B_A;
-        if (b & HidNpadButton_B) p.buttons |= B_B;
-        if (b & HidNpadButton_X) p.buttons |= B_X;
-        if (b & HidNpadButton_Y) p.buttons |= B_Y;
-        if (b & HidNpadButton_Plus) p.buttons |= B_START;
-        if (b & HidNpadButton_R) p.buttons |= B_Z;
-        if (b & HidNpadButton_ZL) { p.buttons |= B_L; p.trig_l = 0xFF; }
-        if (b & HidNpadButton_ZR) { p.buttons |= B_R; p.trig_r = 0xFF; }
-        if (b & HidNpadButton_Up) p.buttons |= B_UP;
-        if (b & HidNpadButton_Down) p.buttons |= B_DOWN;
-        if (b & HidNpadButton_Left) p.buttons |= B_LEFT;
-        if (b & HidNpadButton_Right) p.buttons |= B_RIGHT;
+        for (int k = 0; k < GC_INPUTS; k++) {  /* the button map (one Switch button may press several inputs) */
+            unsigned sw = (unsigned)g_settings.pad_map[k];
+            if (sw < SW_BUTTONS && (b & k_sw_hid[sw])) p.buttons |= k_gc_bit[k];
+        }
+        if (p.buttons & B_L) p.trig_l = 0xFF;  /* digital buttons: a full press, as the old fixed ZL / ZR */
+        if (p.buttons & B_R) p.trig_r = 0xFF;
         if (b & HidNpadButton_Minus) o |= OV_MENU;
         if (b & HidNpadButton_Up) o |= OV_UP;
         if (b & HidNpadButton_Down) o |= OV_DOWN;

@@ -9,13 +9,45 @@
 #include "runtime.h"
 #include "settings.h"
 
-/* defaults: stock CPU clock (the project's goal is full speed at stock clocks), no readout */
+/* defaults: stock CPU clock (the project's goal is full speed at stock clocks), no FPS counter */
 Settings g_settings = {
     .screen = SCREEN_4_3, .perf_overlay = 0, .resolution = RES_1X, .fullscreen = 0, .framerate = FR_AUTO,
     .handheld_gpu = 1, .hud_stretch = 0, .fov = 100, .pc_scale = 2, .msaa = 1, .bloom = 0, .grade_bright = 0,
     .grade_contrast = 100, .grade_sat = 100, .grade_warm = 0, .char_light = 0, .pc_fps = 0, .pad_background = 1,
     .sharpness = 0, .update_check = 0, .cpu_clock = 0,
+    .pad_map = {SW_A, SW_B, SW_X, SW_Y, SW_R, SW_ZL, SW_ZR, SW_PLUS, SW_UP, SW_DOWN, SW_LEFT, SW_RIGHT},
 };
+const int settings_pad_map_default[GC_INPUTS] = {SW_A, SW_B, SW_X, SW_Y, SW_R, SW_ZL, SW_ZR, SW_PLUS,
+                                                 SW_UP, SW_DOWN, SW_LEFT, SW_RIGHT};
+/* the button map in settings.ini: map_<input>=<button>, both by these names (lower case) */
+static const char* const k_gc_key[GC_INPUTS] = {"a", "b", "x", "y", "z", "l", "r", "start", "up", "down", "left", "right"};
+static const char* const k_sw_key[SW_BUTTONS] = {"none", "a", "b", "x", "y", "l", "r", "zl", "zr", "plus", "lstick",
+                                                 "rstick", "up", "down", "left", "right"};
+const char* settings_gc_input_label(int in) {
+    static const char* const names[GC_INPUTS] = {"A", "B", "X", "Y", "Z", "L", "R", "START", "D-pad up",
+                                                 "D-pad down", "D-pad left", "D-pad right"};
+    return in >= 0 && in < GC_INPUTS ? names[in] : "?";
+}
+const char* settings_sw_button_label(int sw) {
+    static const char* const names[SW_BUTTONS] = {"None", "A", "B", "X", "Y", "L", "R", "ZL", "ZR", "+ (Plus)",
+                                                  "Left stick click", "Right stick click", "D-pad up", "D-pad down",
+                                                  "D-pad left", "D-pad right"};
+    return sw >= 0 && sw < SW_BUTTONS ? names[sw] : "?";
+}
+/* one map_ line (key without "map_", value without the line end): unknown inputs or buttons are ignored */
+static void load_map_entry(const char* key, const char* value) {
+    for (int i = 0; i < GC_INPUTS; i++) {
+        if (strcmp(key, k_gc_key[i])) continue;
+        for (int b = 0; b < SW_BUTTONS; b++)
+            if (!strcmp(value, k_sw_key[b])) {
+                g_settings.pad_map[i] = b;
+                return;
+            }
+        rt_log("[settings] map_%s: unknown button \"%s\", ignored", key, value);
+        return;
+    }
+    rt_log("[settings] map_%s: unknown GameCube input, ignored", key);
+}
 volatile double g_aspect_scale = 1.0;
 volatile double g_fov_scale = 1.0;
 static volatile float g_window_aspect = 16.0f / 9.0f;
@@ -81,11 +113,22 @@ static void settings_log(const char* when) {
     char cpu[32];
     if (g_settings.cpu_clock) snprintf(cpu, sizeof cpu, "%d MHz", g_settings.cpu_clock);
     else snprintf(cpu, sizeof cpu, "stock");
-    rt_log("[settings] %sCPU clock %s, handheld graphics %s, performance readout %s, resolution %s, field of view %d%%, "
+    rt_log("[settings] %sCPU clock %s, handheld graphics %s, FPS counter %s, resolution %s, field of view %d%%, "
            "sharpness %d%%, colour %+d/%d/%d/%+d, screen %s",
            when, cpu, g_settings.handheld_gpu ? "384 MHz" : "system default", g_settings.perf_overlay ? "on" : "off",
            settings_resolution_name(g_settings.resolution), g_settings.fov, g_settings.sharpness, g_settings.grade_bright,
            g_settings.grade_contrast, g_settings.grade_sat, g_settings.grade_warm, settings_screen_name(g_settings.screen));
+#ifdef __SWITCH__
+    char map[256];
+    size_t k = 0;
+    map[0] = 0;
+    for (int i = 0; i < GC_INPUTS; i++)
+        if (g_settings.pad_map[i] != settings_pad_map_default[i] && k < sizeof map) {
+            int w = snprintf(map + k, sizeof map - k, "%s%s = %s", k ? ", " : "", k_gc_key[i], k_sw_key[g_settings.pad_map[i]]);
+            if (w > 0) k += (size_t)w;
+        }
+    rt_log("[settings] %sbuttons: %s", when, k ? map : "default layout");
+#endif
 }
 
 static void apply_view(void) {
@@ -129,6 +172,11 @@ void settings_load(void) {
             char* eq = strchr(line, '=');
             if (!eq) continue;
             *eq = 0;
+            if (!strncmp(line, "map_", 4)) {
+                eq[1 + strcspn(eq + 1, "\r\n \t")] = 0;
+                load_map_entry(line + 4, eq + 1);
+                continue;
+            }
             int v = atoi(eq + 1);
             if (!strcmp(line, "screen") && v >= 0 && v < SCREEN_MODES) g_settings.screen = v;
             else if (!strcmp(line, "perf_overlay")) g_settings.perf_overlay = v != 0;
@@ -232,6 +280,10 @@ void settings_apply(void) {
             g_settings.msaa, g_settings.bloom, g_settings.grade_bright, g_settings.grade_contrast, g_settings.grade_sat,
             g_settings.grade_warm, g_settings.char_light, g_settings.pc_fps, g_settings.pad_background, g_settings.sharpness,
             g_settings.update_check);
+    for (int i = 0; i < GC_INPUTS; i++) {
+        int b = g_settings.pad_map[i];
+        fprintf(f, "map_%s=%s\n", k_gc_key[i], b >= 0 && b < SW_BUTTONS ? k_sw_key[b] : k_sw_key[settings_pad_map_default[i]]);
+    }
     int ok = fflush(f) == 0 && !ferror(f);
     if (fclose(f) != 0) ok = 0;
     if (!ok) {

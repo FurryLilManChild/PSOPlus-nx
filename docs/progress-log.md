@@ -1,5 +1,49 @@
 # Progress log (newest first)
 
+## 2026-11-23: Build D (FPS counter, a button map, the clock set back on a crash)
+
+- Why: the owner's review of Build C: the performance readout was too big and too busy; he asked for the frame rate
+  alone, a way to change the buttons, and a clear note that FSR costs speed. Build C's review also asked for
+  the CPU clock to be set back when the game crashes, and for the Riders names left on PC.
+- FPS counter (menu.cpp): the Performance page's "Frame rate counter" (off by default, saved as perf_overlay
+  as before) shows "30 FPS" in 15 px text in a small box at the top left; on the Switch that is the black bar
+  beside the 4:3 picture. The figure is gx_render.c's existing one (every 30 game frames); the text is laid out
+  again only when the whole number changes. Removed: the game work, GPU and CPU figures and the per-frame
+  sum in frame_pacing.c that fed them (frame_pacing.c is back to its form before Build C); [pace] lines are
+  unchanged. Off: one settings check per frame, nothing drawn.
+- Button map (Controls page, Switch): a list for each GameCube input (A, B, X, Y, Z, L, R, START, D-pad up,
+  down, left, right), choices None, A, B, X, Y, L, R, ZL, ZR, +, either stick click, the four D-pad
+  directions. A opens a list, the D-pad picks, A chooses, B closes it unchanged (B now also reaches ImGui as
+  "cancel"). Reset to default restores the old fixed layout (A B X Y = A B X Y, + = START, ZL / ZR = L / R,
+  R = Z, D-pad = D-pad). One Switch button on several inputs is allowed and shown in amber ("ZR presses R and
+  Z together"); so is an input with no button. L / R mapped to a button press fully (0xFF), as before.
+  Minus is not offered: holding it 0.5 s opens the menu with any map, and the menu reads A, B, the D-pad and
+  L / R / ZL / ZR from the buttons themselves, not through the map. Applies to the Pro Controller, a Joy-Con
+  pair and handheld mode, all players; a single sideways Joy-Con keeps its fixed rotated layout (said on the
+  page). Per poll: 12 table lookups (input_hid.c). The PC keeps its own controls.ini map (keyboard and SDL
+  pad names) and its Controls table; the new keys are not used there.
+- settings.ini: map_a ... map_right, values none / a / b / x / y / l / r / zl / zr / plus / lstick / rstick /
+  up / down / left / right. A missing key keeps the default; an unknown input or button is ignored and
+  logged. The log's [settings] lines list the inputs that differ from the default.
+- FSR: the help text now says FSR costs graphics time every frame and can lower the frame rate in busy
+  areas. fsr_present (render_deko.c) read; no change.
+- Crash: the libnx exception entry is replaced (platform_switch.c). Before, an exception went straight back
+  to the system as unhandled (libnx's own entry with no handler). Now the same happens after one step: if
+  the menu's CPU clock is set, one clkrst (or pcv) message sets 1020 MHz. It runs on a stack of its own,
+  takes no lock, writes no file or log, saves and restores every register it could change and returns the
+  exception as unhandled (0xF801), so Atmosphere's error screen and crash report should show the original
+  fault as before. libnx's __libnx_exception_handler was not used: libnx calls it after marking the
+  exception handled and then calls svcBreak, which would turn crash reports into a break at that point.
+  clock_override.txt stays after a crash, so the next start logs it and sets stock again.
+- PC: window title "PSO Episode I and II Plus (native port)", bug report header and the mods.ini header no
+  longer say Sonic Riders.
+- Evidence (cloud): the changed files compile for the Switch with -Wall, no new warnings (mods.c keeps its 4
+  older ones); menu.cpp, render_gl.c, platform_host.c, settings.c pass a PC (llvm-mingw) syntax check. A host
+  test of settings.c: map_ keys load, unknown keys and buttons are ignored with a log line, CRLF and trailing
+  spaces are handled, the file is written back and read again. Not verifiable in the cloud: the counter's
+  look and place on the console, the button lists with the pad (scrolling on the Controls page), whether the
+  mapped buttons reach the game, and the crash path (needs a crash on the console with the CPU setting on).
+
 ## 2026-11-23: Build C (the port menu overhauled, a CPU clock setting)
 
 - Why: test 11 showed Episode II at 24-30 fps at stock CPU 1020 MHz and 29-30 fps at 1428 MHz (sys-clk), and

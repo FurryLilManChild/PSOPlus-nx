@@ -1,15 +1,16 @@
-/* The port's menu and performance readout (overlay.h), drawn with Dear ImGui over the game's picture.
+/* The port's menu and frame rate counter (overlay.h), drawn with Dear ImGui over the game's picture.
  *
  * Opened by holding Minus (Switch; on a single Joy-Con held sideways its + or -) or Back / F1 (PC) for half
  * a second; while it is open the game sees no buttons. Pages: Performance (Switch: the CPU clock, the
- * handheld graphics profile; the readout), Display, Controls, System (build, the clocks now, screenshot).
+ * handheld graphics profile; the FPS counter), Display, Controls, System (build, the clocks now, screenshot).
  * L / R (ZL / ZR) switch pages, the D-pad or left stick moves, A chooses, B or Minus closes. Every item works
  * with a controller alone, handheld or docked. The Switch has no Quit: HOME closes games there.
  *
  * Cost when closed: overlay_image() is called once a frame by the render thread and does a few flag
- * checks; nothing is laid out or drawn unless the readout is on, a banner is up or the menu is open. The
- * readout is laid out again only when its text changes (about once a second, when frame_pacing.c gives a
- * new game work figure), never written to the SD card.
+ * checks; nothing is laid out or drawn unless the frame rate counter is on, a banner is up or the menu is
+ * open. The counter ("30 FPS", small, top left; on the Switch in the black bar beside the 4:3 picture) is
+ * laid out again only when the whole number changes; gx_render.c gives a new figure every 30 game frames
+ * (about once a second). When it is off, the only cost is one settings check per frame.
  *
  * ImGui runs on the render thread (which pumps input). When its picture changes, the draw lists are copied
  * and drawn in software (menu_raster.cpp) by a low-priority helper thread into the image that is not on
@@ -20,7 +21,6 @@
 #include <mutex>
 #include <float.h>
 #include <math.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -69,13 +69,12 @@ unsigned g_version;
 bool g_open, g_gate, g_quit_popup;
 unsigned g_prev;
 uint64_t g_menu_since;
-/* the performance readout: figures from other threads, and the text shown (render thread) */
+/* the frame rate counter: the figure from gx_render.c (any thread), and the text shown (render thread) */
 std::atomic<int> g_fps10{-1};
-std::atomic<int> g_work100{-1};
-std::atomic<unsigned> g_work_seq{0};
-unsigned g_ro_seq;
+int g_ro_fps = -2;  /* the whole number shown (-1: none yet) */
 bool g_ro_on;
-char g_ro_text[160];
+char g_ro_text[24];
+constexpr float kReadoutFontSize = 15.0f;  /* smaller than the menu's 19 */
 int g_tab, g_select_tab = -1;
 const int kTabs = 4;  /* settings_window() */
 int g_shot_request, g_pads_request, g_quit_request;
@@ -373,16 +372,10 @@ void tab_performance() {
               "307 MHz). Not an overclock; docked play is not changed (768 MHz)."))
         settings_apply();
 #endif
-    heading("Performance readout");
-    if (check("Show the performance readout in the corner", &g_settings.perf_overlay,
-#ifdef __SWITCH__
-              "Top left, updated about once a second: frames per second, the game's own work per frame (30 fps "
-              "needs 33.3 ms or less), the graphics chip's time per frame and the CPU clock."
-#else
-              "Top left, updated about once a second: frames per second and the game's own work per frame (30 fps "
-              "needs 33.3 ms or less)."
-#endif
-              ))
+    heading("Frame rate counter");
+    if (check("Show the frame rate (FPS) in the corner", &g_settings.perf_overlay,
+              "A small number in the top left corner (on the Switch beside the picture), updated about once a second. "
+              "The game's full speed is 30 FPS."))
         settings_apply();
     note("Phantasy Star Online runs at its original 30 fps, as on the GameCube.");
 }
@@ -456,7 +449,9 @@ void tab_display() {
     heading("Sharpness (AMD FSR 1)");
     slider("##sharp", &g_settings.sharpness, 0, 100, g_settings.sharpness ? "%d%%" : "Off",
            "Sharpens the final picture (FSR 1 RCAS). When the screen is bigger than the resolution above, FSR also "
-           "does the upscaling (EASU) instead of a plain stretch. Off = the picture as before.");
+           "does the upscaling (EASU) instead of a plain stretch. Off = the picture as before.\n\n"
+           "FSR costs graphics time every frame: in busy areas it can lower the frame rate. Turn it off if the "
+           "game slows down.");
 #endif
 #ifdef PIC_GRADE
     heading("Colour");
@@ -508,24 +503,96 @@ void tab_display() {
     note("The picture is 4:3, as on the GameCube.");
 }
 
+#ifdef __SWITCH__
+/* the button map (settings.h pad_map): one list per GameCube input; A opens it, the D-pad picks, A chooses,
+ * B closes it unchanged. One Switch button may press several GameCube inputs: allowed, and listed in amber
+ * under the table so it is never a surprise; so is an input with no button. Reset to default comes last, so
+ * moving down to it scrolls everything above into view. */
+void button_map() {
+    heading("Buttons");
+    note("For the Pro Controller, a Joy-Con pair and handheld mode (every player); the sticks stay as they are. A "
+         "single Joy-Con held sideways keeps its fixed layout (SL / SR = L / R, stick click = Z, + or - = START). "
+         "Holding - (Minus) opens this menu with any layout.");
+    const float combo_w = ImGui::GetFontSize() * 9.5f;
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x, 4));
+    if (ImGui::BeginTable("bmap", 4, ImGuiTableFlags_SizingFixedFit)) {
+        ImGui::TableSetupColumn("gc1", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 6);
+        ImGui::TableSetupColumn("sw1", ImGuiTableColumnFlags_WidthFixed, combo_w + ImGui::GetFontSize() * 2);
+        ImGui::TableSetupColumn("gc2", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 6);
+        ImGui::TableSetupColumn("sw2", ImGuiTableColumnFlags_WidthFixed, combo_w);
+        const int rows = (GC_INPUTS + 1) / 2;
+        for (int r = 0; r < rows; r++) {
+            ImGui::TableNextRow();
+            for (int half = 0; half < 2; half++) {
+                const int in = r + half * rows;  /* left: A B X Y Z L, right: R START and the D-pad */
+                ImGui::TableNextColumn();
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted(settings_gc_input_label(in));
+                ImGui::TableNextColumn();
+                ImGui::PushID(in);
+                ImGui::SetNextItemWidth(combo_w);
+                const int cur = g_settings.pad_map[in];
+                if (ImGui::BeginCombo("##map", settings_sw_button_label(cur), ImGuiComboFlags_HeightLarge)) {
+                    for (int sw = 0; sw < SW_BUTTONS; sw++) {
+                        const bool sel = sw == cur;
+                        if (ImGui::Selectable(settings_sw_button_label(sw), sel) && !sel) {
+                            g_settings.pad_map[in] = sw;
+                            settings_apply();
+                        }
+                        if (sel) ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
+                }
+                if (in == GC_IN_L || in == GC_IN_R)
+                    help("The GameCube's L and R are analog triggers; a Switch button presses them fully.");
+                ImGui::PopID();
+            }
+        }
+        ImGui::EndTable();
+    }
+    ImGui::PopStyleVar();
+    for (int sw = SW_NONE; sw < SW_BUTTONS; sw++) {
+        char line[160];
+        size_t k = 0;
+        int n = 0;
+        line[0] = 0;
+        for (int in = 0; in < GC_INPUTS; in++)
+            if (g_settings.pad_map[in] == sw && k < sizeof line) {
+                int w = snprintf(line + k, sizeof line - k, "%s%s", n ? " and " : "", settings_gc_input_label(in));
+                if (w > 0) k += (size_t)w;
+                n++;
+            }
+        char msg[256];
+        if (sw == SW_NONE && n) {
+            snprintf(msg, sizeof msg, "No button presses %s.", line);
+            warn(msg);
+        } else if (sw != SW_NONE && n > 1) {
+            snprintf(msg, sizeof msg, "%s presses %s together.", settings_sw_button_label(sw), line);
+            warn(msg);
+        }
+    }
+    if (ImGui::Button("Reset to default")) {
+        memcpy(g_settings.pad_map, settings_pad_map_default, sizeof g_settings.pad_map);
+        settings_apply();
+    }
+    help("A B X Y = A B X Y,  + = START,  ZL / ZR = L / R,  R = Z,  D-pad = D-pad.");
+}
+#endif
+
 void tab_controls() {
 #ifdef __SWITCH__
     heading("Controllers");
     int pads = 0;
     for (int c = 0; c < 4; c++) pads += c == 0 || input_connected(c);
+    ImGui::AlignTextToFramePadding();
     ImGui::Text("Connected: %d", pads);
+    ImGui::SameLine();
     if (ImGui::Button("Set up controllers")) {
         close_menu();
         g_pads_request = 1;
     }
     help("The system's controller screen: pair or split Joy-Cons and change the player order.");
-    heading("Buttons");
-    note("A B X Y = A B X Y,  + = START,  ZL / ZR = L / R,  R = Z,  left stick = control stick,  right stick = "
-         "C-stick,  D-pad = D-pad. A single Joy-Con held sideways works as a small controller (SL / SR = L / R, "
-         "stick click = Z, + or - = START).");
-    heading("This menu");
-    note("Hold - (Minus) for half a second to open it; on a single Joy-Con hold its + or -. L / R or ZL / ZR "
-         "switch pages, the D-pad or left stick moves, A chooses, B or - closes.");
+    button_map();
 #else
     heading("Buttons");
     if (ImGui::BeginTable("map", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH)) {
@@ -676,42 +743,17 @@ void settings_window() {
     ImGui::End();
 }
 
-__attribute__((format(printf, 4, 5))) void appendf(char* out, size_t n, size_t* k, const char* fmt, ...) {
-    if (*k >= n) return;
-    va_list ap;
-    va_start(ap, fmt);
-    int w = vsnprintf(out + *k, n - *k, fmt, ap);
-    va_end(ap);
-    if (w > 0) *k += (size_t)w;
-}
-
-/* the readout's text from the latest figures; called when a new game work figure arrives or the readout
- * is switched on (about once a second), never per frame */
-void readout_text(char* out, size_t n) {
-    int fps10 = g_fps10.load(), work100 = g_work100.load();
-    size_t k = 0;
-    out[0] = 0;
-    if (fps10 >= 0) appendf(out, n, &k, "%d.%d fps", fps10 / 10, fps10 % 10);
-    else appendf(out, n, &k, "-- fps");
-    if (work100 >= 0) appendf(out, n, &k, "   game %d.%d ms", work100 / 100, work100 / 10 % 10);
-    else appendf(out, n, &k, "   game -- ms");
-    double gpu = platform_gpu_frame_ms();
-    if (gpu >= 0) appendf(out, n, &k, "   GPU %.1f ms", gpu);
-#ifdef __SWITCH__
-    PlatformClockInfo ci;
-    platform_clock_info(&ci);  /* also keeps the once-a-second clock reads going (platform_switch.c) */
-    if (ci.cpu_mhz) appendf(out, n, &k, "   CPU %u MHz", ci.cpu_mhz);
-    else if (ci.available) appendf(out, n, &k, "   CPU -- MHz");
-#endif
-}
-
+/* the counter: "30 FPS" in a small dark box at the top left. On the Switch the overlay covers the whole
+ * 16:9 screen and the game's 4:3 picture sits in its middle 960 of 1280 pixels, so the box (about 60 x 22
+ * overlay pixels) is in the black bar beside the picture. */
 void readout_box() {
     if (!g_ro_on || !g_ro_text[0]) return;
     ImDrawList* dl = ImGui::GetForegroundDrawList();
-    ImVec2 ts = ImGui::CalcTextSize(g_ro_text);
-    dl->AddRectFilled(ImVec2(8, 8), ImVec2(24 + ts.x, 16 + ts.y + 4), IM_COL32(14, 16, 20, 200), 4.0f);
-    dl->AddRect(ImVec2(8, 8), ImVec2(24 + ts.x, 16 + ts.y + 4), IM_COL32(82, 133, 148, 200), 4.0f);
-    dl->AddText(ImVec2(16, 12), IM_COL32(236, 240, 242, 255), g_ro_text);
+    ImFont* font = ImGui::GetFont();
+    ImVec2 ts = font->CalcTextSizeA(kReadoutFontSize, FLT_MAX, 0.0f, g_ro_text);
+    const float x = 8, y = 8, px = 6, py = 3;
+    dl->AddRectFilled(ImVec2(x, y), ImVec2(x + ts.x + 2 * px, y + ts.y + 2 * py), IM_COL32(14, 16, 20, 190), 3.0f);
+    dl->AddText(font, kReadoutFontSize, ImVec2(x + px, y + py), IM_COL32(236, 240, 242, 255), g_ro_text);
 }
 
 void banner_box() {
@@ -828,11 +870,6 @@ void feed(ImGuiKey k, unsigned held, unsigned changed, unsigned bit) {
 extern "C" {
 
 void overlay_set_fps(float fps) { g_fps10.store((int)(fps * 10.0f + 0.5f)); }
-
-void overlay_set_work_ms(float ms) {
-    g_work100.store((int)(ms * 100.0f + 0.5f));
-    g_work_seq.fetch_add(1);
-}
 
 void overlay_set_banner(const char* text) {
     std::lock_guard<std::mutex> l(g_banner_lock);
@@ -988,26 +1025,28 @@ int overlay_input(unsigned held) {
     feed(ImGuiKey_GamepadDpadLeft, held, changed, OV_LEFT);
     feed(ImGuiKey_GamepadDpadRight, held, changed, OV_RIGHT);
     feed(ImGuiKey_GamepadFaceDown, held, changed, OV_ACCEPT);  /* ImGui's "activate" */
+    feed(ImGuiKey_GamepadFaceRight, held, changed, OV_BACK);   /* ImGui's "cancel": B closes an open list */
     return 1;
 }
 
 const uint8_t* overlay_image(unsigned* version, int box[4]) {
-    /* the readout: its text is made again only when a new game work figure arrived (about once a second)
-     * or it was switched on or off */
+    /* the frame rate counter: its text is made again only when the whole number changes or it was switched
+     * on or off (one atomic load per frame while on; nothing while off) */
     bool ro_changed = false;
     if (g_settings.perf_overlay) {
-        unsigned seq = g_work_seq.load();
-        if (!g_ro_on || seq != g_ro_seq) {
-            char t[sizeof g_ro_text];
-            readout_text(t, sizeof t);
-            ro_changed = !g_ro_on || strcmp(t, g_ro_text) != 0;
-            memcpy(g_ro_text, t, sizeof t);
-            g_ro_seq = seq;
+        int f10 = g_fps10.load(std::memory_order_relaxed);
+        int fps = f10 >= 0 ? (f10 + 5) / 10 : -1;
+        if (!g_ro_on || fps != g_ro_fps) {
+            if (fps >= 0) snprintf(g_ro_text, sizeof g_ro_text, "%d FPS", fps);
+            else snprintf(g_ro_text, sizeof g_ro_text, "-- FPS");
+            g_ro_fps = fps;
             g_ro_on = true;
+            ro_changed = true;
         }
     } else if (g_ro_on) {
         g_ro_on = false;
         g_ro_text[0] = 0;
+        g_ro_fps = -2;
         ro_changed = true;
     }
     unsigned bseq = g_banner_seq.load();
@@ -1019,7 +1058,7 @@ const uint8_t* overlay_image(unsigned* version, int box[4]) {
     }
     static bool was_open;
     bool shown = g_open || g_ro_on || g_banner[0];
-    /* the menu runs every frame while open (navigation, tooltips); the readout only when its text changes */
+    /* the menu runs every frame while open (navigation, tooltips); the counter only when its text changes */
     if (g_busy) collect();  /* nothing can be waiting unless a job is out */
     /* a picture left waiting because the helper was busy is made again too */
     bool open_before = g_open;
