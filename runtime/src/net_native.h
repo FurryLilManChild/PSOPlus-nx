@@ -33,6 +33,7 @@ int platform_net_link(void);   /* 1 the system has a connection, 0 it has none, 
 /* platform events (Switch: platform_switch.c's applet hook), handled on the game thread at the next frame */
 enum { NET_EV_RESUME = 1, NET_EV_FOCUS_LOST, NET_EV_FOCUS_BACK };
 void net_platform_event(int ev);
+void net_platform_event_at(int ev, uint64_t now_ns, long long wall_s);  /* the same at given times (tests) */
 int net_error_code(int err);  /* a socket errno on an open connection -> -6 (reset) or -7 (unreachable) */
 
 int exi_card_backup(const char* path);  /* exi.c: 0 written, 1 no card file in use, -1 write error */

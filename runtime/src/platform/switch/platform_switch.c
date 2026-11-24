@@ -51,7 +51,7 @@ static void applet_hook(AppletHookType type, void* param) {
     last = now;
     if (type == AppletHookType_OnResume || (type == AppletHookType_OnFocusState && appletGetFocusState() == AppletFocusState_InFocus))
         g_switch_log_input = 1;
-    /* online (net_native.c): after sleep the connections are ended; focus changes are logged */
+    /* online (net_native.c): back after 15 s or more away (HOME or sleep) the connections are ended */
     if (type == AppletHookType_OnResume) net_platform_event(NET_EV_RESUME);
     if (type == AppletHookType_OnFocusState)
         net_platform_event(appletGetFocusState() == AppletFocusState_InFocus ? NET_EV_FOCUS_BACK : NET_EV_FOCUS_LOST);

@@ -1,5 +1,20 @@
 # Progress log (newest first)
 
+## 2026-11-23: Online build 4, review fix (HOME and sleep: end connections only after 15 s away)
+
+- Review of fd9b7bd: AppletHookType_OnResume also comes after a short HOME visit (the default focus mode
+  SuspendHomeSleep suspends the program at HOME too), so ending every connection on any resume would have
+  disconnected a player who only looked at HOME for a moment.
+- Fix (net_native.c): the applet hook records when focus was lost and when the program came back (resume or
+  focus back), on the CPU tick clock and the wall clock (the larger difference counts: the tick clock may stand
+  still while the console sleeps). Away 15 s or more (HOME or sleep): the connections are ended (-6, as
+  before); shorter, or a resume with no recorded time away: kept, and a dead connection then shows through its
+  socket errors or the once-a-second link check. Log: "[net] resume: away N s: connections kept" or "...
+  connections ended (15 s or more)". Events are taken also while no socket is open, so an old HOME visit
+  cannot end a later connection.
+- Host test: 106 + 3 + 4 checks pass (gcc, clang), now with away 3 s (kept), time away unknown (kept) and
+  asleep 20 s on the wall clock with the tick clock still (ended: status -6, send -6, receive callback -6).
+
 ## 2026-11-23: Online build 4 (chat with the system keyboard, clean disconnects, small cleanups)
 
 - Chat (runtime/src/chat_kbd.c). How the game takes typed text, read in the disassembly: Sega's keyboard

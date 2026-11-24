@@ -51,6 +51,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <threads.h>
+#include <time.h>
 
 #include "chat_kbd.h"
 #include "net_dns.h"
@@ -239,8 +240,14 @@ static struct {
     unsigned long long tx, rx, utx, urx;
     char last_end[48];
 } g_sess;
-static _Atomic int g_ev_resume, g_ev_focus;  /* platform events (net_platform_event), handled in net_frame */
-static uint64_t g_focus_lost_ns, g_link_check_ns;
+/* platform events (net_platform_event): when the game lost focus and when it came back (or the console woke),
+ * on the CPU tick clock and the wall clock (the tick clock may stand still while the console sleeps); the
+ * decision is made in net_frame on the game thread */
+static _Atomic uint64_t g_away_ns, g_back_ns;
+static _Atomic long long g_away_wall, g_back_wall;
+static _Atomic int g_back_ev;  /* 0, or the event that ended the time away (NET_EV_RESUME, NET_EV_FOCUS_BACK) */
+static uint64_t g_link_check_ns;
+#define AWAY_END_S 15  /* away at least this long (HOME or sleep): the connections are ended */
 
 static mtx_t g_status_lock;
 static char g_status[128] = "not used yet";
@@ -1509,7 +1516,7 @@ static void deliver_udp(Cpu* c, Udp* u, int idx) {
     call_guest(c, u->cb, 1, info);
 }
 
-/* the port ends every open connection (the console slept, the system lost its network): the game gets `code` on
+/* the port ends every open connection (away 15 s or more, the system lost its network): the game gets `code` on
  * its next receive or send and shows its own message */
 static void end_connections(int code, const char* why) {
     for (int i = 0; i < MAX_TCP; i++) {
@@ -1521,24 +1528,50 @@ static void end_connections(int code, const char* why) {
     }
 }
 
+void net_platform_event_at(int ev, uint64_t now_ns, long long wall_s) {
+    if (ev == NET_EV_FOCUS_LOST) {
+        if (!atomic_load(&g_away_ns)) {
+            atomic_store(&g_away_wall, wall_s);
+            atomic_store(&g_away_ns, now_ns ? now_ns : 1);
+        }
+    } else if (ev == NET_EV_RESUME || ev == NET_EV_FOCUS_BACK) {
+        atomic_store(&g_back_ns, now_ns);
+        atomic_store(&g_back_wall, wall_s);
+        atomic_store(&g_back_ev, ev);
+    }
+}
 void net_platform_event(int ev) {  /* any thread (Switch: the applet hook on the render thread) */
-    if (ev == NET_EV_RESUME) atomic_store(&g_ev_resume, 1);
-    else if (ev == NET_EV_FOCUS_LOST) atomic_store(&g_ev_focus, 1);
-    else if (ev == NET_EV_FOCUS_BACK) atomic_store(&g_ev_focus, 2);
+    net_platform_event_at(ev, platform_now_ns(), (long long)time(NULL));
 }
 
+/* back from HOME or sleep: the connections are kept after a short time away (a quick look at HOME), ended
+ * after AWAY_END_S or more (the server has most likely dropped the player; the game shows its message) */
 static void platform_events(void) {
-    int f = atomic_exchange(&g_ev_focus, 0);
     uint64_t now = platform_now_ns();
-    if (f == 1) g_focus_lost_ns = now;
-    if (f == 2 && g_focus_lost_ns && g_open) {
-        rt_log("[net] back in focus after %.1f s away (connections kept; a dead one shows on its next use)",
-               (now - g_focus_lost_ns) / 1e9);
-        g_focus_lost_ns = 0;
-    }
-    if (atomic_exchange(&g_ev_resume, 0)) {
-        g_link_cached = -2;  /* the link is asked again */
-        end_connections(API_CONNRESET, "the console slept");
+    int ev = atomic_exchange(&g_back_ev, 0);
+    if (ev) {
+        uint64_t lost = atomic_exchange(&g_away_ns, 0);
+        long long lost_wall = atomic_load(&g_away_wall), back_wall = atomic_load(&g_back_wall);
+        uint64_t back = atomic_load(&g_back_ns);
+        const char* what = ev == NET_EV_RESUME ? "resume" : "focus back";
+        if (ev == NET_EV_RESUME) g_link_cached = -2;  /* the link is asked again */
+        static uint64_t last_decision;
+        if (!lost) {  /* the second message of one return (focus back and resume both come): nothing new */
+            if (ev == NET_EV_RESUME && g_open && now - last_decision > 5000000000ull)
+                rt_log("[net] %s, time away unknown: connections kept (a dead one shows on its next use)", what);
+        } else {
+            double away = back > lost ? (back - lost) / 1e9 : 0.0;
+            if (back_wall - lost_wall > away) away = (double)(back_wall - lost_wall);
+            int end = away >= AWAY_END_S;
+            last_decision = now;
+            if (g_open)
+                rt_log("[net] %s: away %.0f s: %s", what, away, end ? "connections ended (15 s or more)" : "connections kept");
+            if (end) {
+                char why[48];
+                snprintf(why, sizeof why, "away %.0f s (HOME or sleep)", away);
+                end_connections(API_CONNRESET, why);
+            }
+        }
     }
     /* the system's network, once a second while a connection is open */
     int any = 0;
@@ -1559,8 +1592,8 @@ static void platform_events(void) {
 
 void net_frame(Cpu* c) {
     chat_frame();
+    platform_events();  /* also offline: an old HOME visit must not end a later connection */
     if (!g_open) return;
-    platform_events();
     for (int i = 0; i < MAX_TCP; i++) {
         Tcp* t = &g_tcp[i];
         if (!t->used) continue;

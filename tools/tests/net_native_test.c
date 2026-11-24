@@ -27,7 +27,8 @@
  *     (0x8007F970) going back to the previous scene only from the browser scene;
  *   - chat: text to key frames through layout tables of our own, the keyboard library hooks (the game's own
  *     library offline and for channels 0-2, a US keyboard on channel 3 online), a typed line frame by frame;
- *   - a sleep while connected: status state -6, send -6, the receive callback -6; socket errors to codes;
+ *   - back from HOME or sleep: away 3 s or unknown keeps the connection; away 20 s (wall clock) ends it: status
+ *     state -6, send -6, the receive callback -6; socket errors to codes;
  *   - the callbacks run on the caller's registers, which are put back afterwards, below its stack pointer.
  * Not game data: no file from the disc is read. Usage: tools/tests/run_net_native_test.sh */
 #include <arpa/inet.h>
@@ -500,10 +501,25 @@ static void test_sleep_disconnect(uint16_t port) {
         sleep_ms(5);
     }
     CHECK(state == 4, "second connection up (%d)", state);
-    net_platform_event(NET_EV_RESUME);
+    /* a quick look at HOME (3 s): kept */
+    uint64_t t = platform_now_ns();
+    long long w = (long long)time(NULL);
+    net_platform_event_at(NET_EV_FOCUS_LOST, t, w);
+    net_platform_event_at(NET_EV_RESUME, t + 3000000000ull, w + 3);
     net_frame(&g_c);
     call(hle_net_tcp_status, (uint32_t)h, STATE_EA, 0, SPACE_EA, X_EA, 0, 0);
-    CHECK((int16_t)ld16(STATE_EA) == -6, "after sleep: status state -6 (%d)", (int16_t)ld16(STATE_EA));
+    CHECK((int16_t)ld16(STATE_EA) == 4, "away 3 s: connection kept (%d)", (int16_t)ld16(STATE_EA));
+    /* a resume with no recorded time away: kept */
+    net_platform_event_at(NET_EV_RESUME, t, w);
+    net_frame(&g_c);
+    call(hle_net_tcp_status, (uint32_t)h, STATE_EA, 0, SPACE_EA, X_EA, 0, 0);
+    CHECK((int16_t)ld16(STATE_EA) == 4, "resume, time away unknown: kept (%d)", (int16_t)ld16(STATE_EA));
+    /* asleep 20 s (the tick clock stood still, the wall clock did not): ended */
+    net_platform_event_at(NET_EV_FOCUS_LOST, t, w);
+    net_platform_event_at(NET_EV_RESUME, t + 1000000ull, w + 20);
+    net_frame(&g_c);
+    call(hle_net_tcp_status, (uint32_t)h, STATE_EA, 0, SPACE_EA, X_EA, 0, 0);
+    CHECK((int16_t)ld16(STATE_EA) == -6, "away 20 s: status state -6 (%d)", (int16_t)ld16(STATE_EA));
     st16(LIST_EA, 1); st32(LIST_EA + 4, SEND_EA);
     CHECK((int)call(hle_net_tcp_send, (uint32_t)h, 0, 1, LIST_EA, 0, 0, 0) == -6, "after sleep: send -6");
     int before = g_tcp_calls;
