@@ -69,7 +69,8 @@ resolutions and sharpness cost graphics time and can lower the frame rate in bus
 
 - Movies show a black picture with sound. Start skips them.
 - Resetting the game from inside the game can hang. Close it from the HOME menu instead.
-- Online play is not supported.
+- Online play is not in the 0.5.0 release; it is in testing on the main branch. First-time Schtserv
+  setup: see [ONLINE.md](ONLINE.md).
 - Some busy areas dip below 30 fps at stock clocks.
 - The port menu does not pause the game (it keeps running behind the menu, with your buttons going to the
   menu), and the frame rate can drop while the menu is open.
