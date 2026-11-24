@@ -323,8 +323,8 @@ with open(os.path.join(ROOT, "build.ninja"), "w") as f:
         n.variable("cxx", dkp + "/devkitA64/bin/aarch64-none-elf-g++")
         n.variable("cflags", "-std=gnu11 -g %s %s -D__SWITCH__ -I%s/libnx/include -ffunction-sections" % (arch, inc, dkp))
         n.variable("cxxflags", "-std=gnu++20 -g %s %s -D__SWITCH__ -I%s/libnx/include -ffunction-sections -fno-rtti -fno-exceptions" % (arch, inc, dkp))
-        n.variable("ldflags", "-specs=%s/libnx/switch.specs -g %s -L%s/libnx/lib -Wl,-Map,%s/psoplus.map -ldeko3d -lnx -lm"
-                   % (dkp, arch, dkp, OUT))
+        n.variable("ldflags", "-specs=%s/libnx/switch.specs -g %s -L%s/portlibs/switch/lib -L%s/libnx/lib -Wl,-Map,%s/psoplus.map "
+                   "-lzstd -llzma -lbz2 -ldeko3d -lnx -lm" % (dkp, arch, dkp, dkp, OUT))
         exe = OUT + "/psoplus.elf"
 
     def dkp_tool(name):  # devkitPro's tools: name.exe on Windows, name on Linux (the cloud's Docker image)
@@ -408,7 +408,10 @@ with open(os.path.join(ROOT, "build.ninja"), "w") as f:
         objs.append(o)
     for src in rt_c:
         o = "%s/obj/%s.o" % (OUT, src.replace("/", "_"))
-        n.build(o, "cc", src, implicit=[GEN + "/funcs.h"] + shader_h, variables={"extra": "-O2 -Wall"})
+        extra = "-O2 -Wall"
+        if src.endswith("/switch/rvz_decode.c"):  # portlibs switch-libzstd, switch-liblzma, switch-bzip2 (RVZ conversion)
+            extra += " -I%s/portlibs/switch/include" % dkp
+        n.build(o, "cc", src, implicit=[GEN + "/funcs.h"] + shader_h, variables={"extra": extra})
         objs.append(o)
     for src in rt_m:
         o = "%s/obj/%s.o" % (OUT, src.replace("/", "_"))

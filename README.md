@@ -11,16 +11,32 @@ Current release: **0.5.0** (first public test release).
 ## What you need
 
 - A Switch that can run homebrew (Atmosphere).
-- Your own disc image of Phantasy Star Online Episode I & II Plus, USA, revision 2 (game ID GPOE8P), as a
-  full, untrimmed `.iso` or `.gcm` (about 1.4 GB). RVZ, WIA, CISO, NKit and trimmed images are not read: convert
-  an RVZ to ISO first, for example in Dolphin (right-click the game, Convert File, format ISO). The port checks
-  the disc at start and says so if it is the wrong game or revision.
+- Your own disc image of Phantasy Star Online Episode I & II Plus, USA, revision 2 (game ID GPOE8P), either as a
+  full, untrimmed `.iso` or `.gcm` (about 1.4 GB), or as a Dolphin `.rvz` (or `.wia`) made from a full dump.
+  CISO, NKit, GCZ and trimmed images are not read. The port checks the disc at start and says so if it is the
+  wrong game or revision.
+
+### RVZ images
+
+With an `.rvz` (or `.wia`) and no `.iso` in the folder, the first start converts it once to `<same name>.iso`
+in `sdmc:/switch/psoplus/`, behind a progress screen (percent, MB done, time left), then starts the game.
+Later starts use the `.iso` directly. It takes a few minutes, at the SD card's speed.
+
+- It needs 1.4 GB (1,459,978,240 bytes) of free space on the SD card; the screen says so if there is not enough.
+- The result is written as `<name>.iso.part` and only renamed to `.iso` after its size and disc header are
+  checked. Its SHA-1 is compared with the clean dump of this disc and the result is logged (a scrubbed or
+  modified dump is still used, with a note on screen).
+- Closing the game during the conversion deletes the `.part`; one left by a power cut is deleted at the next
+  start, and the conversion starts over.
+- Your `.rvz` is never changed or deleted. Once the game has started from the `.iso`, you can delete the `.rvz`
+  to free space.
+- Converting on a PC instead is also fine: in Dolphin, right-click the game, Convert File, format ISO.
 
 ## Install
 
 1. Copy the `psoplus` folder from the release zip to `sdmc:/switch/`, so you have
    `sdmc:/switch/psoplus/psoplus.nro`.
-2. Put your disc image in the same folder (any name ending in `.iso` or `.gcm`).
+2. Put your disc image in the same folder (any name ending in `.iso` or `.gcm`, or an `.rvz`, see above).
 3. Start the Homebrew Menu by holding R while opening any game (title takeover), not from the Album, then
    open PSO Episode I and II Plus.
 
@@ -68,7 +84,8 @@ both to an issue, with what you were doing and where in the game.
 
 You need your own disc and:
 
-- devkitPro with devkitA64, libnx and deko3d, plus Python 3;
+- devkitPro with devkitA64, libnx and deko3d, the portlibs `switch-libzstd`, `switch-liblzma` and
+  `switch-bzip2` (for the RVZ conversion), plus Python 3;
 - Dear ImGui 1.92.9b, extracted to `build/ext/imgui-1.92.9b`.
 
 Extract `PsoV3.dol` and `movie.rel` from your disc into `baserom/` (`tools/disc/psodisc.py ISO OUTDIR`

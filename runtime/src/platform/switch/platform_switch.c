@@ -3,6 +3,8 @@
  * Files (sdmc:/switch/psoplus/):
  *   psoplus.nro     the program
  *   *.iso               the user's own disc image (GPOE8P rev 2, the first .iso or .gcm found)
+ *   *.rvz, *.wia        a Dolphin image instead: converted once to <name>.iso at the first start
+ *                       (disc_convert_switch.c; <name>.iso.part while it is written)
  *   saves/card_a.raw    memory card in slot A (created formatted on first start)
  *   psoplus.log     log of the last session
  *
@@ -467,20 +469,12 @@ void platform_init(void) {
     atexit(platform_clock_release_at_exit);
 }
 
+/* the first .iso or .gcm; without one, the first GPOE8P .rvz/.wia is converted to .iso once (behind a progress
+ * screen), and with no image at all a screen says where it goes (disc_convert_switch.c) */
 const char* platform_disc_path(void) {
-    static char path[512] = BASE_DIR "/game.iso";
-    DIR* d = opendir(BASE_DIR);
-    if (d) {
-        struct dirent* e;
-        while ((e = readdir(d))) {
-            size_t n = strlen(e->d_name);
-            if (n > 4 && (!strcasecmp(e->d_name + n - 4, ".iso") || !strcasecmp(e->d_name + n - 4, ".gcm"))) {
-                snprintf(path, sizeof path, BASE_DIR "/%s", e->d_name);
-                break;
-            }
-        }
-        closedir(d);
-    }
+    static char path[512];
+    void disc_find_or_convert(char* path, size_t n);
+    disc_find_or_convert(path, sizeof path);
     return path;
 }
 
