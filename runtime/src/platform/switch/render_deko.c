@@ -967,6 +967,26 @@ static void efb_copy(const GxCmd* c, const GxUniforms* u) {
         bar(DkBarrier_Fragments, 0);
         /* at the chosen aspect (settings.h), centred */
         float aspect = g_k > 1.0f ? 4.0f / 3.0f * g_k : settings_display_aspect();
+        int pic = (int)c->copy[8];  /* a picture made by the CPU (movie_xfb.c): shown 4:3 instead of the EFB */
+        if (pic >= 0) {
+            tex_prepare(pic);
+            DkTex* t = tex_slot(pic);
+            if (t->live) {
+                float pa = settings_display_aspect() < 4.0f / 3.0f ? settings_display_aspect() : 4.0f / 3.0f;
+                uint32_t dw = FB_W, dh = FB_H;
+                if ((float)FB_W > FB_H * pa) dw = (uint32_t)(FB_H * pa + 0.5f);
+                else dh = (uint32_t)(FB_W / pa + 0.5f);
+                DkImageView tv;
+                dkImageViewDefaults(&tv, &t->image);
+                DkImageRect ps = {0, 0, 0, t->w, t->h, 1};
+                DkImageRect dst = {(FB_W - dw) / 2, (FB_H - dh) / 2, 0, dw, dh, 1};
+                bar(DkBarrier_Primitives, 0);  /* the upload first */
+                dkCmdBufBlitImage(g_cmd, &tv, &ps, &fv, &dst, DkBlitFlag_FilterLinear, 0);
+            }
+            DkImageView const* efb_targets[1] = {&g_efb_view};
+            dkCmdBufBindRenderTargets(g_cmd, efb_targets, 1, &g_efb_depth_view);
+            return;  /* no clear: the game's next frame clears the EFB itself */
+        }
         if (c->copy[11]) {  /* online: this player's part of a split screen (gx_render.c), same scale both ways */
             src.y = SC(y + (c->copy[11] >> 16));
             src.height = SC(c->copy[11] & 0xFFFF);

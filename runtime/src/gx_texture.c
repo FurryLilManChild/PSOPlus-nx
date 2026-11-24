@@ -100,6 +100,16 @@ static GxTexture* new_texture(uint32_t w, uint32_t h, int is_copy) {
     return t;
 }
 
+/* a picture made by the CPU (gx_render.c gx_picture_present): a texture for this frame only */
+int gx_texture_picture(const uint8_t* rgba, uint32_t w, uint32_t h) {
+    void gx_frame_retire(int id);
+    GxTexture* t = new_texture(w, h, 0);
+    memcpy(t->rgba, rgba, (size_t)w * h * 4);
+    t->gen = 1;
+    gx_frame_retire(t->id);
+    return t->id;
+}
+
 static uint64_t hash_bytes(const uint8_t* p, size_t n) {
     uint64_t h = 0x9E3779B97F4A7C15ull ^ n;
     size_t i = 0;

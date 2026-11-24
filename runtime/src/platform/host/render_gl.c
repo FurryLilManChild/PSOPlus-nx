@@ -476,7 +476,25 @@ static void efb_copy(const GxCmd* c, const GxUniforms* u) {
             if ((float)ww > (float)wh * aspect) dw = (int)((float)wh * aspect + 0.5f);
             else dh = (int)((float)ww / aspect + 0.5f);
             int dx = (ww - dw) / 2, dy = (wh - dh) / 2;
-            if (!fsr_present(wx(x), sy * EFB_SCALE, wx(x + w) - wx(x), sh * EFB_SCALE, dx, dy, dw, dh))
+            int pic = (int)c->copy[8];  /* a picture made by the CPU (movie_xfb.c): shown 4:3 instead of the EFB */
+            GLuint ptex = pic >= 0 ? gl_texture(pic) : 0;
+            GxTexture* pt = pic >= 0 ? gx_texture_get(pic) : NULL;
+            if (pic >= 0) {
+                float pa = (float)ww / (float)wh < 4.0f / 3.0f ? (float)ww / (float)wh : 4.0f / 3.0f;
+                dw = ww, dh = wh;
+                if ((float)ww > (float)wh * pa) dw = (int)((float)wh * pa + 0.5f);
+                else dh = (int)((float)ww / pa + 0.5f);
+                dx = (ww - dw) / 2, dy = (wh - dh) / 2;
+            }
+            if (pic >= 0) {
+                if (ptex && pt) {  /* stored top row first, as the EFB: flipped the same way */
+                    p_glBindFramebuffer(GL_READ_FRAMEBUFFER, g_copy_fbo);
+                    p_glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ptex, 0);
+                    p_glBlitFramebuffer(0, 0, (GLint)pt->width, (GLint)pt->height, dx, dy + dh, dx + dw, dy,
+                                        GL_COLOR_BUFFER_BIT, GL_LINEAR);
+                    p_glBindFramebuffer(GL_READ_FRAMEBUFFER, g_fbo);
+                }
+            } else if (!fsr_present(wx(x), sy * EFB_SCALE, wx(x + w) - wx(x), sh * EFB_SCALE, dx, dy, dw, dh))
                 p_glBlitFramebuffer(wx(x), sy * EFB_SCALE, wx(x + w), (sy + sh) * EFB_SCALE, dx, dy + dh, dx + dw, dy,
                                     GL_COLOR_BUFFER_BIT, GL_LINEAR);
             /* the menu's "Save screenshot": the game's picture without the menu on top (read before the

@@ -1552,6 +1552,7 @@ void gx_pace_report(void) {
     }
 }
 
+static int g_picture_id = -1;
 static void efb_copy(uint32_t v) {
     uint32_t tl = g_gx.bp[0x49], wh = g_gx.bp[0x4A];
     uint32_t x = tl & 0x3FF, y = (tl >> 10) & 0x3FF, w = (wh & 0x3FF) + 1, h = ((wh >> 10) & 0x3FF) + 1;
@@ -1568,7 +1569,7 @@ static void efb_copy(uint32_t v) {
     c->copy[4] = to_xfb; c->copy[5] = clear;
     c->copy[6] = (g_gx.bp[0x4F] & 0xFFFF) << 16 | (g_gx.bp[0x50] & 0xFFFF);  /* A R G B */
     c->copy[7] = g_gx.bp[0x51] & 0xFFFFFF;
-    c->copy[8] = to_xfb ? 0xFFFFFFFFu
+    c->copy[8] = to_xfb ? (uint32_t)g_picture_id  /* -1: the EFB; else a picture to show instead (gx_picture_present) */
                         : (uint32_t)gx_texture_copy_target(dest, half ? w / 2 : w, half ? h / 2 : h);
     c->copy[9] = v;
     c->copy[10] = dest;
@@ -1774,3 +1775,24 @@ void gx_bp_written(uint32_t reg, uint32_t value) {
 }
 
 unsigned long long gx_frames_presented(void) { return g_frames; }
+
+/* GP thread (gx_fifo.c, our command GX_HOST_PICTURE): a picture the CPU made (movie_xfb.c, the opening
+ * movies written straight to the XFB) shown as a frame: an XFB copy whose source is that picture instead
+ * of the EFB, through the same path as the game's own frames (overlay, screenshots, [perf] lines) */
+void gx_picture_present(int slot) {
+    const uint8_t* movie_picture(int slot, uint32_t* w, uint32_t* h);
+    void movie_picture_done(int slot);
+    int gx_texture_picture(const uint8_t* rgba, uint32_t w, uint32_t h);
+    uint32_t w, h;
+    const uint8_t* px = movie_picture(slot, &w, &h);
+    if (!px) return;
+    g_picture_id = gx_texture_picture(px, w, h);
+    movie_picture_done(slot);
+    uint32_t s49 = g_gx.bp[0x49], s4a = g_gx.bp[0x4A];
+    g_gx.bp[0x49] = 0;
+    g_gx.bp[0x4A] = (w - 1) | (h - 1) << 10;
+    efb_copy(1u << 14);  /* to the XFB, no clear */
+    g_gx.bp[0x49] = s49;
+    g_gx.bp[0x4A] = s4a;
+    g_picture_id = -1;
+}

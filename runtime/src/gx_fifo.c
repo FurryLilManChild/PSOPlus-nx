@@ -27,6 +27,7 @@
 
 #define OS_INTERRUPT_PI_PE_TOKEN  18
 #define OS_INTERRUPT_PI_PE_FINISH 19
+#define GX_HOST_PICTURE 0xC1  /* not a GX opcode: the runtime's own (gx_host_picture) */
 
 GxState g_gx;
 
@@ -480,6 +481,13 @@ static size_t parse(const uint8_t* p, size_t len, int depth) {
             continue;
         }
         if (cmd == 0x44 || cmd == 0x48) { i++; continue; }              /* vertex cache invalidate */
+        if (cmd == GX_HOST_PICTURE && depth == 0) {                     /* ours: a CPU-made picture (movie_xfb.c) */
+            if (left < 2) break;
+            void gx_picture_present(int slot);
+            gx_picture_present(p[i + 1]);
+            i += 2;
+            continue;
+        }
         if (cmd == 0x61) {                                              /* LOAD_BP_REG */
             if (left < 5) break;
             load_bp(rd32(p + i + 1));
@@ -908,6 +916,16 @@ void gx_pi_write(uint32_t off, uint32_t v, int size) {
     case 0x14: g_pi_wptr = v & 0x07FFFFE0; break;
     default: g_pi_regs[off >> 2] = v; break;
     }
+}
+
+/* Game thread: show picture `slot` of movie_xfb.c as the next frame. A command of our own (the GX has no
+ * opcode 0xC1; it is not stored in the guest FIFO) behind everything the game queued so far, so the GP
+ * thread shows it in order with the game's own frames. */
+void gx_host_picture(int slot) {
+    uint8_t b[2] = {GX_HOST_PICTURE, (uint8_t)slot};
+    pipe_flush();
+    if (g_gx_async) { ring_push(b, 2); ring_kick(); }
+    else gp_feed(b, 2);
 }
 
 int gx_async(void) { return g_gx_async; }
