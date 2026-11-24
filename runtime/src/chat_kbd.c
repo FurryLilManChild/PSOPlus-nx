@@ -168,6 +168,8 @@ int platform_text_input(const char* header, char* out, size_t n) {
     (void)header;
     const char* t = getenv("SR_CHAT_TEXT");
     if (!t) return -1;
+    const char* d = getenv("SR_CHAT_DELAY_MS");  /* testing: the keyboard stays open this long */
+    if (d && atoi(d) > 0) platform_sleep_ns((uint64_t)atoi(d) * 1000000ull);
     snprintf(out, n, "%s", t);
     return 1;
 }
@@ -177,6 +179,8 @@ int platform_text_input(const char* header, char* out, size_t n) {
 void f_803F1548_orig(Cpu* c);
 void f_803F1604_orig(Cpu* c);
 void f_803F0E90_orig(Cpu* c);
+
+int chat_keyboard_open(void) { return atomic_load(&g_in_kbd); }
 
 static int virtual_chan(Cpu* c) { return atomic_load(&g_online) && (int32_t)c->r[3] == VCHAN; }
 

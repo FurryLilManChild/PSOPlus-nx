@@ -27,6 +27,8 @@
  *     (0x8007F970) going back to the previous scene only from the browser scene;
  *   - chat: text to key frames through layout tables of our own, the keyboard library hooks (the game's own
  *     library offline and for channels 0-2, a US keyboard on channel 3 online), a typed line frame by frame;
+ *   - out of focus 20 s (an applet in front) keeps the connection, so does a background report while the chat
+ *     keyboard is open;
  *   - back from HOME or sleep: away 3 s or unknown keeps the connection; away 20 s (wall clock) ends it: status
  *     state -6, send -6, the receive callback -6; socket errors to codes;
  *   - the callbacks run on the caller's registers, which are put back afterwards, below its stack pointer.
@@ -78,6 +80,7 @@ uint64_t platform_now_ns(void) {
 }
 static char g_save_path[256];
 const char* platform_save_path(void) { return g_save_path; }
+void platform_sleep_ns(uint64_t ns) { struct timespec ts = {(time_t)(ns / 1000000000ull), (long)(ns % 1000000000ull)}; nanosleep(&ts, NULL); }
 void platform_local_time(int* y, int* mo, int* d, int* h, int* mi, int* s) { *y = 2026; *mo = 11; *d = 23; *h = 20; *mi = 5; *s = 9; }
 static int g_backups;
 static char g_backup_path[4][512];
@@ -514,6 +517,29 @@ static void test_sleep_disconnect(uint16_t port) {
     net_frame(&g_c);
     call(hle_net_tcp_status, (uint32_t)h, STATE_EA, 0, SPACE_EA, X_EA, 0, 0);
     CHECK((int16_t)ld16(STATE_EA) == 4, "resume, time away unknown: kept (%d)", (int16_t)ld16(STATE_EA));
+    /* out of focus 20 s (an applet in front, e.g. the chat keyboard): kept */
+    net_platform_event_at(NET_EV_FOCUS_OUT, t, w);
+    net_platform_event_at(NET_EV_FOCUS_BACK, t + 20000000000ull, w + 20);
+    net_frame(&g_c);
+    call(hle_net_tcp_status, (uint32_t)h, STATE_EA, 0, SPACE_EA, X_EA, 0, 0);
+    CHECK((int16_t)ld16(STATE_EA) == 4, "out of focus 20 s: kept (%d)", (int16_t)ld16(STATE_EA));
+    /* a background report while our chat keyboard is open (belt and braces): not time away */
+    chat_set_online(1);
+    setenv("SR_CHAT_TEXT", "x", 1);
+    setenv("SR_CHAT_DELAY_MS", "400", 1);
+    chat_request();
+    for (int i = 0; i < 100 && !chat_keyboard_open(); i++) sleep_ms(2);
+    CHECK(chat_keyboard_open(), "the stand-in keyboard is open");
+    net_platform_event_at(NET_EV_FOCUS_LOST, t, w);
+    net_platform_event_at(NET_EV_FOCUS_BACK, t + 20000000000ull, w + 20);
+    net_frame(&g_c);
+    call(hle_net_tcp_status, (uint32_t)h, STATE_EA, 0, SPACE_EA, X_EA, 0, 0);
+    CHECK((int16_t)ld16(STATE_EA) == 4, "background while the chat keyboard is open: kept (%d)", (int16_t)ld16(STATE_EA));
+    for (int i = 0; i < 300 && chat_keyboard_open(); i++) sleep_ms(2);
+    for (int i = 0; i < 20; i++) chat_frame();  /* let the typed line finish */
+    chat_set_online(0);
+    unsetenv("SR_CHAT_TEXT");
+    unsetenv("SR_CHAT_DELAY_MS");
     /* asleep 20 s (the tick clock stood still, the wall clock did not): ended */
     net_platform_event_at(NET_EV_FOCUS_LOST, t, w);
     net_platform_event_at(NET_EV_RESUME, t + 1000000ull, w + 20);

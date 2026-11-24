@@ -31,7 +31,9 @@ int platform_net_ipconfig(NetIpConfig* out);  /* 1: filled from the system's cur
 int platform_net_link(void);   /* 1 the system has a connection, 0 it has none, -1 cannot tell */
 
 /* platform events (Switch: platform_switch.c's applet hook), handled on the game thread at the next frame */
-enum { NET_EV_RESUME = 1, NET_EV_FOCUS_LOST, NET_EV_FOCUS_BACK };
+/* FOCUS_LOST: the program went to the background (HOME menu or sleep); FOCUS_OUT: out of focus but in front
+ * (an applet over it, such as our own chat keyboard): not counted as time away */
+enum { NET_EV_RESUME = 1, NET_EV_FOCUS_LOST, NET_EV_FOCUS_BACK, NET_EV_FOCUS_OUT };
 void net_platform_event(int ev);
 void net_platform_event_at(int ev, uint64_t now_ns, long long wall_s);  /* the same at given times (tests) */
 int net_error_code(int err);  /* a socket errno on an open connection -> -6 (reset) or -7 (unreachable) */

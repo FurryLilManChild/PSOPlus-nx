@@ -53,8 +53,12 @@ static void applet_hook(AppletHookType type, void* param) {
         g_switch_log_input = 1;
     /* online (net_native.c): back after 15 s or more away (HOME or sleep) the connections are ended */
     if (type == AppletHookType_OnResume) net_platform_event(NET_EV_RESUME);
-    if (type == AppletHookType_OnFocusState)
-        net_platform_event(appletGetFocusState() == AppletFocusState_InFocus ? NET_EV_FOCUS_BACK : NET_EV_FOCUS_LOST);
+    if (type == AppletHookType_OnFocusState) {  /* time away counts only in the background (HOME, sleep), not while
+                                                    an applet such as the chat keyboard is in front (OutOfFocus) */
+        AppletFocusState fs = appletGetFocusState();
+        net_platform_event(fs == AppletFocusState_InFocus ? NET_EV_FOCUS_BACK
+                           : fs == AppletFocusState_Background ? NET_EV_FOCUS_LOST : NET_EV_FOCUS_OUT);
+    }
     if (type == AppletHookType_OnFocusState || type == AppletHookType_OnResume || type == AppletHookType_OnOperationMode ||
         type == AppletHookType_OnPerformanceMode)
         clk_on_applet(type);

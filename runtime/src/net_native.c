@@ -1528,8 +1528,11 @@ static void end_connections(int code, const char* why) {
     }
 }
 
+/* only FOCUS_LOST (background: HOME or sleep) starts the time away; FOCUS_OUT (our chat keyboard or another
+ * applet in front) does not */
 void net_platform_event_at(int ev, uint64_t now_ns, long long wall_s) {
     if (ev == NET_EV_FOCUS_LOST) {
+        if (chat_keyboard_open()) return;  /* our own chat keyboard is not time away */
         if (!atomic_load(&g_away_ns)) {
             atomic_store(&g_away_wall, wall_s);
             atomic_store(&g_away_ns, now_ns ? now_ns : 1);

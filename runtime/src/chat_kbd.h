@@ -22,7 +22,8 @@ int chat_steps_from_text(const uint8_t lower[0x80], const uint8_t upper[0x80], c
 
 void chat_request(void);     /* input (any thread): the chat button (right stick click) was pressed */
 void chat_frame(void);       /* the game thread, once a frame (net_frame): the next frame of typing */
-void chat_set_online(int on);  /* net_native.c: the virtual keyboard is there only while the network is up */
+void chat_set_online(int on);
+int chat_keyboard_open(void);  /* the system keyboard is on screen now */  /* net_native.c: the virtual keyboard is there only while the network is up */
 
 /* platform: the system's text entry (Switch: swkbd). Blocks the calling thread (not the game or render thread).
  * 1 text entered (UTF-8 in out), 0 cancelled, -1 not available here */

@@ -1,5 +1,16 @@
 # Progress log (newest first)
 
+## 2026-11-23: Online build 4, review fix 2 (our chat keyboard is not time away)
+
+- Review of 0d7b770: the applet hook counted every focus state other than InFocus as focus lost, including
+  AppletFocusState_OutOfFocus, which our own chat keyboard (swkbd) causes; typing for 15 s or more would have
+  ended the connections when the keyboard closed.
+- Fix: the time away starts only at AppletFocusState_Background (HOME menu or sleep); OutOfFocus (an applet in
+  front, such as the chat keyboard) is its own event and is not counted (platform_switch.c, net_native.c). A
+  background report while chat_kbd.c's keyboard is open is ignored as well.
+- Host test: 109 + 3 + 4 checks pass (gcc, clang), now with out of focus for 20 s (kept) and a background report
+  while the stand-in chat keyboard is open (kept; SR_CHAT_DELAY_MS keeps the PC stand-in open for testing).
+
 ## 2026-11-23: Online build 4, review fix (HOME and sleep: end connections only after 15 s away)
 
 - Review of fd9b7bd: AppletHookType_OnResume also comes after a short HOME visit (the default focus mode
