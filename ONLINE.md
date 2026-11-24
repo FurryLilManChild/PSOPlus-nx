@@ -60,8 +60,8 @@ needed with this port.** The port uses a built-in network profile and finds Scht
 
 ## Other servers
 
-The port's server is the `net_server` line in `sdmc:/switch/psoplus/settings.ini` (a host name or an IPv4
-address; empty means Schtserv). Other servers have their own registration rules; check their sites.
+Schtserv is the only supported server for now: it is the only one tested with this port. Other PSO servers
+may come in a later release.
 
 ## Server rules
 
