@@ -49,6 +49,15 @@ void hle_movie_xfb(Cpu* c) {
     if (w > PIC_W) w = PIC_W;
     if (h > PIC_H) h = PIC_H;
     w &= ~1u; h &= ~1u;
+    uint64_t yspan = (uint64_t)(h - 1) * ys + w, cspan = (uint64_t)(h / 2 - 1) * cs + w / 2;
+    if (!w || !h || yspan > GUEST_RAM_SIZE || cspan > GUEST_RAM_SIZE || !guest_span_ok(ya, (uint32_t)yspan) ||
+        !guest_span_ok(ua, (uint32_t)cspan) || !guest_span_ok(va, (uint32_t)cspan)) {
+        static int warned;
+        if (!warned++)
+            rt_log("[movie] frame planes outside game memory (Y %08X Cb %08X Cr %08X, strides %u %u, %ux%u): not shown",
+                   ya, ua, va, ys, cs, w, h);
+        return;
+    }
     int slot = g_next;
     if (atomic_load(&g_busy[slot])) {  /* the GP thread is still two pictures behind: skip this one */
         if (g_dropped++ < 5) rt_log("[movie] picture dropped (the GP thread is behind)");
@@ -56,6 +65,11 @@ void hle_movie_xfb(Cpu* c) {
     }
     g_next = (g_next + 1) % NSLOTS;
     if (!g_pic[slot]) g_pic[slot] = malloc((size_t)PIC_W * PIC_H * 4);
+    if (!g_pic[slot]) {
+        static int warned;
+        if (!warned++) rt_log("[movie] out of memory for the movie picture: not shown");
+        return;
+    }
     uint8_t* out = g_pic[slot];
     memset(out, 0, (size_t)PIC_W * PIC_H * 4);
     for (size_t i = 3; i < (size_t)PIC_W * PIC_H * 4; i += 4) out[i] = 255;

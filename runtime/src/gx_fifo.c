@@ -486,6 +486,7 @@ static size_t parse(const uint8_t* p, size_t len, int depth) {
             void gx_picture_present(int slot);
             gx_picture_present(p[i + 1]);
             i += 2;
+            mark = i;  /* not a GX command: kept out of an SR_DFF recording */
             continue;
         }
         if (cmd == 0x61) {                                              /* LOAD_BP_REG */

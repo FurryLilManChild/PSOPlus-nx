@@ -971,7 +971,8 @@ static void efb_copy(const GxCmd* c, const GxUniforms* u) {
         if (pic >= 0) {
             tex_prepare(pic);
             DkTex* t = tex_slot(pic);
-            if (t->live) {
+            GxTexture* gt = gx_texture_get(pic);
+            if (t->live && gt && t->gen == gt->gen) {  /* uploaded this frame (not skipped for a full stage area) */
                 float pa = settings_display_aspect() < 4.0f / 3.0f ? settings_display_aspect() : 4.0f / 3.0f;
                 uint32_t dw = FB_W, dh = FB_H;
                 if ((float)FB_W > FB_H * pa) dw = (uint32_t)(FB_H * pa + 0.5f);
@@ -980,7 +981,7 @@ static void efb_copy(const GxCmd* c, const GxUniforms* u) {
                 dkImageViewDefaults(&tv, &t->image);
                 DkImageRect ps = {0, 0, 0, t->w, t->h, 1};
                 DkImageRect dst = {(FB_W - dw) / 2, (FB_H - dh) / 2, 0, dw, dh, 1};
-                bar(DkBarrier_Primitives, 0);  /* the upload first */
+                bar(DkBarrier_Primitives, DkInvalidateFlags_Image);  /* the upload first, as for every texture */
                 dkCmdBufBlitImage(g_cmd, &tv, &ps, &fv, &dst, DkBlitFlag_FilterLinear, 0);
             }
             DkImageView const* efb_targets[1] = {&g_efb_view};
