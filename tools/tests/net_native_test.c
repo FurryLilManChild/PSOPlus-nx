@@ -6,9 +6,13 @@
  * server, a TCP server and a UDP peer on 127.0.0.1, each on its own thread. Checked:
  *   - the DNS codec against hand-built packets (a query for game04.st-pso.games.sega.net byte for byte; an
  *     answer with a CNAME and compression; NXDOMAIN; truncation; net_dns parsing);
- *   - DNS through the API: the server name asked of net_dns (answer written as {4, address}, count 1), a
- *     server name answered NXDOMAIN (-0x42), one never answered (-0x45 after the timeout), localhost through
- *     the system resolver;
+ *   - DNS through the API with a two-server list in net_dns whose first server never answers: the server name
+ *     answered by the second after 2 queries to the first (about 2 s; answer written as {4, address}, count
+ *     1), a server name answered NXDOMAIN (-0x42), one never answered (-0x45 after the timeout, 2 + 5
+ *     queries), localhost through the system resolver;
+ *   - the memory card backup at the network start: card_a.before-online.raw written only when missing (an
+ *     existing one is kept byte for byte), plus a dated one per session (run twice by the script: with and
+ *     without a first backup); the default DNS list (3.18.217.27, then 144.217.87.48) when net_dns is empty;
  *   - TCP: create, option, bind, connect, status until state 4, the one-shot receive callback with at most the
  *     armed length (3000 bytes arrive as 2048 + 952 over two armings), the bytes in the game's buffer, send of
  *     a {u16 length, u32 data} piece, the server's close as callback -8, close and delete; the memory card
@@ -60,10 +64,28 @@ uint64_t platform_now_ns(void) {
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
-const char* platform_save_path(void) { return "saves/card_a.raw"; }
+static char g_save_path[256];
+const char* platform_save_path(void) { return g_save_path; }
+void platform_local_time(int* y, int* mo, int* d, int* h, int* mi, int* s) { *y = 2026; *mo = 11; *d = 23; *h = 20; *mi = 5; *s = 9; }
 static int g_backups;
-static char g_backup_path[512];
-int exi_card_backup(const char* path) { g_backups++; snprintf(g_backup_path, sizeof g_backup_path, "%s", path); return 0; }
+static char g_backup_path[4][512];
+int exi_card_backup(const char* path) {  /* writes a stand-in card image */
+    if (g_backups < 4) snprintf(g_backup_path[g_backups], sizeof g_backup_path[0], "%s", path);
+    g_backups++;
+    FILE* f = fopen(path, "wb");
+    if (!f) return -1;
+    fputs("NEW CARD", f);
+    fclose(f);
+    return 0;
+}
+static int file_is(const char* path, const char* text) {
+    char b[64] = {0};
+    FILE* f = fopen(path, "rb");
+    if (!f) return 0;
+    size_t n = fread(b, 1, sizeof b - 1, f);
+    fclose(f);
+    return n == strlen(text) && !memcmp(b, text, n);
+}
 uint32_t mmio_read(uint32_t ea, int size) { (void)ea; (void)size; return 0; }
 void mmio_write(uint32_t ea, uint32_t v, int size) { (void)ea; (void)v; (void)size; }
 void mmio_write64(uint32_t ea, uint64_t v) { (void)ea; (void)v; }
@@ -203,6 +225,16 @@ static void* dns_server(void* arg) {
     }
 }
 
+static int g_silent_fd, g_silent_queries;
+static void* silent_server(void* arg) {  /* a DNS server that never answers */
+    (void)arg;
+    for (;;) {
+        uint8_t q[512];
+        if (recv(g_silent_fd, q, sizeof q, 0) <= 0) return NULL;
+        g_silent_queries++;
+    }
+}
+
 static int g_tcp_listen;
 static int g_srv_got;
 static uint8_t g_srv_buf[256];
@@ -286,19 +318,24 @@ static int dns_lookup(const char* name, uint8_t out[4], int max_ms) {
 
 static void test_dns(void) {
     uint8_t ip[4] = {0};
-    int r = dns_lookup("game04.st-pso.games.sega.net", ip, 3000);
-    CHECK(r == 0 && ip[0] == 127 && ip[3] == 1, "game04 via net_dns: %d %u.%u.%u.%u", r, ip[0], ip[1], ip[2], ip[3]);
-    CHECK(g_dns_last_n > 12 && g_dns_last_query[2] == 0x01 && g_dns_last_query[5] == 1, "the server got a standard query");
-    r = dns_lookup("GAME04.ST-PSO.GAMES.SEGA.NET.", ip, 3000);
-    CHECK(r == 0, "server name matched without case and with a trailing dot (%d)", r);
-    r = dns_lookup("ss702.sonicteam.com", ip, 3000);
-    CHECK(r == -0x42, "NXDOMAIN -> -0x42 (%d)", r);
-    int before = g_dns_queries;
     uint64_t t0 = platform_now_ns();
-    r = dns_lookup("ddplanet.sega.co.jp", ip, 6000);
+    int r = dns_lookup("game04.st-pso.games.sega.net", ip, 5000);
     unsigned ms = (unsigned)((platform_now_ns() - t0) / 1000000);
-    CHECK(r == -0x45 && ms >= 3400 && ms < 5000, "no answer -> -0x45 after the timeout (%d, %u ms)", r, ms);
-    CHECK(g_dns_queries - before == 4, "query sent 4 times (1 + 3 retries, %d)", g_dns_queries - before);
+    CHECK(r == 0 && ip[0] == 127 && ip[3] == 1, "game04 via net_dns: %d %u.%u.%u.%u", r, ip[0], ip[1], ip[2], ip[3]);
+    CHECK(g_silent_queries == 2 && g_dns_queries == 1 && ms >= 1900 && ms < 3500,
+          "first server asked twice, then the second answered (%d, %d queries, %u ms)", g_silent_queries, g_dns_queries, ms);
+    CHECK(g_dns_last_n > 12 && g_dns_last_query[2] == 0x01 && g_dns_last_query[5] == 1, "the server got a standard query");
+    r = dns_lookup("GAME04.ST-PSO.GAMES.SEGA.NET.", ip, 5000);
+    CHECK(r == 0, "server name matched without case and with a trailing dot (%d)", r);
+    r = dns_lookup("ss702.sonicteam.com", ip, 5000);
+    CHECK(r == -0x42, "NXDOMAIN -> -0x42 (%d)", r);
+    int before = g_dns_queries, sbefore = g_silent_queries;
+    t0 = platform_now_ns();
+    r = dns_lookup("ddplanet.sega.co.jp", ip, 9000);
+    ms = (unsigned)((platform_now_ns() - t0) / 1000000);
+    CHECK(r == -0x45 && ms >= 6400 && ms < 8000, "no answer -> -0x45 after the timeout (%d, %u ms)", r, ms);
+    CHECK(g_silent_queries - sbefore == 2 && g_dns_queries - before == 5, "queries: 2 to the first server, 5 to the second (%d, %d)",
+          g_silent_queries - sbefore, g_dns_queries - before);
     r = dns_lookup("localhost", ip, 3000);
     CHECK(r == 0 && ip[0] == 127, "another name through the system resolver (%d, %u.%u.%u.%u)", r, ip[0], ip[1], ip[2], ip[3]);
 }
@@ -321,8 +358,6 @@ static void test_tcp(uint16_t port) {
     put_addr(ADDR_EA, 127, 0, 0, 1);
     st32(OPT_EA, 4);
     CHECK(call(hle_net_tcp_connect, (uint32_t)h, ADDR_EA, port, OPT_EA, 0, 0, 0) == 0, "connect started");
-    CHECK(g_backups == 1 && !strcmp(g_backup_path, "saves/card_a.before-online.raw"), "card backup before the connect (%d, %s)",
-          g_backups, g_backup_path);
     int state = 0;
     for (int i = 0; i < 200 && state < 4; i++) {
         CHECK(call(hle_net_tcp_status, (uint32_t)h, STATE_EA, 0, SPACE_EA, X_EA, 0, 0) == 0, "status");
@@ -391,7 +426,6 @@ static void test_tcp(uint16_t port) {
         sleep_ms(5);
     }
     CHECK(state < 0, "refused connect -> negative state (%d)", state);
-    CHECK(g_backups == 1, "card backup only once a session (%d)", g_backups);
     call(hle_net_tcp_close, (uint32_t)h, 0, 0, 0, 0, 0, 0);
     call(hle_net_tcp_delete, (uint32_t)h, 0, 0, 0, 0, 0, 0);
 }
@@ -430,17 +464,50 @@ static void test_udp(void) {
     close(peer);
 }
 
+static const char* const k_dated = "build/tests/net/card_a.before-online-20261123-200509.raw";
+static const char* const k_first = "build/tests/net/card_a.before-online.raw";
+
+/* run 2 (--fresh): no first backup yet, net_dns empty: the first backup is written; the default list */
+static int fresh_run(void) {
+    remove(k_first);
+    remove(k_dated);
+    net_init();
+    call(hle_net_stack_init, 0, 0, 0, 0, 0, 0, 0);
+    CHECK(g_backups == 2 && file_is(k_first, "NEW CARD") && file_is(k_dated, "NEW CARD"),
+          "no first backup: it is written, and the dated one (%d)", g_backups);
+    call(hle_net_stack_init, 0, 0, 0, 0, 0, 0, 0);
+    CHECK(g_backups == 2, "once a session (%d)", g_backups);
+    NetStatus ns;
+    net_status(&ns);
+    CHECK(!strcmp(ns.dns, "3.18.217.27, then 144.217.87.48"), "default DNS list \"%s\"", ns.dns);
+    printf("net_native_test --fresh: %d checks, %d failed\n", g_checks, g_fail);
+    return g_fail != 0;
+}
+
 int main(int argc, char** argv) {
-    g_verbose = argc > 1 && !strcmp(argv[1], "-v");
+    int fresh = 0;
+    for (int i = 1; i < argc; i++) {
+        g_verbose |= !strcmp(argv[i], "-v");
+        fresh |= !strcmp(argv[i], "--fresh");
+    }
+    snprintf(g_save_path, sizeof g_save_path, "build/tests/net/card_a.raw");
     mem_init();
     reset_cpu();
+    if (fresh) return fresh_run();
     test_codec();
+    /* a good first backup from an earlier session: kept */
+    FILE* f = fopen(k_first, "wb");
+    if (f) { fputs("GOOD OLD CARD", f); fclose(f); }
+    remove(k_dated);
 
     uint16_t dport;
     g_dns_fd = udp_socket(&dport);
-    snprintf(g_settings.net_dns, sizeof g_settings.net_dns, "127.0.0.1:%u", dport);
-    pthread_t td;
+    uint16_t sport;
+    g_silent_fd = udp_socket(&sport);
+    snprintf(g_settings.net_dns, sizeof g_settings.net_dns, "127.0.0.1:%u,127.0.0.1:%u", sport, dport);
+    pthread_t td, ts;
     pthread_create(&td, NULL, dns_server, NULL);
+    pthread_create(&ts, NULL, silent_server, NULL);
 
     g_tcp_listen = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
@@ -454,7 +521,10 @@ int main(int argc, char** argv) {
     net_init();
     CHECK(call(hle_net_adapter_type, 0x80300300u, 0, 0, 0, 0, 0, 0) == 0 && ld32(0x80300300u) == 5, "adapter type 5");
     CHECK(call(hle_net_link_status, 0, 0, 0, 0, 0, 0, 0) == 1, "link up");
+    CHECK(g_backups == 0, "no backup before the network start");
     call(hle_net_stack_init, 0, 0, 0, 0, 0, 0, 0);
+    CHECK(file_is(k_first, "GOOD OLD CARD") && file_is(k_dated, "NEW CARD") && g_backups == 1,
+          "existing first backup kept, this session's dated one written (%d)", g_backups);
     st32(0x80300310u, 0); st32(0x80300314u, 0);
     CHECK(call(hle_net_dhcp_request, 0, 0, 0, 0, 0x80300310u, 0x80300314u, 0) == 0 && ld32(0x80300310u) != 0 &&
           ld32(0x80300314u) == 0xFFFFFF00u, "DHCP address %08X mask %08X", ld32(0x80300310u), ld32(0x80300314u));

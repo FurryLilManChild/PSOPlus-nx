@@ -671,8 +671,9 @@ void tab_system() {
     net_status(&ns);
     ImGui::Text("Server DNS: %s", ns.dns);
     ImGui::Text("Connection: %s", ns.state);
-    if (!ns.sockets_ok) warn("Network not available: online play will fail (see the log).");
-    note("Change the DNS server with net_dns= in settings.ini (default 144.217.87.48, Schtserv).");
+    if (ns.started && !ns.sockets_ok) warn("Network not available: online play will fail (see the log).");
+    note("Default: Schtserv's DNS 3.18.217.27, then 144.217.87.48 if it does not answer. To use another, set "
+         "net_dns= in settings.ini (one address, or two with a comma).");
     heading("Settings");
     ImGui::Text("Saved in %s", platform_settings_path());
     heading("Bug reports");

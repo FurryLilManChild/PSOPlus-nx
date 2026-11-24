@@ -9,9 +9,11 @@
  *   - DHCP: the system's own address, mask, gateway and DNS servers (Switch: nifm; elsewhere the address the
  *     host routes from, mask 255.255.255.0 and gateway .1, which only the game's screens show);
  *   - DNS: the game's three server names (game04.st-pso.games.sega.net, ss702.sonicteam.com,
- *     ddplanet.sega.co.jp: the table at 0x804A6FD8) are asked of the DNS server in settings.ini (net_dns,
- *     default Schtserv's 144.217.87.48) with a standard A query of our own; other names go to the system's
- *     resolver (Switch: its DNS server from nifm, same query code; PC: getaddrinfo);
+ *     ddplanet.sega.co.jp: the table at 0x804A6FD8) are asked with a standard A query of our own: by default of
+ *     Schtserv's DNS 3.18.217.27 (named by a Schtserv admin, forum post of Sep 2023), and of its older address
+ *     144.217.87.48 when the first gives no answer after 2 queries (about 2 s); settings.ini net_dns overrides
+ *     the list (one address, or two separated by a comma); other names go to the system's resolver (Switch:
+ *     its DNS server from nifm, same query code; PC: getaddrinfo);
  *   - TCP and UDP: non-blocking BSD sockets (libnx on the Switch, Winsock on Windows). Handles keep the
  *     library's ranges (TCP 0..3, UDP 0x400 + n), address arguments its {u32 length 4, 4 address bytes in
  *     network order} structures, ports are plain numbers (the library's DNS opens port 0x35 = 53).
@@ -22,6 +24,8 @@
  * one-shot, as the library's: one callback per arming (the game re-arms from its update, 0x801DEA7C).
  * Nothing here waits: connect and DNS are polled (the game's own loops call the status and poll functions
  * every frame), and a send the socket cannot take at once is queued and sent from the pump.
+ * Sockets and nifm start at the game's first network start (avetcp init), not at boot: offline play runs
+ * as it did before this file. The memory card is backed up at that point too (backup_card).
  * All of it runs on guest threads, one at a time (sched.c), so no locking; the menu reads a status line under
  * a mutex. Log lines start with [net]. */
 #if defined(_WIN32)
@@ -150,8 +154,11 @@ enum { DNS_ERR_NONAME = -0x42, DNS_ERR_TIMEOUT = -0x45, DNS_ERR_NOSLOT = -0x40 }
 enum { TS_CLOSED = 0, TS_SYN_SENT = 2, TS_ESTABLISHED = 4, TS_CLOSE_WAIT = 5 };
 #define TX_LIMIT (1u << 20)        /* queued send data beyond this: the connection is stuck */
 #define CONNECT_TIMEOUT_NS 20000000000ull
-#define DNS_RETRY_NS 1000000000ull
-#define DNS_TIMEOUT_NS 3500000000ull
+#define DNS_RETRY_NS 1000000000ull     /* a query again after 1 s without an answer */
+#define DNS_NEXT_QUERIES 2             /* queries to one server before the next server in the list is asked */
+#define DNS_TIMEOUT_NS 6500000000ull   /* the whole lookup (the game itself waits up to 5400 frames) */
+#define DNS_SERVERS_DEFAULT "3.18.217.27,144.217.87.48"  /* Schtserv's current DNS, then its older address */
+#define MAX_DNS_SERVERS 2
 
 typedef struct Tcp {
     int used;
@@ -179,8 +186,10 @@ typedef struct Dns {
     int used;
     int result;             /* 1 pending, 0 done (ip), < 0 a DNS_ERR_* code */
     char name[256];
-    uint8_t server[4];
-    uint16_t sport;
+    uint8_t servers[MAX_DNS_SERVERS][4];
+    uint16_t sports[MAX_DNS_SERVERS];
+    int nservers, cur;      /* the server list for this lookup and the one being asked now */
+    int cur_sends;          /* queries sent to servers[cur] */
     sock_t fd;
     uint16_t qid;
     uint64_t t0, t_sent;
@@ -196,9 +205,11 @@ static int g_sock_ok;               /* platform_net_init succeeded */
 static int g_open;                  /* sockets or lookups in use: net_frame has work */
 static NetIpConfig g_cfg;           /* what the DHCP calls report */
 static int g_cfg_from_system;
-static uint8_t g_dns_server[4];     /* settings.ini net_dns */
-static uint16_t g_dns_port = 53;
-static int g_backup_done;
+static uint8_t g_dns_server[MAX_DNS_SERVERS][4];  /* settings.ini net_dns, or DNS_SERVERS_DEFAULT */
+static uint16_t g_dns_port[MAX_DNS_SERVERS];
+static int g_dns_count;
+static int g_dns_override;          /* net_dns was set */
+static int g_net_started;           /* platform_net_init tried (the game's first network start) */
 static uint64_t g_stat_t0, g_stat_tx, g_stat_rx, g_stat_utx, g_stat_urx;
 static int g_link_cached = -2;
 static uint64_t g_link_t;
@@ -226,6 +237,7 @@ void net_status(NetStatus* out) {
     snprintf(out->console_ip, sizeof out->console_ip, "%u.%u.%u.%u%s", g_cfg.ip[0], g_cfg.ip[1], g_cfg.ip[2],
              g_cfg.ip[3], g_cfg_from_system ? "" : " (worked out)");
     out->sockets_ok = g_sock_ok;
+    out->started = g_net_started;
 }
 
 #define IP4(a) (a)[0], (a)[1], (a)[2], (a)[3]
@@ -294,16 +306,42 @@ static void count_open(void) {
     g_open = n;
 }
 
-static void read_dns_setting(void) {
-    uint16_t port = 0;
-    if (!dns_parse_ipv4(g_settings.net_dns, g_dns_server, &port)) {
-        rt_log("[net] settings.ini net_dns=\"%s\" is not an IPv4 address (a.b.c.d or a.b.c.d:port): using %s",
-               g_settings.net_dns, SETTINGS_NET_DNS_DEFAULT);
-        dns_parse_ipv4(SETTINGS_NET_DNS_DEFAULT, g_dns_server, &port);
+/* "a.b.c.d[:port][,a.b.c.d[:port]]": 1 and the list, 0 when any part is not an IPv4 address */
+static int parse_server_list(const char* text) {
+    char buf[64];
+    snprintf(buf, sizeof buf, "%s", text);
+    int n = 0;
+    for (char* part = buf; part && n < MAX_DNS_SERVERS;) {
+        char* comma = strchr(part, ',');
+        if (comma) *comma = 0;
+        while (*part == ' ') part++;
+        uint16_t port = 0;
+        if (!dns_parse_ipv4(part, g_dns_server[n], &port)) return 0;
+        g_dns_port[n++] = port ? port : 53;
+        part = comma ? comma + 1 : NULL;
     }
-    g_dns_port = port ? port : 53;
-    if (g_dns_port == 53) snprintf(g_server_str, sizeof g_server_str, "%u.%u.%u.%u", IP4(g_dns_server));
-    else snprintf(g_server_str, sizeof g_server_str, "%u.%u.%u.%u:%u", IP4(g_dns_server), g_dns_port);
+    g_dns_count = n;
+    return n > 0;
+}
+
+static void read_dns_setting(void) {
+    g_dns_override = g_settings.net_dns[0] != 0;
+    if (!g_dns_override || !parse_server_list(g_settings.net_dns)) {
+        if (g_dns_override)
+            rt_log("[net] settings.ini net_dns=\"%s\" is not one or two IPv4 addresses (a.b.c.d or a.b.c.d:port, a comma "
+                   "between two): using the default %s", g_settings.net_dns, DNS_SERVERS_DEFAULT);
+        g_dns_override = 0;
+        parse_server_list(DNS_SERVERS_DEFAULT);
+    }
+    size_t k = 0;
+    g_server_str[0] = 0;
+    for (int i = 0; i < g_dns_count && k < sizeof g_server_str; i++) {
+        int w = g_dns_port[i] == 53 ? snprintf(g_server_str + k, sizeof g_server_str - k, "%s%u.%u.%u.%u", i ? ", then " : "",
+                                               IP4(g_dns_server[i]))
+                                    : snprintf(g_server_str + k, sizeof g_server_str - k, "%s%u.%u.%u.%u:%u", i ? ", then " : "",
+                                               IP4(g_dns_server[i]), g_dns_port[i]);
+        if (w > 0) k += (size_t)w;
+    }
 }
 
 /* the address this machine sends from (a UDP socket "connected" to the DNS server sends nothing) */
@@ -311,7 +349,7 @@ static int local_address(uint8_t ip[4]) {
     sock_t s = socket(AF_INET, SOCK_DGRAM, 0);
     if (s == BAD_SOCK) return 0;
     struct sockaddr_in sa;
-    sa_make(&sa, g_dns_server, g_dns_port);
+    sa_make(&sa, g_dns_server[0], g_dns_port[0]);
     int ok = 0;
     if (connect(s, (struct sockaddr*)&sa, sizeof sa) == 0) {
         struct sockaddr_in me;
@@ -345,8 +383,8 @@ static void refresh_ipconfig(const char* when) {
     memcpy(g_cfg.mask, mask, 4);
     memcpy(g_cfg.gateway, g_cfg.ip, 3);
     g_cfg.gateway[3] = 1;
-    memcpy(g_cfg.dns1, g_dns_server, 4);
-    memcpy(g_cfg.dns2, g_dns_server, 4);
+    memcpy(g_cfg.dns1, g_dns_server[0], 4);
+    memcpy(g_cfg.dns2, g_dns_server[g_dns_count > 1], 4);
     rt_log("[net] %s: no address from the system; the game is told %u.%u.%u.%u, mask %u.%u.%u.%u, gateway "
            "%u.%u.%u.%u (worked out; only the game's screens show these)", when, IP4(g_cfg.ip), IP4(g_cfg.mask),
            IP4(g_cfg.gateway));
@@ -370,25 +408,51 @@ static void net_exit(void) {
 void net_init(void) {
     mtx_init(&g_status_lock, mtx_plain);
     read_dns_setting();
+    rt_log("[net] native sockets in place of the game's network library; started when the game first starts its "
+           "network. Server names asked of DNS %s (%s)", g_server_str, g_dns_override ? "settings.ini net_dns" : "default");
+}
+
+/* the game's first network start: the platform's sockets (Switch: bsd:u and nifm) */
+static void net_start(void) {
+    if (g_net_started) return;
+    g_net_started = 1;
     g_sock_ok = platform_net_init() == 0;
-    rt_log("[net] native sockets in place of the game's network library: %s; server names asked of DNS %s "
-           "(settings.ini net_dns)", g_sock_ok ? "ready" : "NOT available (online play will fail)", g_server_str);
+    rt_log("[net] sockets %s", g_sock_ok ? "ready" : "NOT available (online play will fail)");
     if (g_sock_ok) rt_atexit(net_exit);
 }
 
 /* ---------------------------------------------------------------- save safety */
-static void backup_card_once(void) {
+/* At the game's first network start of a session (before it writes its network settings file or goes online):
+ *   saves/card_a.before-online.raw            the first one ever; never overwritten
+ *   saves/card_a.before-online-YYYYMMDD-HHMMSS.raw  one per session (a new name each time; the player deletes old ones)
+ * both the in-memory card image, which the card file catches up with 0.5 s after the game's last write. */
+static int g_backup_done;
+static void backup_card(void) {
     if (g_backup_done) return;
     g_backup_done = 1;
-    char path[512];
-    snprintf(path, sizeof path, "%s", platform_save_path());
-    size_t n = strlen(path);
-    if (n > 4 && !strcmp(path + n - 4, ".raw")) path[n - 4] = 0;
-    strncat(path, ".before-online.raw", sizeof path - strlen(path) - 1);
-    int r = exi_card_backup(path);
-    if (r == 0) rt_log("[net] memory card backed up to %s before the first online connection of this session", path);
-    else if (r == 1) rt_log("[net] no memory card file in use (a fresh card in memory): no backup made");
-    else rt_log("[net] could NOT write the memory card backup %s (the connection goes ahead)", path);
+    char base[512], first[560], dated[600];
+    snprintf(base, sizeof base, "%s", platform_save_path());
+    size_t n = strlen(base);
+    if (n > 4 && !strcmp(base + n - 4, ".raw")) base[n - 4] = 0;
+    snprintf(first, sizeof first, "%s.before-online.raw", base);
+    int y, mo, d, h, mi, se;
+    platform_local_time(&y, &mo, &d, &h, &mi, &se);
+    snprintf(dated, sizeof dated, "%s.before-online-%04d%02d%02d-%02d%02d%02d.raw", base, y, mo, d, h, mi, se);
+    FILE* f = fopen(first, "rb");
+    int have_first = f != NULL;
+    if (f) fclose(f);
+    if (!have_first) {
+        int r = exi_card_backup(first);
+        if (r == 1) { rt_log("[net] no memory card file in use (a fresh card in memory): no backup made"); return; }
+        rt_log(r == 0 ? "[net] memory card backed up to %s (the first backup; it is never overwritten)"
+                      : "[net] could NOT write the memory card backup %s (online play goes ahead)", first);
+    } else {
+        rt_log("[net] %s exists: kept as it is", first);
+    }
+    int r = exi_card_backup(dated);
+    if (r == 1) rt_log("[net] no memory card file in use (a fresh card in memory): no backup made");
+    else rt_log(r == 0 ? "[net] memory card backed up to %s (this session's backup)"
+                       : "[net] could NOT write the memory card backup %s (online play goes ahead)", dated);
 }
 
 /* ---------------------------------------------------------------- adapter, link, stack lifecycle */
@@ -407,7 +471,7 @@ void hle_net_link_status(Cpu* c) {
     FIRST_CALL("link status");
     uint64_t now = platform_now_ns();
     if (g_link_cached == -2 || now - g_link_t > 1000000000ull) {
-        int l = g_sock_ok ? platform_net_link() : 0;
+        int l = !g_net_started ? -1 : g_sock_ok ? platform_net_link() : 0;  /* -1 before the network start */
         int up = l != 0;  /* -1: the platform cannot tell (PC): up */
         if (up != g_link_cached) rt_log("[net] link %s%s", up ? "up" : "DOWN", l < 0 ? " (assumed: no system status here)" :
                                                                   up ? "" : " (the system has no network connection)");
@@ -431,6 +495,8 @@ void hle_net_stack_memory(Cpu* c) {  /* 0x803F8470(heap, size): the game's memor
 
 void hle_net_stack_init(Cpu* c) {  /* 0x80421674: avetcp init (the BBA driver attach and the stack's threads) */
     FIRST_CALL("stack init");
+    backup_card();
+    net_start();
     rt_log("[net] network library init (from %08X): native sockets %s", c->lr, g_sock_ok ? "ready" : "NOT available");
     refresh_ipconfig("network start");
     set_status("network started (%u.%u.%u.%u)", IP4(g_cfg.ip));
@@ -572,7 +638,7 @@ static void dns_send(Dns* d) {
     uint8_t q[300];
     size_t n = dns_build_query(q, sizeof q, d->qid, d->name);
     struct sockaddr_in sa;
-    sa_make(&sa, d->server, d->sport);
+    sa_make(&sa, d->servers[d->cur], d->sports[d->cur]);
     if (!n) { dns_finish(d, DNS_ERR_NONAME, "the name cannot be put in a query"); return; }
     if (sendto(d->fd, (const char*)q, (int)n, 0, (struct sockaddr*)&sa, sizeof sa) < 0) {
         int e = sock_errno();
@@ -584,6 +650,7 @@ static void dns_send(Dns* d) {
         }
     }
     d->sends++;
+    d->cur_sends++;
     d->t_sent = platform_now_ns();
 }
 
@@ -606,6 +673,8 @@ static void dns_step(Dns* d) {
             rt_log("[net] DNS %s: ignored a %d-byte reply (%s)", d->name, n, r == DNS_MALFORMED ? "malformed" : "not ours");
             continue;
         }
+        if (r == DNS_OK || r == DNS_NXDOMAIN || r == DNS_NO_A || r == DNS_SERVFAIL)
+            rt_log("[net] DNS %s: answer from %u.%u.%u.%u:%u", d->name, IP4((uint8_t*)&from.sin_addr), ntohs(from.sin_port));
         if (r == DNS_OK) { dns_finish(d, 0, ""); return; }
         char why[80];
         snprintf(why, sizeof why, "%s (RCODE %d)", r == DNS_NXDOMAIN ? "no such name" : r == DNS_NO_A ?
@@ -615,10 +684,18 @@ static void dns_step(Dns* d) {
     }
     uint64_t now = platform_now_ns();
     if (now - d->t0 > DNS_TIMEOUT_NS) {
-        char why[64];
-        snprintf(why, sizeof why, "no answer from %u.%u.%u.%u:%u after %d queries", IP4(d->server), d->sport, d->sends);
+        char why[96];
+        snprintf(why, sizeof why, "no answer from %s after %d queries", d->nservers > 1 ? "either server" : "the server",
+                 d->sends);
         dns_finish(d, DNS_ERR_TIMEOUT, why);
     } else if (now - d->t_sent > DNS_RETRY_NS) {
+        if (d->cur + 1 < d->nservers && d->cur_sends >= DNS_NEXT_QUERIES) {
+            d->cur++;
+            d->cur_sends = 0;
+            rt_log("[net] DNS %s: no answer from %u.%u.%u.%u:%u after %d queries; asking %u.%u.%u.%u:%u", d->name,
+                   IP4(d->servers[d->cur - 1]), d->sports[d->cur - 1], DNS_NEXT_QUERIES, IP4(d->servers[d->cur]),
+                   d->sports[d->cur]);
+        }
         dns_send(d);
     }
 }
@@ -658,18 +735,23 @@ void hle_net_dns_start(Cpu* c) {
         dns_finish(d, 0, "");
         return;
     }
+    net_start();
     if (!g_sock_ok) {
         d->via = "no sockets";
         dns_finish(d, DNS_ERR_NONAME, "native sockets are not available");
         return;
     }
     if (name_is_server(d->name)) {
-        memcpy(d->server, g_dns_server, 4);
-        d->sport = g_dns_port;
-        d->via = "the game's server name, asked of net_dns";
+        for (int k = 0; k < g_dns_count; k++) {
+            memcpy(d->servers[k], g_dns_server[k], 4);
+            d->sports[k] = g_dns_port[k];
+        }
+        d->nservers = g_dns_count;
+        d->via = g_dns_override ? "the game's server name, asked of net_dns" : "the game's server name, asked of Schtserv's DNS";
     } else if (g_cfg_from_system && (g_cfg.dns1[0] | g_cfg.dns1[1] | g_cfg.dns1[2] | g_cfg.dns1[3])) {
-        memcpy(d->server, g_cfg.dns1, 4);
-        d->sport = 53;
+        memcpy(d->servers[0], g_cfg.dns1, 4);
+        d->sports[0] = 53;
+        d->nservers = 1;
         d->via = "another name, asked of the system's DNS server";
     } else {
         /* PC: the system's resolver (blocks this one call; the game only ever asks its three names) */
@@ -691,7 +773,8 @@ void hle_net_dns_start(Cpu* c) {
         }
         return;
     }
-    rt_log("[net] DNS %s: A query to %u.%u.%u.%u:%u (%s)", d->name, IP4(d->server), d->sport, d->via);
+    rt_log("[net] DNS %s: A query to %u.%u.%u.%u:%u (%s%s)", d->name, IP4(d->servers[0]), d->sports[0], d->via,
+           d->nservers > 1 ? "; the next server if it does not answer" : "");
     set_status("looking up %s", d->name);
     d->fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (d->fd == BAD_SOCK || sock_nonblock(d->fd)) {
@@ -808,6 +891,7 @@ static void tcp_check_connect(Tcp* t) {
 /* 0x80422DE4(): a new endpoint, returns its handle */
 void hle_net_tcp_create(Cpu* c) {
     FIRST_CALL("TCP create");
+    net_start();
     for (int i = 0; i < MAX_TCP; i++) {
         if (g_tcp[i].used) continue;
         Tcp* t = &g_tcp[i];
@@ -876,7 +960,6 @@ void hle_net_tcp_connect(Cpu* c) {
         return;
     }
     t->port = (uint16_t)c->r[5];
-    backup_card_once();
     struct sockaddr_in sa;
     sa_make(&sa, t->ip, t->port);
     t->t_connect = platform_now_ns();
@@ -1014,6 +1097,7 @@ static Udp* udp_get(uint32_t h) {
 /* 0x80421DEC(&{4, local}, local port, &{4, peer}, peer port, 0, callback): returns 0x400 + n */
 void hle_net_udp_open(Cpu* c) {
     FIRST_CALL("UDP open");
+    net_start();
     uint16_t lport = (uint16_t)c->r[4], pport = (uint16_t)c->r[6];
     uint8_t peer[4];
     get_addr(c->r[5], peer);

@@ -1,5 +1,26 @@
 # Progress log (newest first)
 
+## 2026-11-23: Online build 1, review fixes
+
+- Review of ac381cd (independent reviewer): replacements and pump sound; two fixes required, one recommended.
+- DNS servers: by default Schtserv's 3.18.217.27 (named by a Schtserv admin, forum post of Sep 2023,
+  schtserv.com/forums viewtopic p=14183), then its older 144.217.87.48 when the first has not answered 2
+  queries (about 2 s); 1 s retries, 6.5 s for the whole lookup (the game's own loop waits up to 5400 frames).
+  settings.ini net_dns overrides the list: one address (only that one is asked) or two separated by a comma;
+  empty (the default) means the two above. The log names the server that answered ("answer from a.b.c.d:53")
+  and each switch to the next server. Menu note updated.
+- Memory card backup at the game's first network start of a session (avetcp init 0x80421674, before the game
+  writes its network settings file or connects), no longer at the first TCP connect:
+  saves/card_a.before-online.raw is written only if it does not exist (the first backup is never
+  overwritten), and saves/card_a.before-online-YYYYMMDD-HHMMSS.raw once per session (a new name each time;
+  512 KiB each, the player deletes old ones).
+- Sockets (socketInitializeDefault) and nifm start at that same first network start (or the first lookup or
+  socket, whichever comes first), not at boot: a session that never goes online makes no socket or nifm call.
+  The adapter type report at boot is unchanged; link status before the start answers "up" without asking.
+- Host test: 71 + 3 checks pass (gcc, clang), now with a two-server list whose first server never answers
+  (answer from the second after 2 queries and about 2 s; timeout after 2 + 5 queries), the backup kept when it
+  exists and written when it does not (the script runs the test twice), the default list when net_dns is empty.
+
 ## 2026-11-23: Online build 1 (native sockets in place of the game's network library, option A)
 
 - Goal: from the title screen's online option, connect to Schtserv and reach its lobby with libnx BSD sockets.
@@ -14,15 +35,15 @@
 - IP set-up: the DHCP calls report the Switch's own address, mask, gateway and DNS servers from nifm
   (nifmGetCurrentIpConfigInfo); with no system address (PC) the address the host routes from, mask
   255.255.255.0, gateway .1 (only the game's screens show these). A PPPoE setting is connected as DHCP.
-- DNS: the three names of the server table 0x804A6FD8 are asked of settings.ini net_dns (default 144.217.87.48;
-  "a.b.c.d" or "a.b.c.d:port") with our own A query (runtime/src/net_dns.c), 1 s retries, 3.5 s timeout
+- DNS: the three names of the server table 0x804A6FD8 are asked of settings.ini net_dns (default 144.217.87.48,
+  changed by the review fixes below; "a.b.c.d" or "a.b.c.d:port") with our own A query (runtime/src/net_dns.c), 1 s retries, 3.5 s timeout
   (-0x45 to the game), no such name -0x42. Other names: the system's DNS server (Switch), getaddrinfo (PC).
 - TCP and UDP: non-blocking sockets; receive callbacks from a pump run after each display flip
   (frame_pacing.c, net_frame) on the game thread, on the caller's registers (saved and put back) in a
   0x80-byte frame below its stack pointer. One callback per arming, as the library (the game re-arms from
   0x801DEA7C). Sends that the socket cannot take at once are queued and sent from the pump.
 - Save safety: before the first TCP connect of a session the slot A card (the in-memory image) is written to
-  saves/card_a.before-online.raw (exi_card_backup). Port menu, System page: "Online": server DNS and
+  saves/card_a.before-online.raw (exi_card_backup; changed by the review fixes below). Port menu, System page: "Online": server DNS and
   connection state. Log: [net] lines (first call of each replacement, every lookup and answer, connect
   attempts and results with IP:port and errno, disconnects, traffic per 10 s).
 - Analysis re-read for this build (new findings, all in the disassembly): ports given to the library are

@@ -8,14 +8,15 @@
 extern "C" {
 #endif
 
-void net_init(void);         /* main.c, after settings_load: the platform's sockets, the net_dns setting */
+void net_init(void);         /* main.c, after settings_load: the net_dns setting (sockets start later) */
 void net_frame(Cpu* c);      /* frame_pacing.c, after each display flip, on the game thread: the pump */
 
 typedef struct NetStatus {   /* for the port menu (System page) */
     char state[128];         /* "not used yet", "connecting to ...", "connected to ...", "DNS failed ..." */
-    char dns[64];            /* the DNS server asked for the game's server names (settings.ini net_dns) */
+    char dns[64];            /* the DNS servers asked for the game's server names, in order */
     char console_ip[40];     /* what the game was told this console's address is */
     int sockets_ok;
+    int started;             /* the game has started its network this session (sockets tried) */
 } NetStatus;
 void net_status(NetStatus* out);  /* any thread */
 

@@ -16,7 +16,7 @@ Settings g_settings = {
     .grade_contrast = 100, .grade_sat = 100, .grade_warm = 0, .char_light = 0, .pc_fps = 0, .pad_background = 1,
     .sharpness = 0, .update_check = 0, .cpu_clock = 0,
     .pad_map = {SW_A, SW_B, SW_X, SW_Y, SW_R, SW_ZL, SW_ZR, SW_PLUS, SW_UP, SW_DOWN, SW_LEFT, SW_RIGHT},
-    .net_dns = SETTINGS_NET_DNS_DEFAULT,
+    .net_dns = "",  /* Schtserv's DNS servers (net_native.c) */
 };
 const int settings_pad_map_default[GC_INPUTS] = {SW_A, SW_B, SW_X, SW_Y, SW_R, SW_ZL, SW_ZR, SW_PLUS,
                                                  SW_UP, SW_DOWN, SW_LEFT, SW_RIGHT};
@@ -177,8 +177,8 @@ void settings_load(void) {
                 char* v = eq + 1;
                 v += strspn(v, " \t");
                 v[strcspn(v, "\r\n \t")] = 0;
-                if (*v && strlen(v) < sizeof g_settings.net_dns) snprintf(g_settings.net_dns, sizeof g_settings.net_dns, "%s", v);
-                else rt_log("[settings] net_dns \"%s\" is empty or too long: %s is used", v, g_settings.net_dns);
+                if (strlen(v) < sizeof g_settings.net_dns) snprintf(g_settings.net_dns, sizeof g_settings.net_dns, "%s", v);
+                else rt_log("[settings] net_dns \"%s\" is too long: the default DNS servers are used", v);
                 continue;
             }
             if (!strncmp(line, "map_", 4)) {
