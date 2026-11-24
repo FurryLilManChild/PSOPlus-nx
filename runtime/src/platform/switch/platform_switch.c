@@ -20,6 +20,7 @@
 #include <sys/stat.h>
 #include <switch.h>
 
+#include "chat_kbd.h"
 #include "net_native.h"
 #include "runtime.h"
 
@@ -50,6 +51,10 @@ static void applet_hook(AppletHookType type, void* param) {
     last = now;
     if (type == AppletHookType_OnResume || (type == AppletHookType_OnFocusState && appletGetFocusState() == AppletFocusState_InFocus))
         g_switch_log_input = 1;
+    /* online (net_native.c): after sleep the connections are ended; focus changes are logged */
+    if (type == AppletHookType_OnResume) net_platform_event(NET_EV_RESUME);
+    if (type == AppletHookType_OnFocusState)
+        net_platform_event(appletGetFocusState() == AppletFocusState_InFocus ? NET_EV_FOCUS_BACK : NET_EV_FOCUS_LOST);
     if (type == AppletHookType_OnFocusState || type == AppletHookType_OnResume || type == AppletHookType_OnOperationMode ||
         type == AppletHookType_OnPerformanceMode)
         clk_on_applet(type);
@@ -512,6 +517,30 @@ int platform_net_link(void) {
     if (!g_nifm_ok) return -1;
     u32 ip = 0;
     return R_SUCCEEDED(nifmGetCurrentIpAddress(&ip)) && ip != 0;
+}
+
+/* chat (chat_kbd.c): the system keyboard. Called on chat_kbd.c's own thread; the game, its network and the
+ * render thread run on behind it */
+int platform_text_input(const char* header, char* out, size_t n) {
+    SwkbdConfig kbd;
+    Result rc = swkbdCreate(&kbd, 0);
+    if (R_FAILED(rc)) {
+        rt_log("[switch] swkbdCreate 0x%X", rc);
+        return -1;
+    }
+    swkbdConfigMakePresetDefault(&kbd);
+    swkbdConfigSetType(&kbd, SwkbdType_Latin);
+    swkbdConfigSetHeaderText(&kbd, header);
+    swkbdConfigSetGuideText(&kbd, "Chat line (letters, digits and ASCII symbols)");
+    swkbdConfigSetStringLenMax(&kbd, 80);
+    out[0] = 0;
+    rc = swkbdShow(&kbd, out, n);
+    swkbdClose(&kbd);
+    if (R_FAILED(rc)) {
+        rt_log("[switch] swkbdShow 0x%X (cancelled?)", rc);
+        return 0;
+    }
+    return 1;
 }
 
 const char* platform_save_path(void) { return getenv("SR_CARD") ? getenv("SR_CARD") : BASE_DIR "/saves/card_a.raw"; }

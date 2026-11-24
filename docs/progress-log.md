@@ -1,5 +1,40 @@
 # Progress log (newest first)
 
+## 2026-11-23: Online build 4 (chat with the system keyboard, clean disconnects, small cleanups)
+
+- Chat (runtime/src/chat_kbd.c). How the game takes typed text, read in the disassembly: Sega's keyboard
+  library 0x803F0048-0x803F1E90 (per channel 0x68 bytes at 0x805A2720) is polled from the SI sampling
+  callback 0x801320CC: 0x8013206C tries channels 0-3 through 0x80131FC8, which reads 0x803F1604(channel, out)
+  (0 = a keyboard: out gets the up to 4 key codes held now, 0-terminated) and the layout 0x803F1548(channel).
+  Once a frame 0x80132650 turns the codes seen into presses (held now, not in the previous frame); the text
+  windows (TKeyBoardControl 0x80131D9C holds a TWindowKeyBoardHard and a TWindowKeyBoardSoft) turn presses into
+  characters with tables chosen by the layout (0x8025EE30: 1 = US, 0x8049E378 / 0x8049E3F8 shifted). Enter
+  0x61, Esc 0x4C, backspace 0x50, arrows 0x5C-0x5F are commands, 0x54 / 0x55 shift, 0x56 / 0x57 modifiers
+  (0x8025EC54, 0x8013240C); letters 0x10-0x29 (0x8025EC1C).
+- Choice: a virtual US keyboard on keyboard channel 3 (port 4) while the network is up (from the game's network
+  start to its stop): 0x803F1548, 0x803F1604 and 0x803F0E90 are replaced and run the game's own code for every
+  other channel and for all channels while offline, so offline play is unchanged. The right stick click (no
+  GameCube button; free in the default button map; ignored if the player mapped it) opens the system keyboard
+  (swkbd, Latin, up to 80 characters) on a thread of its own: the game, its network pump and the render thread
+  keep running behind it, so a long keyboard session does not stall the connection. The text is then typed one
+  character per two frames (key and shift held one frame, nothing the next) with the game's own US table read
+  backwards from guest memory, then Enter. Printable ASCII only (space is key 0x59, inferred: the table gives
+  it a command code); other characters are left out and counted in the log. Not chosen: the on-screen keyboard
+  window (its buffer and confirm flow would need a much larger hook).
+- Clean disconnects (net_native.c): after the console sleeps (applet OnResume) every open connection is ended
+  by the port (the game gets -6 on its next receive, send and status); while a connection is open the system's
+  network is checked once a second (an address from nifm) and two failed checks in a row end the connections
+  with -7 and report the link down; socket errors on an open connection map to -6 (reset, broken pipe, other)
+  or -7 (timed out, network or host unreachable, network down). A broken connection's status call now reports
+  that negative state, so the game's next send gives up at once. Focus changes are logged with the time away.
+  "[net] session end" (time, lookups, connections, disconnects and the last reason, bytes) when the game stops
+  its network and at exit if it had not.
+- Cleanups: the "[boot] the game tried to start switcher.dol" line at most once per 10 s (the scene still goes
+  back each time); settings.ini saves net_server empty when it is the default (empty reads as the default).
+- Host tests: net_native_test 104 + 3 checks, settings_net_test 4 checks, all pass (gcc, clang): chat text to
+  key frames (with layout tables of our own), the hooks offline and online, a typed line frame by frame, a sleep
+  while connected (-6 from status, send and the receive callback), errno mapping, the settings round trip.
+
 ## 2026-11-23: online test 3 (cdf10e9) results: Schtserv lobby reached
 
 - The owner reached the Schtserv lobby, created his own team (game) and teleported to Pioneer 2 in it.

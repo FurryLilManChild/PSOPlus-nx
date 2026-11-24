@@ -23,6 +23,7 @@
 #include <switch.h>
 
 #include "overlay.h"
+#include "chat_kbd.h"
 #include "runtime.h"
 #include "settings.h"
 
@@ -156,6 +157,13 @@ static GcPad read_player(int i, unsigned* ov) {
         if (p.buttons & B_L) p.trig_l = 0xFF;  /* digital buttons: a full press, as the old fixed ZL / ZR */
         if (p.buttons & B_R) p.trig_r = 0xFF;
         if (b & HidNpadButton_Minus) o |= OV_MENU;
+        if (i == 0) {  /* chat (chat_kbd.c): the right stick click, when the button map leaves it free; only online */
+            static u64 prev;
+            int mapped = 0;
+            for (int k = 0; k < GC_INPUTS; k++) mapped |= g_settings.pad_map[k] == SW_RSTICK;
+            if (!mapped && (b & HidNpadButton_StickR) && !(prev & HidNpadButton_StickR)) chat_request();
+            prev = b;
+        }
         if (b & HidNpadButton_Up) o |= OV_UP;
         if (b & HidNpadButton_Down) o |= OV_DOWN;
         if (b & HidNpadButton_Left) o |= OV_LEFT;

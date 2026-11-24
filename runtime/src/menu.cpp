@@ -676,6 +676,10 @@ void tab_system() {
     note("The game connects to net_server in settings.ini (default psobb.dyndns.org, Schtserv; a name or an IPv4 "
          "address). If that cannot be found: Schtserv's DNS 3.18.217.27, then 144.217.87.48. net_dns= (one address, "
          "or two with a comma) asks only those DNS servers instead.");
+#ifdef __SWITCH__
+    note("Chat: while online, press the right stick to type a line with the system keyboard (ASCII letters, digits "
+         "and symbols); it is typed into the game and sent with Enter.");
+#endif
     heading("Settings");
     ImGui::Text("Saved in %s", platform_settings_path());
     heading("Bug reports");

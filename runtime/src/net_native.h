@@ -30,6 +30,11 @@ void platform_net_exit(void);
 int platform_net_ipconfig(NetIpConfig* out);  /* 1: filled from the system's current connection */
 int platform_net_link(void);   /* 1 the system has a connection, 0 it has none, -1 cannot tell */
 
+/* platform events (Switch: platform_switch.c's applet hook), handled on the game thread at the next frame */
+enum { NET_EV_RESUME = 1, NET_EV_FOCUS_LOST, NET_EV_FOCUS_BACK };
+void net_platform_event(int ev);
+int net_error_code(int err);  /* a socket errno on an open connection -> -6 (reset) or -7 (unreachable) */
+
 int exi_card_backup(const char* path);  /* exi.c: 0 written, 1 no card file in use, -1 write error */
 
 #ifdef __cplusplus

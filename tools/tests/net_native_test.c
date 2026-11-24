@@ -25,9 +25,13 @@
  *   - the built-in network settings profile (0x80145A94): the storage started as the original does, the
  *     profile fields (entry 0, profile 0, kind 4, DHCP), the storage state and the loaded bit; the browser start
  *     (0x8007F970) going back to the previous scene only from the browser scene;
+ *   - chat: text to key frames through layout tables of our own, the keyboard library hooks (the game's own
+ *     library offline and for channels 0-2, a US keyboard on channel 3 online), a typed line frame by frame;
+ *   - a sleep while connected: status state -6, send -6, the receive callback -6; socket errors to codes;
  *   - the callbacks run on the caller's registers, which are put back afterwards, below its stack pointer.
  * Not game data: no file from the disc is read. Usage: tools/tests/run_net_native_test.sh */
 #include <arpa/inet.h>
+#include <errno.h>
 #include <netinet/in.h>
 #include <pthread.h>
 #include <stdarg.h>
@@ -39,6 +43,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "chat_kbd.h"
 #include "net_dns.h"
 #include "net_native.h"
 #include "runtime.h"
@@ -102,6 +107,21 @@ void gx_pipe_write(uint32_t v, int size) { (void)v; (void)size; }
 void gs_store(void) {}
 void f_801465C0(Cpu* c) { c->r[3] = 0; }
 void f_80373C80_orig(Cpu* c) { (void)c; }
+void f_803F1548_orig(Cpu* c) { c->r[3] = 0x77; }  /* the game's keyboard library: a marker */
+void f_803F1604_orig(Cpu* c) { c->r[3] = (uint32_t)-1; }
+void f_803F0E90_orig(Cpu* c) { c->r[3] = 0x55; }
+typedef struct { int (*fn)(void*); void* arg; } ThreadStart;
+static void* thread_tramp(void* p) { ThreadStart s = *(ThreadStart*)p; free(p); s.fn(s.arg); return NULL; }
+void rt_thread_start(int (*fn)(void*), void* arg) {
+    ThreadStart* s = malloc(sizeof *s);
+    s->fn = fn; s->arg = arg;
+    pthread_t t;
+    pthread_create(&t, NULL, thread_tramp, s);
+    pthread_detach(t);
+}
+void hle_kbd_type(Cpu* c);
+void hle_kbd_read(Cpu* c);
+void hle_kbd_detect(Cpu* c);
 
 /* the replacements under test */
 #define H(n) void hle_net_##n(Cpu* c);
@@ -280,6 +300,8 @@ static void* tcp_server(void* arg) {
     }
     usleep(100000);
     close(s);
+    int s2 = accept(g_tcp_listen, NULL, NULL);  /* the sleep test: held open */
+    if (s2 >= 0) { sleep(3); close(s2); }
     return NULL;
 }
 
@@ -409,6 +431,87 @@ static void test_server_name(uint16_t sport, uint16_t dport) {
     CHECK(!strcmp(ns.server, "psobb.dyndns.org"), "menu shows net_server (%s)", ns.server);
     snprintf(g_settings.net_dns, sizeof g_settings.net_dns, "%s", saved);
     unsetenv("SR_NET_FALLBACK_DNS");
+}
+
+/* chat: text -> key frames through (synthetic, our own) layout tables; the keyboard library hooks */
+static void test_chat(void) {
+    uint8_t lower[0x80], upper[0x80];
+    memset(lower, 0x1F, sizeof lower);
+    memset(upper, 0x1F, sizeof upper);
+    for (int i = 0; i < 26; i++) { lower[0x10 + i] = (uint8_t)('a' + i); upper[0x10 + i] = (uint8_t)('A' + i); }
+    for (int i = 0; i < 9; i++) lower[0x2A + i] = (uint8_t)('1' + i);
+    lower[0x33] = '0';
+    upper[0x2A] = '!';
+    ChatStep st[64];
+    int dropped = -1;
+    int n = chat_steps_from_text(lower, upper, "Hi 1!\xC3\xA9", st, 64, &dropped);
+    static const ChatStep want[] = {{0, 0}, {1, 0x17}, {0, 0}, {0, 0x18}, {0, 0}, {0, KB_SPACE}, {0, 0}, {0, 0x2A}, {0, 0},
+                                    {1, 0x2A}, {0, 0}, {0, KB_ENTER}, {0, 0}};
+    int same = n == (int)(sizeof want / sizeof *want);
+    for (int i = 0; same && i < n; i++) same = st[i].shift == want[i].shift && st[i].code == want[i].code;
+    CHECK(same && dropped == 1, "chat text -> key frames (%d steps, %d left out)", n, dropped);
+
+    /* the hooks: the game's own library offline and for channels 0-2; channel 3 a US keyboard while online */
+    chat_set_online(0);
+    CHECK(call(hle_kbd_type, 3, 0, 0, 0, 0, 0, 0) == 0x77 && (int)call(hle_kbd_read, 3, X_EA, 0, 0, 0, 0, 0) == -1 &&
+          call(hle_kbd_detect, 3, 0, 0, 0, 0, 0, 0) == 0x55, "offline: the game's own keyboard library");
+    chat_set_online(1);
+    CHECK(call(hle_kbd_type, 3, 0, 0, 0, 0, 0, 0) == 1 && call(hle_kbd_type, 0, 0, 0, 0, 0, 0, 0) == 0x77 &&
+          (int)call(hle_kbd_read, 0, X_EA, 0, 0, 0, 0, 0) == -1 && call(hle_kbd_detect, 3, 0, 0, 0, 0, 0, 0) == 0,
+          "online: channel 3 is a US keyboard, the others the game's library");
+    st32(X_EA, 0xFFFFFFFF);
+    CHECK(call(hle_kbd_read, 3, X_EA, 0, 0, 0, 0, 0) == 0 && ld32(X_EA) == 0, "nothing held");
+    /* a typed line: the system keyboard stand-in (SR_CHAT_TEXT), then one frame per step */
+    mem_write_bytes(0x8049E378u, lower, sizeof lower);
+    mem_write_bytes(0x8049E3F8u, upper, sizeof upper);
+    setenv("SR_CHAT_TEXT", "Ab", 1);
+    chat_request();
+    uint32_t seen[16];
+    int k = 0, idle = 0;
+    for (int f = 0; f < 400 && k < 16; f++) {
+        chat_frame();
+        st32(X_EA, 0xFFFFFFFF);
+        call(hle_kbd_read, 3, X_EA, 0, 0, 0, 0, 0);
+        uint32_t v = ld32(X_EA);
+        if (k == 0 && v == 0 && ++idle < 300) { sleep_ms(1); continue; }  /* until the thread has the text */
+        seen[k++] = v;
+        if (v == ((uint32_t)KB_ENTER << 24)) { st32(X_EA, 0); chat_frame(); call(hle_kbd_read, 3, X_EA, 0, 0, 0, 0, 0);
+                                               seen[k++] = ld32(X_EA); break; }
+    }
+    /* "Ab": shifted A (0x54, 0x10), nothing, b (0x11), nothing, Enter, nothing */
+    CHECK(k == 6 && seen[0] == 0x54100000u && seen[1] == 0 && seen[2] == 0x11000000u && seen[3] == 0 &&
+          seen[4] == 0x61000000u && seen[5] == 0, "typed frames (%d: %08X %08X %08X %08X %08X %08X)", k, seen[0], seen[1],
+          seen[2], seen[3], seen[4], seen[5]);
+    chat_set_online(0);
+    unsetenv("SR_CHAT_TEXT");
+}
+
+/* the console slept while connected: the port ends the connection, the game gets -6 */
+static void test_sleep_disconnect(uint16_t port) {
+    CHECK(net_error_code(ECONNRESET) == -6 && net_error_code(EPIPE) == -6 && net_error_code(ETIMEDOUT) == -7 &&
+          net_error_code(ENETDOWN) == -7 && net_error_code(EHOSTUNREACH) == -7, "socket errors -> the game's codes");
+    int h = (int16_t)call(hle_net_tcp_create, 0, 0, 0, 0, 0, 0, 0);
+    put_addr(ADDR_EA, 127, 0, 0, 1);
+    call(hle_net_tcp_connect, (uint32_t)h, ADDR_EA, port, OPT_EA, 0, 0, 0);
+    int state = 0;
+    for (int i = 0; i < 200 && state != 4; i++) {
+        call(hle_net_tcp_status, (uint32_t)h, STATE_EA, 0, SPACE_EA, X_EA, 0, 0);
+        state = (int16_t)ld16(STATE_EA);
+        sleep_ms(5);
+    }
+    CHECK(state == 4, "second connection up (%d)", state);
+    net_platform_event(NET_EV_RESUME);
+    net_frame(&g_c);
+    call(hle_net_tcp_status, (uint32_t)h, STATE_EA, 0, SPACE_EA, X_EA, 0, 0);
+    CHECK((int16_t)ld16(STATE_EA) == -6, "after sleep: status state -6 (%d)", (int16_t)ld16(STATE_EA));
+    st16(LIST_EA, 1); st32(LIST_EA + 4, SEND_EA);
+    CHECK((int)call(hle_net_tcp_send, (uint32_t)h, 0, 1, LIST_EA, 0, 0, 0) == -6, "after sleep: send -6");
+    int before = g_tcp_calls;
+    call(hle_net_tcp_receive, (uint32_t)h, TCP_CB, 0x800, TCPBUF_EA, 0, 0, 0);
+    net_frame(&g_c);
+    CHECK(g_tcp_calls == before + 1 && g_tcp_last_len == -6, "after sleep: receive callback -6 (%d)", g_tcp_last_len);
+    call(hle_net_tcp_close, (uint32_t)h, 0, 0, 0, 0, 0, 0);
+    call(hle_net_tcp_delete, (uint32_t)h, 0, 0, 0, 0, 0, 0);
 }
 
 static void pump(int ms) {
@@ -631,6 +734,8 @@ int main(int argc, char** argv) {
     test_dns();
     test_server_name(sport, dport);
     test_tcp(ntohs(a.sin_port));
+    test_sleep_disconnect(ntohs(a.sin_port));
+    test_chat();
     test_udp();
     CHECK(!g_bad_frame, "callbacks ran in a frame below the caller's stack pointer (%d bad)", g_bad_frame);
     NetStatus ns;

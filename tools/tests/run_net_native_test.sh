@@ -7,7 +7,9 @@ out=build/tests
 mkdir -p $out $out/net
 CC=${CC:-cc}
 FLAGS="-std=gnu11 -O2 -Wall -Wextra -Wno-unused-parameter -Iruntime/include -Iruntime/src"
-$CC $FLAGS tools/tests/net_native_test.c runtime/src/net_native.c runtime/src/net_dns.c runtime/src/memory.c \
+$CC $FLAGS tools/tests/net_native_test.c runtime/src/net_native.c runtime/src/net_dns.c runtime/src/chat_kbd.c runtime/src/memory.c \
     -lpthread -o $out/net_native_test
 $out/net_native_test "$@"
 $out/net_native_test --fresh "$@"
+$CC $FLAGS tools/tests/settings_net_test.c runtime/src/settings.c -lm -o $out/settings_net_test
+$out/settings_net_test

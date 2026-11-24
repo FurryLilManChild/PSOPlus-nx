@@ -303,7 +303,9 @@ void settings_apply(void) {
         int b = g_settings.pad_map[i];
         fprintf(f, "map_%s=%s\n", k_gc_key[i], b >= 0 && b < SW_BUTTONS ? k_sw_key[b] : k_sw_key[settings_pad_map_default[i]]);
     }
-    fprintf(f, "net_dns=%s\nnet_server=%s\n", g_settings.net_dns, g_settings.net_server);
+    /* net_server: empty when it is the default (the default may change in a later version) */
+    fprintf(f, "net_dns=%s\nnet_server=%s\n", g_settings.net_dns,
+            strcmp(g_settings.net_server, SETTINGS_NET_SERVER_DEFAULT) ? g_settings.net_server : "");
     int ok = fflush(f) == 0 && !ferror(f);
     if (fclose(f) != 0) ok = 0;
     if (!ok) {

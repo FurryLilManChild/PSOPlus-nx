@@ -100,3 +100,8 @@
 # Other programs on the disc and resets: logged ([boot] lines) instead of a silent hang
 8007F970 boot_browser        # game code: starts switcher.dol (the web browser); 0x8007FA7C, 0x8007F8BC
 80373C80 boot_reset          # OSResetSystem: logged, then the original
+# Chat (runtime/src/chat_kbd.c): a virtual US keyboard on keyboard channel 3 while the network is up; every
+# other channel, and all channels offline, run the game's keyboard library (0x803F0048-0x803F1E90) as before
+803F1548 kbd_type            # keyboard layout of a channel; 0x80132048
+803F1604 kbd_read            # key codes held now; 0x80132004 (SI callback, via 0x8013206C), 0x80132110, 0x801327F8
+803F0E90 kbd_detect          # start detection on a channel; 0x8013212C, 0x8013280C

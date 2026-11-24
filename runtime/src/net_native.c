@@ -46,11 +46,13 @@
 #include <unistd.h>
 #endif
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <threads.h>
 
+#include "chat_kbd.h"
 #include "net_dns.h"
 #include "net_native.h"
 #include "runtime.h"
@@ -115,6 +117,16 @@ static const char* err_name(int e) {
 #endif
 }
 
+/* a socket error on an open connection -> the library's code the game is given (net_native.h) */
+int net_error_code(int e) {
+#if defined(_WIN32)
+    if (e == WSAETIMEDOUT || e == WSAENETUNREACH || e == WSAEHOSTUNREACH || e == WSAENETDOWN) return -7;
+#else
+    if (e == ETIMEDOUT || e == ENETUNREACH || e == EHOSTUNREACH || e == ENETDOWN) return -7;  /* API_UNREACHABLE */
+#endif
+    return -6;  /* API_CONNRESET: reset, broken pipe, aborted, anything else */
+}
+
 static void sa_make(struct sockaddr_in* sa, const uint8_t ip[4], uint16_t port) {
     memset(sa, 0, sizeof *sa);
     sa->sin_family = AF_INET;
@@ -171,8 +183,9 @@ typedef struct Tcp {
     uint64_t t_connect;
     uint32_t cb, buf;       /* armed receive: the guest callback and buffer */
     int armed, armed_len;
-    int end;                /* 0, or the code to deliver once armed: API_RECVFIN (peer closed), API_CONNRESET */
+    int end;                /* 0, or the code to deliver once armed: API_RECVFIN (peer closed), API_CONNRESET, ... */
     int end_logged;
+    char end_why[48];       /* set when the port ends it (sleep, network lost) */
     uint8_t* tx;
     size_t txn, txcap;
     uint64_t sent, recvd;
@@ -217,6 +230,17 @@ static int g_net_started;           /* platform_net_init tried (the game's first
 static uint64_t g_stat_t0, g_stat_tx, g_stat_rx, g_stat_utx, g_stat_urx;
 static int g_link_cached = -2;
 static uint64_t g_link_t;
+
+/* the session summary ([net] session end): from the game's network start to its stop, or to the exit */
+static struct {
+    int active;
+    uint64_t t0;
+    unsigned connects, lookups, disconnects;
+    unsigned long long tx, rx, utx, urx;
+    char last_end[48];
+} g_sess;
+static _Atomic int g_ev_resume, g_ev_focus;  /* platform events (net_platform_event), handled in net_frame */
+static uint64_t g_focus_lost_ns, g_link_check_ns;
 
 static mtx_t g_status_lock;
 static char g_status[128] = "not used yet";
@@ -406,7 +430,18 @@ static void refresh_ipconfig(const char* when) {
            IP4(g_cfg.gateway));
 }
 
+static void session_end(const char* when) {
+    if (!g_sess.active) return;
+    g_sess.active = 0;
+    rt_log("[net] session end (%s): %.0f s since the network start, %u lookups, %u connections, %u disconnects; TCP "
+           "%llu bytes sent, %llu received; UDP %llu sent, %llu received", when, (platform_now_ns() - g_sess.t0) / 1e9,
+           g_sess.lookups, g_sess.connects, g_sess.disconnects, g_sess.tx + g_stat_tx, g_sess.rx + g_stat_rx,
+           g_sess.utx + g_stat_utx, g_sess.urx + g_stat_urx);
+    if (g_sess.last_end[0]) rt_log("[net]   last disconnect: %s", g_sess.last_end);
+}
+
 static void net_exit(void) {
+    session_end("at exit");
     for (int i = 0; i < MAX_TCP; i++)
         if (g_tcp[i].used && g_tcp[i].fd != BAD_SOCK) sock_close(g_tcp[i].fd);
     for (int i = 0; i < MAX_UDP; i++)
@@ -514,6 +549,12 @@ void hle_net_stack_init(Cpu* c) {  /* 0x80421674: avetcp init (the BBA driver at
     backup_card();
     net_start();
     rt_log("[net] network library init (from %08X): native sockets %s", c->lr, g_sock_ok ? "ready" : "NOT available");
+    if (!g_sess.active) {
+        memset(&g_sess, 0, sizeof g_sess);
+        g_sess.active = 1;
+        g_sess.t0 = platform_now_ns();
+    }
+    chat_set_online(g_sock_ok);
     refresh_ipconfig("network start");
     set_status("network started (%u.%u.%u.%u)", IP4(g_cfg.ip));
     c->r[3] = 0;
@@ -525,6 +566,8 @@ void hle_net_stack_term(Cpu* c) {  /* 0x80421620: avetcp term */
     for (int i = 0; i < MAX_TCP; i++) n += g_tcp[i].used;
     for (int i = 0; i < MAX_UDP; i++) n += g_udp[i].used;
     rt_log("[net] network library shut down by the game (%d sockets still open)", n);
+    session_end("the game stopped its network");
+    chat_set_online(0);
     set_status("network stopped");
     c->r[3] = 0;
 }
@@ -619,6 +662,18 @@ void hle_boot_browser(Cpu* c) {
         page[63] = 0;
     }
     uint32_t scene = get32(0x804FE120), prev = get32(0x804FE120 + 0x14);
+    static uint64_t last_log;
+    static unsigned quiet;
+    uint64_t now = platform_now_ns();
+    if (last_log && now - last_log < 10000000000ull) {  /* at most one line per 10 s */
+        quiet++;
+        if (scene == 19 && prev && prev != 19) call_guest3(c, 0x8000F9CC, prev, 0, 0);
+        c->r[3] = 1;
+        return;
+    }
+    last_log = now;
+    if (quiet) rt_log("[boot] (%u more browser starts in the last 10 s, not logged)", quiet);
+    quiet = 0;
     rt_log("[boot] the game tried to start switcher.dol (the disc's web browser, page \"%s\", from %08X): not "
            "supported%s", page, c->lr, scene == 19 && prev ? "; back to the previous screen" : "");
     if (scene == 19 && prev && prev != 19) call_guest3(c, 0x8000F9CC, prev, 0, 0);
@@ -962,6 +1017,7 @@ void hle_net_dns_start(Cpu* c) {
         dns_done(d, DNS_ERR_NONAME, "native sockets are not available");
         return;
     }
+    g_sess.lookups++;
     if (name_is_server(d->name)) {
         read_dns_setting();  /* settings.ini may have changed (menu) */
         dns_next(d, DNS_ERR_NONAME, "");
@@ -1028,8 +1084,9 @@ static void tcp_flush(Tcp* t) {
         if (n < 0) {
             int e = sock_errno();
             if (!err_wouldblock(e) && !t->end) {
-                rt_log("[net] TCP %u.%u.%u.%u:%u: send errno %d (%s)", IP4(t->ip), t->port, e, err_name(e));
-                t->end = API_CONNRESET;
+                t->end = net_error_code(e);
+                rt_log("[net] TCP %u.%u.%u.%u:%u: send errno %d (%s); the game is told %d", IP4(t->ip), t->port, e,
+                       err_name(e), t->end);
             }
             return;
         }
@@ -1148,6 +1205,7 @@ void hle_net_tcp_connect(Cpu* c) {
     sa_make(&sa, t->ip, t->port);
     t->t_connect = platform_now_ns();
     rt_log("[net] TCP connecting to %u.%u.%u.%u:%u (handle %d)", IP4(t->ip), t->port, (int)(t - g_tcp));
+    g_sess.connects++;
     set_status("connecting to %u.%u.%u.%u:%u", IP4(t->ip), t->port);
     if (connect(t->fd, (struct sockaddr*)&sa, sizeof sa) == 0) {
         t->state = TS_ESTABLISHED;
@@ -1176,6 +1234,7 @@ void hle_net_tcp_status(Cpu* c) {
     if (t->state == TS_ESTABLISHED && t->txn) tcp_flush(t);
     int state = t->state;
     if (state == TS_ESTABLISHED && t->end == API_RECVFIN) state = TS_CLOSE_WAIT;
+    else if (state == TS_ESTABLISHED && t->end) state = t->end;  /* broken: the game's next send gives up */
     put16(c->r[4], (uint16_t)state);
     put16(c->r[5], 0);
     /* the game closes the connection when its packet is not smaller than this (0x800786B0) */
@@ -1210,7 +1269,7 @@ void hle_net_tcp_send(Cpu* c) {
     int count = (int8_t)c->r[5];
     if (!t) { c->r[3] = (uint32_t)API_INVALIDHANDLE; return; }
     if (count < 0 || count > 3) { c->r[3] = (uint32_t)-2; return; }
-    if (t->state != TS_ESTABLISHED || t->end == API_CONNRESET) { c->r[3] = (uint32_t)API_CONNRESET; return; }
+    if (t->state != TS_ESTABLISHED || (t->end && t->end != API_RECVFIN)) { c->r[3] = (uint32_t)(t->end ? t->end : API_CONNRESET); return; }
     if (count != 1) {
         static int logged;
         if (!logged) { logged = 1; rt_log("[net] TCP send with %d pieces (the game was seen sending 1)", count); }
@@ -1394,14 +1453,18 @@ static void deliver_tcp(Cpu* c, Tcp* t, int idx) {
             int e = sock_errno();
             if (err_wouldblock(e)) return;
             rt_log("[net] TCP %u.%u.%u.%u:%u: receive errno %d (%s)", IP4(t->ip), t->port, e, err_name(e));
-            t->end = API_CONNRESET;
+            t->end = net_error_code(e);
         }
     }
     code = t->end;
     if (!t->end_logged) {
         t->end_logged = 1;
         rt_log("[net] TCP %u.%u.%u.%u:%u: %s; the game is told %d", IP4(t->ip), t->port,
-               code == API_RECVFIN ? "the server closed the connection" : "the connection broke", code);
+               code == API_RECVFIN ? "the server closed the connection" : t->end_why[0] ? t->end_why : "the connection broke",
+               code);
+        g_sess.disconnects++;
+        snprintf(g_sess.last_end, sizeof g_sess.last_end, "%s", code == API_RECVFIN ? "closed by the server" :
+                 t->end_why[0] ? t->end_why : "connection broke");
         set_status("disconnected by %u.%u.%u.%u:%u", IP4(t->ip), t->port);
     }
     t->armed = 0;
@@ -1446,8 +1509,58 @@ static void deliver_udp(Cpu* c, Udp* u, int idx) {
     call_guest(c, u->cb, 1, info);
 }
 
+/* the port ends every open connection (the console slept, the system lost its network): the game gets `code` on
+ * its next receive or send and shows its own message */
+static void end_connections(int code, const char* why) {
+    for (int i = 0; i < MAX_TCP; i++) {
+        Tcp* t = &g_tcp[i];
+        if (!t->used || t->state != TS_ESTABLISHED || t->end) continue;
+        t->end = code;
+        snprintf(t->end_why, sizeof t->end_why, "%s", why);
+        rt_log("[net] TCP %u.%u.%u.%u:%u ended by the port: %s; the game is told %d", IP4(t->ip), t->port, why, code);
+    }
+}
+
+void net_platform_event(int ev) {  /* any thread (Switch: the applet hook on the render thread) */
+    if (ev == NET_EV_RESUME) atomic_store(&g_ev_resume, 1);
+    else if (ev == NET_EV_FOCUS_LOST) atomic_store(&g_ev_focus, 1);
+    else if (ev == NET_EV_FOCUS_BACK) atomic_store(&g_ev_focus, 2);
+}
+
+static void platform_events(void) {
+    int f = atomic_exchange(&g_ev_focus, 0);
+    uint64_t now = platform_now_ns();
+    if (f == 1) g_focus_lost_ns = now;
+    if (f == 2 && g_focus_lost_ns && g_open) {
+        rt_log("[net] back in focus after %.1f s away (connections kept; a dead one shows on its next use)",
+               (now - g_focus_lost_ns) / 1e9);
+        g_focus_lost_ns = 0;
+    }
+    if (atomic_exchange(&g_ev_resume, 0)) {
+        g_link_cached = -2;  /* the link is asked again */
+        end_connections(API_CONNRESET, "the console slept");
+    }
+    /* the system's network, once a second while a connection is open */
+    int any = 0;
+    for (int i = 0; i < MAX_TCP; i++) any |= g_tcp[i].used && g_tcp[i].state == TS_ESTABLISHED && !g_tcp[i].end;
+    if (any && g_sock_ok && now - g_link_check_ns > 1000000000ull) {
+        g_link_check_ns = now;
+        static int downs;
+        downs = platform_net_link() == 0 ? downs + 1 : 0;
+        if (downs >= 2) {  /* two checks in a row: not a passing hiccup of the system service */
+            downs = 0;
+            g_link_cached = 0;
+            g_link_t = now;
+            rt_log("[net] link DOWN (the system lost its network connection)");
+            end_connections(API_UNREACHABLE, "the system lost its network connection");
+        }
+    }
+}
+
 void net_frame(Cpu* c) {
+    chat_frame();
     if (!g_open) return;
+    platform_events();
     for (int i = 0; i < MAX_TCP; i++) {
         Tcp* t = &g_tcp[i];
         if (!t->used) continue;
@@ -1467,6 +1580,7 @@ void net_frame(Cpu* c) {
                    (now - g_stat_t0) / 1e9, (unsigned long long)g_stat_tx, (unsigned long long)g_stat_rx,
                    (unsigned long long)g_stat_utx, (unsigned long long)g_stat_urx);
         g_stat_t0 = now;
+        g_sess.tx += g_stat_tx; g_sess.rx += g_stat_rx; g_sess.utx += g_stat_utx; g_sess.urx += g_stat_urx;
         g_stat_tx = g_stat_rx = g_stat_utx = g_stat_urx = 0;
     }
 }
