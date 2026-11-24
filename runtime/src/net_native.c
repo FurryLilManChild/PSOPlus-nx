@@ -275,7 +275,7 @@ static void put_addr(uint32_t ea, const uint8_t ip[4]) {
  * registers (saved and put back after), a 0x80-byte frame below its stack pointer with a back chain. Returns
  * the callee's r3. extra_ea (if nonzero) gets the address of 0x40 free bytes inside that frame. */
 static uint32_t frame_base(Cpu* c) { return (c->r[1] - 0x80) & ~0xFu; }
-static uint32_t call_guest(Cpu* c, uint32_t fn, uint32_t r3, uint32_t r4) {
+static uint32_t call_guest3(Cpu* c, uint32_t fn, uint32_t r3, uint32_t r4, uint32_t r5) {
     uint32_t r[32], lr = c->lr, ctr = c->ctr, fpscr = c->fpscr;
     uint8_t cr[32], so = c->xer_so, ov = c->xer_ov, ca = c->xer_ca, bc = c->xer_bc;
     struct { double ps0, ps1; } f[32];
@@ -287,6 +287,7 @@ static uint32_t call_guest(Cpu* c, uint32_t fn, uint32_t r3, uint32_t r4) {
     c->r[1] = sp;
     c->r[3] = r3;
     c->r[4] = r4;
+    c->r[5] = r5;
     guest_call(c, fn);
     uint32_t ret = c->r[3];
     memcpy(c->r, r, sizeof r);
@@ -296,6 +297,7 @@ static uint32_t call_guest(Cpu* c, uint32_t fn, uint32_t r3, uint32_t r4) {
     c->xer_so = so; c->xer_ov = ov; c->xer_ca = ca; c->xer_bc = bc;
     return ret;
 }
+static uint32_t call_guest(Cpu* c, uint32_t fn, uint32_t r3, uint32_t r4) { return call_guest3(c, fn, r3, r4, 0); }
 
 /* ---------------------------------------------------------------- start-up, settings */
 static void count_open(void) {
@@ -535,6 +537,89 @@ NET_OK(ppp_term, "PPP term")
 NET_OK(ppp_mode, "PPPoE mode")
 NET_OK(ppp_modem, "modem parameters")
 NET_OK(ppp_disconnect, "PPP disconnect")
+
+/* ---------------------------------------------------------------- network settings (the setup browser's file) */
+/* 0x80145A94, the game's network settings load (boot 0x80146218; the online menu 0x8032C664; the browser
+ * scene 0x803354B4). The original starts Sega's settings storage (0x803F3BF8), then reads and checks the
+ * card's network settings file (written only by the disc's setup browser, switcher.dol / iwanaga.dol), and
+ * returns 1 when it was read and the adapter is a BBA. With no such file the online menu starts the browser
+ * (scene 19, 0x8032C678), which cannot run here. This replacement starts the storage as the original does,
+ * leaves the card alone, and puts in a built-in profile through the storage's own layout (its getters
+ * 0x803F5678 and the others read it):
+ *   struct at *0x805D79C0 (0x19D4 bytes, defaults written by 0x803F47BC: no selection, entry i -> profile i)
+ *   +0x002 s16  selected entry      = 0
+ *   +0x028 s16  entry 0's profile   = 0 (the default)
+ *   profile 0 (fields at struct + 0x210 * n):
+ *   +0x206 s16  kind                = 4 (Broadband Adapter; 0x803F5678 and the BBA getters require 4)
+ *   +0x2B0 u8   address method      = 0 (DHCP: 0x80145EE4 returns 1 for 0; 1 is PPPoE, 0x80145E90)
+ *   everything else 0: no fixed address, mask, gateway or DNS servers (the game then takes DNS from DHCP,
+ *   0x801471A0), no host name, no proxy.
+ * Then the storage's state 2 (what a successful read leaves, 0x803F3EA0) and the game's "settings loaded" bit
+ * (0x805D56CC bit 0). The game never writes this file (no game call reaches the storage's write functions). */
+void hle_net_settings_load(Cpu* c) {
+    FIRST_CALL("network settings load (built-in profile)");
+    put16(0x805D56CC, 0);
+    put32(0x805D7CC8, 5);  /* the adapter type cache (the original asks 0x8042EE4C here) */
+    if (get16(0x805D56CE)) {
+        call_guest3(c, 0x803F3D60, 0, 0, 0);  /* the storage's term, as the original */
+        put16(0x805D56CE, 0);
+    }
+    /* the storage init (0, the game's buffer from 0x801461EC, adapter type: a BBA (5) is passed as 4) */
+    int r = (int32_t)call_guest3(c, 0x803F3BF8, 0, get32(0x805D56C8), 4);
+    put16(0x805D56CE, 1);
+    uint32_t s = get32(0x805D79C0);
+    if (r != 0 || !span(s, 0x19D4)) {
+        rt_log("[net] network settings: the game's settings storage did not start (%d, struct %08X): no settings", r, s);
+        c->r[3] = 0;
+        return;
+    }
+    put16(s + 0x002, 0);
+    put16(s + 0x028, 0);
+    put16(s + 0x206, 4);
+    if (span(s + 0x2B0, 1)) st8(s + 0x2B0, 0);
+    put32(0x805D79A4, 2);
+    put16(0x805D56CC, (uint16_t)(get16(0x805D56CC) | 1));
+    static int logged;
+    if (!logged) {
+        logged = 1;
+        rt_log("[net] network settings: built-in profile (Broadband Adapter, DHCP, DNS from DHCP); the memory card's "
+               "network settings file is neither read nor written");
+    }
+    c->r[3] = 1;
+}
+
+/* ---------------------------------------------------------------- other programs on the disc */
+/* 0x8007F970(page): starts the disc's web browser (switcher.dol, then iwanaga.dol) at a page ("file:/sonic/
+ * index.html" for the Website, "file:/sonic/config.htm" for the network setup): it stops the video, audio and
+ * the GX (0x8037CA40, 0x8037C8B8, 0x8037BC54) and waits in 0x8038A058 for good. Not run here. In the browser
+ * scene (19, which does nothing but this) the game goes back to the scene it came from, through its own scene
+ * change (0x8000F9CC with the previous scene, 0x804FE120 + 0x14); from anywhere else it just returns. */
+void hle_boot_browser(Cpu* c) {
+    FIRST_CALL("start the disc's web browser");
+    char page[64] = "";
+    if (span(c->r[3], 1)) {
+        for (int i = 0; i < 63 && span(c->r[3] + (uint32_t)i, 1); i++) {
+            page[i] = (char)ld8(c->r[3] + (uint32_t)i);
+            if (!page[i]) break;
+        }
+        page[63] = 0;
+    }
+    uint32_t scene = get32(0x804FE120), prev = get32(0x804FE120 + 0x14);
+    rt_log("[boot] the game tried to start switcher.dol (the disc's web browser, page \"%s\", from %08X): not "
+           "supported%s", page, c->lr, scene == 19 && prev ? "; back to the previous screen" : "");
+    if (scene == 19 && prev && prev != 19) call_guest3(c, 0x8000F9CC, prev, 0, 0);
+    c->r[3] = 1;
+}
+
+/* OSResetSystem 0x80373C80: a reset or a return to the system menu (the game's exit 0x8000F8D8, the DOL chain
+ * load 0x8042E914, and 0x801E2C7C / 0x801E2CB8). Logged, then the original runs (it does not return here). */
+void f_80373C80_orig(Cpu* c);
+void hle_boot_reset(Cpu* c) {
+    rt_log("[boot] the game asked for a system reset (OSResetSystem(%d, 0x%X, %d) from %08X): not supported, the "
+           "game stops here; close it from the HOME menu", (int)c->r[3], c->r[4], (int)c->r[5], c->lr);
+    fflush(stderr);
+    f_80373C80_orig(c);
+}
 
 /* ---------------------------------------------------------------- DHCP and IP set-up (BBA path 0x80146B08) */
 /* 0x80424D58(iface, 0, 0, block, &ip, &mask, ..., 3): the lease. Returns 0 */

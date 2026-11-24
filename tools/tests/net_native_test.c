@@ -19,6 +19,9 @@
  *     backup once per session; a refused connect as a negative state;
  *   - UDP: open, a second open on the same local port refused (-3), send, the two-phase callback with the info
  *     block (handle, length, buffer, source address and port), close;
+ *   - the built-in network settings profile (0x80145A94): the storage started as the original does, the
+ *     profile fields (entry 0, profile 0, kind 4, DHCP), the storage state and the loaded bit; the browser start
+ *     (0x8007F970) going back to the previous scene only from the browser scene;
  *   - the callbacks run on the caller's registers, which are put back afterwards, below its stack pointer.
  * Not game data: no file from the disc is read. Usage: tools/tests/run_net_native_test.sh */
 #include <arpa/inet.h>
@@ -95,12 +98,14 @@ unsigned long long g_pipe_stores, g_pipe_bytes;
 void gx_pipe_write(uint32_t v, int size) { (void)v; (void)size; }
 void gs_store(void) {}
 void f_801465C0(Cpu* c) { c->r[3] = 0; }
+void f_80373C80_orig(Cpu* c) { (void)c; }
 
 /* the replacements under test */
 #define H(n) void hle_net_##n(Cpu* c);
 H(adapter_type) H(link_status) H(stack_init) H(dhcp_request) H(dns_start) H(dns_poll) H(dns_free) H(tcp_create)
 H(tcp_option) H(tcp_bind) H(tcp_connect) H(tcp_status) H(tcp_receive) H(tcp_send) H(tcp_close) H(tcp_delete)
-H(udp_open) H(udp_send) H(udp_close) H(ppp_status)
+H(udp_open) H(udp_send) H(udp_close) H(ppp_status) H(settings_load)
+void hle_boot_browser(Cpu* c);
 
 static int g_fail, g_checks;
 #define CHECK(cond, ...) do {                                                     \
@@ -148,7 +153,7 @@ static void put_addr(uint32_t ea, uint8_t a, uint8_t b, uint8_t cc, uint8_t d) {
 static int g_tcp_calls, g_tcp_last_len, g_tcp_last_h, g_udp_phase0, g_udp_phase1, g_udp_len;
 static uint8_t g_udp_src[4];
 static uint16_t g_udp_sport;
-static int g_bad_frame;
+static int g_bad_frame, g_storage_inits, g_storage_terms, g_scene_req = -1;
 void guest_call(Cpu* c, uint32_t addr) {
     if (c->r[1] >= STACK_TOP || c->r[1] < STACK_TOP - 0x100 || (c->r[1] & 15) || ld32(c->r[1]) != STACK_TOP) g_bad_frame++;
     if (addr == TCP_CB) {
@@ -169,6 +174,26 @@ void guest_call(Cpu* c, uint32_t addr) {
             g_udp_phase1++;
             g_udp_len = (int16_t)ld16(info + 2);
         }
+    } else if (addr == 0x803F3BF8u) {  /* the storage init: struct = the game's buffer, defaults (0x803F47BC) */
+        g_storage_inits++;
+        CHECK(c->r[3] == 0 && c->r[5] == 4, "storage init arguments (%u, %u)", c->r[3], c->r[5]);
+        uint32_t b = c->r[4];
+        st32(0x805D79C0u, b);
+        static uint8_t zero[0x19D4];
+        mem_write_bytes(b, zero, sizeof zero);
+        st16(b + 2, 0xFFFF);
+        for (int i = 0; i < 6; i++) st16(b + 0x28 + 0x28 * (uint32_t)i, (uint16_t)i);
+        st32(0x805D79A4u, 1);
+        c->r[0] = c->r[5] = c->r[11] = c->r[12] = 0xDEADBEEF;
+        c->r[3] = 0;
+        return;
+    } else if (addr == 0x803F3D60u) {
+        g_storage_terms++;
+        c->r[3] = 0;
+        return;
+    } else if (addr == 0x8000F9CCu) {  /* the game's scene change */
+        g_scene_req = (int)c->r[3];
+        return;
     } else {
         g_fail++;
         printf("FAIL: guest_call to unexpected %08X\n", addr);
@@ -464,6 +489,32 @@ static void test_udp(void) {
     close(peer);
 }
 
+/* the built-in network settings profile and the browser start (no sockets involved) */
+static void test_settings(void) {
+    st32(0x805D56C8u, 0x80330000u);  /* the game's 0x19D4-byte buffer (0x801461EC) */
+    st16(0x805D56CEu, 0);
+    st16(0x805D56CCu, 0);
+    CHECK(call(hle_net_settings_load, 0, 0, 0, 0, 0, 0, 0) == 1, "settings load reports success");
+    uint32_t b = 0x80330000u;
+    CHECK(ld32(0x805D79C0u) == b && (int16_t)ld16(b + 2) == 0 && ld16(b + 0x28) == 0 && ld16(b + 0x206) == 4 &&
+          ld8(b + 0x2B0) == 0, "profile: entry 0, profile 0, kind 4 (BBA), method 0 (DHCP)");
+    CHECK(ld32(b + 0x2B4) == 0 && ld32(b + 0x2B8) == 0, "no fixed address");
+    CHECK(ld32(0x805D79A4u) == 2 && (ld16(0x805D56CCu) & 1) && ld16(0x805D56CEu) == 1, "storage state 2, loaded bit set");
+    CHECK(g_storage_inits == 1 && g_storage_terms == 0, "storage started once");
+    CHECK(call(hle_net_settings_load, 0, 0, 0, 0, 0, 0, 0) == 1 && g_storage_inits == 2 && g_storage_terms == 1,
+          "a second load ends the storage first, as the original");
+    /* the browser start: from the browser scene back to the previous one, from elsewhere nothing */
+    mem_write_bytes(NAME_EA, "file:/sonic/config.htm", 23);
+    st32(0x804FE120u, 19); st32(0x804FE134u, 2);
+    g_scene_req = -1;
+    call(hle_boot_browser, NAME_EA, 0, 0, 0, 0, 0, 0);
+    CHECK(g_scene_req == 2, "browser scene: back to scene 2 (%d)", g_scene_req);
+    st32(0x804FE120u, 15);
+    g_scene_req = -1;
+    call(hle_boot_browser, NAME_EA, 0, 0, 0, 0, 0, 0);
+    CHECK(g_scene_req == -1, "elsewhere: no scene change (%d)", g_scene_req);
+}
+
 static const char* const k_dated = "build/tests/net/card_a.before-online-20261123-200509.raw";
 static const char* const k_first = "build/tests/net/card_a.before-online.raw";
 
@@ -495,6 +546,7 @@ int main(int argc, char** argv) {
     reset_cpu();
     if (fresh) return fresh_run();
     test_codec();
+    test_settings();
     /* a good first backup from an earlier session: kept */
     FILE* f = fopen(k_first, "wb");
     if (f) { fputs("GOOD OLD CARD", f); fclose(f); }

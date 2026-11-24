@@ -1,5 +1,41 @@
 # Progress log (newest first)
 
+## 2026-11-23: Online build 2 (built-in network settings, the browser start logged)
+
+- Console test of c72c225b (online build 1 with the review fixes): choosing Online gave a black screen; no
+  network start. Cause (the coordinator's reading, re-confirmed in the disassembly): the online menu object
+  0x8032C618 runs the network settings load 0x80145A94; with no network settings file on the card it returned
+  0, so the menu changes to scene 19 (0x8032C678 -> 0x8000F9CC(0x13); scene table 0x804805E0, scene 19 =
+  init 0x803354E8, update 0x803354A8). That scene only starts the disc's web browser: 0x8007FA24 picks the
+  page (0x8048DF88: "file:/sonic/config.htm" for the setup, "file:/sonic/index.html" when settings exist) and
+  0x8007F970 loads switcher.dol (0x80438D20), stops video, audio and GX (0x8037CA40, 0x8037C8B8, 0x8037BC54)
+  and waits in 0x8038A058 for good (the log's parked stack). One correction: scene 19 starts the browser in
+  both cases, so it is the browser scene rather than an "online" step; with settings present the menu never
+  goes there (0x8032C664 -> 0x8014797C, then the menu goes on).
+- The network settings (Sega's settings storage 0x803F2F1C-0x803F632C, read from the card file the disc's
+  setup browser writes): the game only reads it; no game code reaches the storage's write functions (all 32
+  game calls into the storage listed: init, term, card read, getters). Layout from the getters and the reset
+  to defaults 0x803F47BC: a 0x19D4-byte struct at *0x805D79C0, +2 the selected entry (-1 = none), entries of
+  0x28 bytes from +0x28 with the profile number, profiles at +0x210 * n with kind +0x206 (4 = Broadband
+  Adapter for 0x803F5678 and the other BBA getters, 1 = modem) and address method +0x2B0 (0 DHCP, 1 PPPoE,
+  other values fixed (inferred), from 0x80145EE4 / 0x80145E90). The consumer 0x80145F40 copies the BBA getters into 0x8050CCE8
+  (+0x120 = valid, which 0x80146B08 checks).
+- Change 1: 0x80145A94 is replaced (runtime/src/net_native.c, hle_net_settings_load): the storage is started
+  as the original does (0x803F3D60 if it was running, 0x803F3BF8(0, the game's buffer, 4)), the card is not
+  touched, and a built-in profile goes into the storage's struct: entry 0 selected, profile 0, kind 4, DHCP,
+  everything else 0 (no fixed addresses; DNS from DHCP, 0x801471A0). Storage state 2 (what a read leaves,
+  0x803F3EA0) and the game's loaded bit 0x805D56CC; returns 1. A network settings file on the card, if one
+  exists, is ignored.
+- Change 2: the browser start 0x8007F970 is replaced: "[boot] the game tried to start switcher.dol (the
+  disc's web browser, page ...): not supported". In scene 19 the game goes back to the screen it came from
+  (its own scene change 0x8000F9CC with the previous scene, 0x804FE120 + 0x14); from anywhere else (0x8007F898,
+  a second caller) it only returns. OSResetSystem 0x80373C80 logs "[boot] the game asked for a system reset"
+  and then runs as before (it does not come back): the reset hang itself is not fixed. No error message of the
+  game's own is shown: none was found that is safe to call from here.
+- Kept from c72c225: DNS fallback order, the card backup rule, sockets started at the first network start.
+- Host test: 81 + 3 checks pass (gcc, clang), now with the built-in profile (storage start, fields, state,
+  a second load) and the browser start (back to the previous scene only from scene 19).
+
 ## 2026-11-23: Online build 1, review fixes
 
 - Review of ac381cd (independent reviewer): replacements and pump sound; two fixes required, one recommended.

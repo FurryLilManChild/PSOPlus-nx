@@ -95,3 +95,8 @@
 803FB184 net_ppp_status      # 7 callers (0x80328590 only on the modem path)
 803FB1A4 net_ppp_disconnect  # 5 callers
 80146314 net_pppoe_as_dhcp   # game code: the PPPoE connect (0x80146BEC); calls the game's DHCP path 0x801465C0
+# Network settings (Sega's settings storage 0x803F2F1C-0x803F632C): a built-in profile, no card file
+80145A94 net_settings_load   # game code: boot 0x80146218, online menu 0x8032C664, browser scene 0x803354B4
+# Other programs on the disc and resets: logged ([boot] lines) instead of a silent hang
+8007F970 boot_browser        # game code: starts switcher.dol (the web browser); 0x8007FA7C, 0x8007F8BC
+80373C80 boot_reset          # OSResetSystem: logged, then the original
