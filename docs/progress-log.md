@@ -1,5 +1,30 @@
 # Progress log (newest first)
 
+## 2026-11-24: 0.6.1 test build (opening movies, RVZ, on 0.6.0)
+
+- Black movies, cause proven in the disassembly: the attract and new-game movies (psogc_j.sfd, psogc_j2.sfd)
+  run in the game's XFB mode. 0x80143C00 asks movie.rel for the decoded Y/Cb/Cr planes and 0x80143988 writes
+  them with the CPU as YUYV into the back XFB, then VISetNextFrameBuffer; no GX draw or EFB copy happens, and
+  the runtime presented only at an EFB-to-XFB copy. Nothing reads the guest XFB back.
+- Fix: 0x80143988 is replaced (hle.txt movie_xfb, runtime/src/movie_xfb.c): BT.601 video range to a 640x480
+  RGBA picture, centred as the game does, handed to the GP thread with a runtime-only command 0xC1 and shown 4:3
+  through the normal XFB copy path. Review fixes: plane pointers checked against backed memory, upload barrier,
+  shown only once uploaded, 0xC1 kept out of SR_DFF recordings.
+- The ending movies (ending_normal.sfd, ult01-04.sfd) are texture-mode (an RGBA8 texture drawn with GX) and
+  are not changed; not yet seen on the console.
+- main now carries release-0.6 (version, README, ONLINE.md) plus the RVZ conversion and the movie fix; version
+  0.6.1.
+
+## 2026-11-24: Online test 4 (two Switches on Schtserv) and release 0.6.0
+
+- Two Switches on the port played together on Schtserv (the owner and a community member). The other player was
+  first refused with "You are banned from this server" (No.100): a new Hunter's License made in the game must
+  have its serial registered on Schtserv's My HL page first. Documented in ONLINE.md.
+- The owner's log (build 44f503f0): DNS through the router in 1.1 s, login 9103 -> 9225 -> 9704, about 9 minutes
+  connected with no drop, all traffic over TCP (the game opened its peer UDP socket twice, 0 bytes), 30 fps in 58
+  of 76 readings at 1224 MHz, a 2.7 s HOME visit kept the connection and the clock was set again after it.
+- Release 0.6.0 is cut from that tested build on branch release-0.6 (version, README, ONLINE.md only). The RVZ
+  conversion (ab2a32e, 3123b4d on main) is not in it: not yet run on the console.
 ## 2026-11-24: First-start RVZ conversion on the Switch
 
 - Players often have Dolphin's .rvz. With no .iso/.gcm in sdmc:/switch/psoplus/ but an .rvz (or .wia), the first

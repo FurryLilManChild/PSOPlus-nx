@@ -2,11 +2,12 @@
 
 A native Nintendo Switch homebrew port of **Phantasy Star Online Episode I & II Plus** (GameCube, USA,
 revision 2, GPOE8P), made by static recompilation: the game's PowerPC code is translated ahead of time
-into C and compiled for the Switch. It is not an emulator. Offline play only.
+into C and compiled for the Switch. It is not an emulator. Offline play and online play on
+the Schtserv community server.
 
 **No game data is included.** You need your own copy of the game.
 
-Current release: **0.5.0** (first public test release).
+Current release: **0.6.0** (adds online play).
 
 ## What you need
 
@@ -55,9 +56,16 @@ moves, A chooses, B goes back or closes.
 - **Display**: resolution, field of view, sharpness (FSR 1), colour.
 - **Controls**: a button map for every GameCube button, and Reset to default. Holding Minus always opens the
   menu, whatever the map.
-- **System**: version, build, current clocks, screenshot.
+- **System**: version, build, current clocks, online status, screenshot.
 
 Settings are saved in `sdmc:/switch/psoplus/settings.ini`.
+
+## Online play
+
+Choose online from the game's title menu, as on a GameCube with a Broadband Adapter. The port connects to
+Schtserv by itself; no network setup is needed in the game. **First time on Schtserv: register your serial
+number first, see [ONLINE.md](ONLINE.md).** While online, press the right stick to chat with the Switch
+keyboard. Your memory card is backed up before each online session.
 
 ## Performance
 
@@ -67,10 +75,8 @@ resolutions and sharpness cost graphics time and can lower the frame rate in bus
 
 ## Known issues
 
-- Movies show a black picture with sound. Start skips them.
+- The ending movies use a different path from the opening movies and have not been checked on the console yet.
 - Resetting the game from inside the game can hang. Close it from the HOME menu instead.
-- Online play is not in the 0.5.0 release; it is in testing on the main branch. First-time Schtserv
-  setup: see [ONLINE.md](ONLINE.md).
 - Some busy areas dip below 30 fps at stock clocks.
 - The port menu does not pause the game (it keeps running behind the menu, with your buttons going to the
   menu), and the frame rate can drop while the menu is open.
