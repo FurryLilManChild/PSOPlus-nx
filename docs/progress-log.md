@@ -1,5 +1,18 @@
 # Progress log (newest first)
 
+## 2026-11-23: online test 3 (cdf10e9) results: Schtserv lobby reached
+
+- The owner reached the Schtserv lobby, created his own team (game) and teleported to Pioneer 2 in it.
+- Log (stamp cdf10e9d, about 250 s, CPU 1224 MHz by his menu setting): built-in network settings, first card
+  backup kept and this session's dated backup written, sockets and nifm started, DHCP from the system
+  (192.168.50.208/24, DNS 192.168.50.1), psobb.dyndns.org asked of 192.168.50.1 -> 3.18.217.27 in 1067 ms,
+  TCP 3.18.217.27:9103 connected in 3035 ms, then the server's redirects 9225 (96 ms) and 9704 (30 ms), and
+  steady TCP traffic in every 10 s window after that (up to 8188 bytes received). UDP 0 in both directions:
+  the server keeps game traffic on TCP, as expected.
+- No [net] errors, no stall, 30.0 fps in the game on Pioneer 2 (game work 9-15 ms, GPU 8-10 ms).
+- Not yet seen: other players in the same game, quests online, the session end (the log stops without a
+  shutdown line, so it was closed from HOME or by power), HOME/sleep while online, chat text entry.
+
 ## 2026-11-23: Online build 3 (the server's address from net_server, psobb.dyndns.org)
 
 - Console test of 6575100c: network start, card backups, DHCP from nifm (192.168.50.208/24, gateway .1),
