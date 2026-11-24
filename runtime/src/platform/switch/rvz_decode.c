@@ -5,6 +5,8 @@
  * default), any block size that is a multiple of 32 KiB, RVZ's packed groups with junk data (regenerated
  * with the disc's lagged Fibonacci generator, as Dolphin does), groups shared by several places (Dolphin
  * stores identical groups once) and all-zero groups. Wii images are refused (they need partition crypto).
+ * This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the MPL
+ * was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
  * Libraries: zstd (BSD), liblzma (0BSD / public domain), bzip2 (BSD-style), from devkitPro's portlibs. */
 #define _FILE_OFFSET_BITS 64
 #include "rvz_decode.h"
@@ -295,7 +297,7 @@ static int read_raw(RvzImage* m, uint64_t off, void* dst, size_t n) {
 }
 
 static int read_at(RvzImage* m, uint64_t off, void* dst, size_t n) {
-    if (off + n > m->fsize) return fail(m->err, m->errn, "the image file is incomplete (truncated download or copy?)");
+    if (off > m->fsize || n > m->fsize - off) return fail(m->err, m->errn, "the image file is incomplete (truncated download or copy?)");
     if (off >= m->win_off && off + n <= m->win_off + m->win_len) {
         memcpy(dst, m->win + (off - m->win_off), n);
         return 1;
@@ -324,6 +326,10 @@ static int grow(uint8_t** buf, size_t* cap, size_t need) {
 
 /* a table (raw data or group entries): stored with the image's compression, decompressed to exactly n bytes */
 static uint8_t* read_table(RvzImage* m, uint64_t off, uint32_t stored, size_t n) {
+    if (stored > m->fsize) {
+        fail(m->err, m->errn, "the image file is incomplete (truncated download or copy?)");
+        return NULL;
+    }
     uint8_t* in = malloc(stored ? stored : 1);
     uint8_t* out = malloc(n ? n : 1);
     if (!in || !out || !read_at(m, off, in, stored) || !decompress(m, in, stored, out, n)) {
@@ -469,6 +475,7 @@ static int group(RvzImage* m, uint32_t i, uint64_t disc_off, size_t n) {
         memset(m->out, 0, n);
         return 1;
     }
+    if (dsize > m->fsize) return fail(m->err, m->errn, "the image file is incomplete (truncated download or copy?)");
     if (!grow(&m->in, &m->in_cap, dsize)) return fail(m->err, m->errn, "out of memory");
     if (!read_at(m, (uint64_t)o4 * 4, m->in, dsize)) return 0;
     const uint8_t* d = m->in;
@@ -528,6 +535,8 @@ int rvz_extract(RvzImage* m, RvzSink sink, void* user, char* err, size_t errn) {
     if (!emit(&e, m->dhead, 0x80)) return 0;
     for (uint32_t r = 0; r < m->nraw; r++) {
         const RawEntry* re = &m->raws[r];
+        if (re->off >= m->iso_size || re->size > UINT64_MAX - re->off)
+            return fail(err, errn, "a data entry lies outside the disc (damaged image?)");
         uint64_t end = re->off + re->size;
         if (end > m->iso_size) end = m->iso_size;
         uint64_t start = re->off - re->off % BLOCK; /* entries start at a 32 KiB boundary inside their first group */

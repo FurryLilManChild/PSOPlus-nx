@@ -281,7 +281,13 @@ static void convert(const char* src, const char* dst, RvzImage* img) {
     }
     pthread_mutex_init(&c.mx, NULL);
     pthread_cond_init(&c.cv, NULL);
-    pthread_create(&c.th, NULL, writer, &c);
+    if (pthread_create(&c.th, NULL, writer, &c) != 0) {
+        close(c.fd);
+        remove(part);
+        rvz_close(img);
+        screen_fail("Cannot write the converted disc image", "The writer thread could not be started.", NULL,
+                    "Restart the port and try again.");
+    }
     rvz_sha1_init(&c.sha);
     appletSetAutoSleepDisabled(true);
     screen_open();
