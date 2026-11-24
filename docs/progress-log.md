@@ -1,5 +1,16 @@
 # Progress log (newest first)
 
+## 2026-11-24: Online test 4 (two Switches on Schtserv) and release 0.6.0
+
+- Two Switches on the port played together on Schtserv (the owner and a community member). The other player was
+  first refused with "You are banned from this server" (No.100): a new Hunter's License made in the game must
+  have its serial registered on Schtserv's My HL page first. Documented in ONLINE.md.
+- The owner's log (build 44f503f0): DNS through the router in 1.1 s, login 9103 -> 9225 -> 9704, about 9 minutes
+  connected with no drop, all traffic over TCP (the game opened its peer UDP socket twice, 0 bytes), 30 fps in 58
+  of 76 readings at 1224 MHz, a 2.7 s HOME visit kept the connection and the clock was set again after it.
+- Release 0.6.0 is cut from that tested build on branch release-0.6 (version, README, ONLINE.md only). The RVZ
+  conversion (ab2a32e, 3123b4d on main) is not in it: not yet run on the console.
+
 ## 2026-11-23: Online build 4, review fix 2 (our chat keyboard is not time away)
 
 - Review of 0d7b770: the applet hook counted every focus state other than InFocus as focus lost, including
