@@ -1,5 +1,28 @@
 # Progress log (newest first)
 
+## 2026-11-23: Online build 3 (the server's address from net_server, psobb.dyndns.org)
+
+- Console test of 6575100c: network start, card backups, DHCP from nifm (192.168.50.208/24, gateway .1),
+  interface, route and resolver set-up all ran; then "DNS game04.st-pso.games.sega.net: no answer from
+  3.18.217.27:53 after 2 queries; asking 144.217.87.48:53 ... FAILED: no answer from either server after 7
+  queries, 6504 ms, -0x45"; the game showed error 102 and shut its stack down cleanly. Neither Schtserv DNS
+  answered from the owner's network.
+- ragol.org's / Schtserv's Action Replay code for US v1.02 Plus writes "psobb.dyndns.org" over the hostname at
+  0x8043EDA0, and that name resolves (from the cloud, getent) to 3.18.217.27: the server's own name in
+  ordinary DNS, no DNS redirect needed.
+- Change: for the game's three server names, the game now gets the address of settings.ini net_server
+  (default psobb.dyndns.org; an IPv4 address there is used as it is; net_server=off skips this), looked up
+  with the system's resolver: on the Switch our A query to the DNS servers nifm reports (the second one after
+  2 unanswered queries, 4.5 s for this step), on PC getaddrinfo (one call). If that fails, the game's own name
+  is asked of Schtserv's DNS (3.18.217.27, then 144.217.87.48) as in build 2, then the game gets the error.
+  net_dns, when set, replaces both steps as before (the game's name asked of it only). SR_NET_FALLBACK_DNS
+  (env.txt) replaces Schtserv's list, for testing. The poll contract is unchanged (start returns at once,
+  -1 until done). Log: the method and the address ("-> a.b.c.d (net_server, asked of the system's DNS
+  servers, N ms)"), and "net_server ... failed (...): asking the DNS servers for ..." on the fallback. Menu:
+  "Server" (net_server) and "Then DNS" lines, note updated.
+- Host test: 94 + 3 checks pass (gcc, clang), now with net_server through the system resolver (localhost), an
+  address in net_server, an unknown net_server falling back to the DNS list in order, and net_server=off.
+
 ## 2026-11-23: Online build 2 (built-in network settings, the browser start logged)
 
 - Console test of c72c225b (online build 1 with the review fixes): choosing Online gave a black screen; no

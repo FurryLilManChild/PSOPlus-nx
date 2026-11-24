@@ -13,6 +13,7 @@ void net_frame(Cpu* c);      /* frame_pacing.c, after each display flip, on the 
 
 typedef struct NetStatus {   /* for the port menu (System page) */
     char state[128];         /* "not used yet", "connecting to ...", "connected to ...", "DNS failed ..." */
+    char server[64];         /* settings.ini net_server (looked up first), "off", or not used (net_dns set) */
     char dns[64];            /* the DNS servers asked for the game's server names, in order */
     char console_ip[40];     /* what the game was told this console's address is */
     int sockets_ok;

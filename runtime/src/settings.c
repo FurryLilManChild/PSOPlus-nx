@@ -17,6 +17,7 @@ Settings g_settings = {
     .sharpness = 0, .update_check = 0, .cpu_clock = 0,
     .pad_map = {SW_A, SW_B, SW_X, SW_Y, SW_R, SW_ZL, SW_ZR, SW_PLUS, SW_UP, SW_DOWN, SW_LEFT, SW_RIGHT},
     .net_dns = "",  /* Schtserv's DNS servers (net_native.c) */
+    .net_server = SETTINGS_NET_SERVER_DEFAULT,
 };
 const int settings_pad_map_default[GC_INPUTS] = {SW_A, SW_B, SW_X, SW_Y, SW_R, SW_ZL, SW_ZR, SW_PLUS,
                                                  SW_UP, SW_DOWN, SW_LEFT, SW_RIGHT};
@@ -181,6 +182,15 @@ void settings_load(void) {
                 else rt_log("[settings] net_dns \"%s\" is too long: the default DNS servers are used", v);
                 continue;
             }
+            if (!strcmp(line, "net_server")) {  /* empty: the default */
+                char* v = eq + 1;
+                v += strspn(v, " \t");
+                v[strcspn(v, "\r\n \t")] = 0;
+                if (strlen(v) < sizeof g_settings.net_server)
+                    snprintf(g_settings.net_server, sizeof g_settings.net_server, "%s", *v ? v : SETTINGS_NET_SERVER_DEFAULT);
+                else rt_log("[settings] net_server \"%s\" is too long: %s is used", v, g_settings.net_server);
+                continue;
+            }
             if (!strncmp(line, "map_", 4)) {
                 eq[1 + strcspn(eq + 1, "\r\n \t")] = 0;
                 load_map_entry(line + 4, eq + 1);
@@ -293,7 +303,7 @@ void settings_apply(void) {
         int b = g_settings.pad_map[i];
         fprintf(f, "map_%s=%s\n", k_gc_key[i], b >= 0 && b < SW_BUTTONS ? k_sw_key[b] : k_sw_key[settings_pad_map_default[i]]);
     }
-    fprintf(f, "net_dns=%s\n", g_settings.net_dns);
+    fprintf(f, "net_dns=%s\nnet_server=%s\n", g_settings.net_dns, g_settings.net_server);
     int ok = fflush(f) == 0 && !ferror(f);
     if (fclose(f) != 0) ok = 0;
     if (!ok) {

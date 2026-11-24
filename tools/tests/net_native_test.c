@@ -10,6 +10,9 @@
  *     answered by the second after 2 queries to the first (about 2 s; answer written as {4, address}, count
  *     1), a server name answered NXDOMAIN (-0x42), one never answered (-0x45 after the timeout, 2 + 5
  *     queries), localhost through the system resolver;
+ *   - the server-name path with net_dns empty: net_server through the system resolver (localhost), an address
+ *     in net_server used as it is, an unknown net_server falling back to the DNS list (first server twice, then
+ *     the second), net_server=off going to the list directly;
  *   - the memory card backup at the network start: card_a.before-online.raw written only when missing (an
  *     existing one is kept byte for byte), plus a dated one per session (run twice by the script: with and
  *     without a first backup); the default DNS list (3.18.217.27, then 144.217.87.48) when net_dns is empty;
@@ -365,6 +368,49 @@ static void test_dns(void) {
     CHECK(r == 0 && ip[0] == 127, "another name through the system resolver (%d, %u.%u.%u.%u)", r, ip[0], ip[1], ip[2], ip[3]);
 }
 
+/* the game's server names with net_dns empty: net_server first (system resolver; an address as it is), then
+ * the fallback DNS list (SR_NET_FALLBACK_DNS = the two loopback servers, in place of Schtserv's) */
+static void test_server_name(uint16_t sport, uint16_t dport) {
+    char list[64];
+    snprintf(list, sizeof list, "127.0.0.1:%u,127.0.0.1:%u", sport, dport);
+    setenv("SR_NET_FALLBACK_DNS", list, 1);
+    char saved[48];
+    snprintf(saved, sizeof saved, "%s", g_settings.net_dns);
+    g_settings.net_dns[0] = 0;
+    uint8_t ip[4] = {0};
+    int q0 = g_dns_queries, s0 = g_silent_queries;
+
+    snprintf(g_settings.net_server, sizeof g_settings.net_server, "localhost");
+    int r = dns_lookup("game04.st-pso.games.sega.net", ip, 5000);
+    CHECK(r == 0 && ip[0] == 127 && g_dns_queries == q0 && g_silent_queries == s0,
+          "net_server localhost through the system resolver, no DNS server asked (%d, %u.%u.%u.%u)", r, ip[0], ip[1], ip[2], ip[3]);
+
+    snprintf(g_settings.net_server, sizeof g_settings.net_server, "10.20.30.40");
+    r = dns_lookup("ss702.sonicteam.com", ip, 1000);
+    CHECK(r == 0 && ip[0] == 10 && ip[1] == 20 && ip[2] == 30 && ip[3] == 40 && g_dns_queries == q0,
+          "net_server an address: used as it is (%d, %u.%u.%u.%u)", r, ip[0], ip[1], ip[2], ip[3]);
+
+    snprintf(g_settings.net_server, sizeof g_settings.net_server, "no-such-host.invalid");
+    uint64_t t0 = platform_now_ns();
+    r = dns_lookup("game04.st-pso.games.sega.net", ip, 9000);
+    unsigned ms = (unsigned)((platform_now_ns() - t0) / 1000000);
+    CHECK(r == 0 && ip[0] == 127 && ip[3] == 1 && g_silent_queries - s0 == 2 && g_dns_queries - q0 == 1,
+          "net_server not found: the DNS list, first server twice then the second (%d, %d + %d queries, %u ms)", r,
+          g_silent_queries - s0, g_dns_queries - q0, ms);
+
+    snprintf(g_settings.net_server, sizeof g_settings.net_server, "off");
+    q0 = g_dns_queries; s0 = g_silent_queries;
+    r = dns_lookup("game04.st-pso.games.sega.net", ip, 9000);
+    CHECK(r == 0 && g_silent_queries - s0 == 2 && g_dns_queries - q0 == 1, "net_server off: the DNS list only (%d)", r);
+
+    NetStatus ns;
+    snprintf(g_settings.net_server, sizeof g_settings.net_server, "psobb.dyndns.org");
+    net_status(&ns);
+    CHECK(!strcmp(ns.server, "psobb.dyndns.org"), "menu shows net_server (%s)", ns.server);
+    snprintf(g_settings.net_dns, sizeof g_settings.net_dns, "%s", saved);
+    unsetenv("SR_NET_FALLBACK_DNS");
+}
+
 static void pump(int ms) {
     for (int i = 0; i < ms / 5; i++) {
         net_frame(&g_c);
@@ -583,6 +629,7 @@ int main(int argc, char** argv) {
     st32(0x80300320u, 0x11111111);
     CHECK((int)call(hle_net_ppp_status, 0x80300320u, 0, 0, 0, 0, 0, 0) == -1 && ld32(0x80300324u) == 0, "PPP status none");
     test_dns();
+    test_server_name(sport, dport);
     test_tcp(ntohs(a.sin_port));
     test_udp();
     CHECK(!g_bad_frame, "callbacks ran in a frame below the caller's stack pointer (%d bad)", g_bad_frame);

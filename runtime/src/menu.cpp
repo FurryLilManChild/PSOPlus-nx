@@ -669,11 +669,13 @@ void tab_system() {
     heading("Online");
     NetStatus ns;
     net_status(&ns);
-    ImGui::Text("Server DNS: %s", ns.dns);
+    ImGui::Text("Server: %s", ns.server);
+    ImGui::Text("Then DNS: %s", ns.dns);
     ImGui::Text("Connection: %s", ns.state);
     if (ns.started && !ns.sockets_ok) warn("Network not available: online play will fail (see the log).");
-    note("Default: Schtserv's DNS 3.18.217.27, then 144.217.87.48 if it does not answer. To use another, set "
-         "net_dns= in settings.ini (one address, or two with a comma).");
+    note("The game connects to net_server in settings.ini (default psobb.dyndns.org, Schtserv; a name or an IPv4 "
+         "address). If that cannot be found: Schtserv's DNS 3.18.217.27, then 144.217.87.48. net_dns= (one address, "
+         "or two with a comma) asks only those DNS servers instead.");
     heading("Settings");
     ImGui::Text("Saved in %s", platform_settings_path());
     heading("Bug reports");

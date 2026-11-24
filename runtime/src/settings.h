@@ -49,6 +49,10 @@ typedef struct Settings {
      * "a.b.c.d:port", or two of them separated by a comma (the second asked when the first does not answer).
      * Empty (the default): Schtserv's 3.18.217.27, then its older 144.217.87.48. Saved as net_dns=... */
     char net_dns[48];
+    /* online play: the server whose address the game gets for its server names, looked up with the system's
+     * resolver (a host name, or an IPv4 address used as it is; "off": the DNS servers above only). Default
+     * SETTINGS_NET_SERVER_DEFAULT; saved as net_server=... */
+    char net_server[64];
 } Settings;
 
 enum { FR_60, FR_AUTO, FR_30, FR_MODES };
@@ -83,6 +87,7 @@ const char* settings_screen_name(int mode);
  * and window size changes then only change how the picture is shown. */
 void settings_fix_wide_k(float k);
 int settings_cpu_clock_valid(int mhz);  /* 0 (stock), 1224, 1428 or 1785 */
+#define SETTINGS_NET_SERVER_DEFAULT "psobb.dyndns.org"  /* Schtserv (ragol.org's Action Replay code for US v1.02 Plus) */
 extern const int settings_pad_map_default[GC_INPUTS];  /* the original layout (A = A, Z = R, L / R = ZL / ZR, ...) */
 const char* settings_gc_input_label(int in);   /* "A", "START", "D-pad up" */
 const char* settings_sw_button_label(int sw);  /* "ZR", "+ (Plus)", "None" */

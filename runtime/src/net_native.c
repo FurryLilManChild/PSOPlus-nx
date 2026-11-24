@@ -8,12 +8,14 @@
  *   - adapter: a Broadband Adapter (ntUtl type 5), link up while the system has a connection;
  *   - DHCP: the system's own address, mask, gateway and DNS servers (Switch: nifm; elsewhere the address the
  *     host routes from, mask 255.255.255.0 and gateway .1, which only the game's screens show);
- *   - DNS: the game's three server names (game04.st-pso.games.sega.net, ss702.sonicteam.com,
- *     ddplanet.sega.co.jp: the table at 0x804A6FD8) are asked with a standard A query of our own: by default of
- *     Schtserv's DNS 3.18.217.27 (named by a Schtserv admin, forum post of Sep 2023), and of its older address
- *     144.217.87.48 when the first gives no answer after 2 queries (about 2 s); settings.ini net_dns overrides
- *     the list (one address, or two separated by a comma); other names go to the system's resolver (Switch:
- *     its DNS server from nifm, same query code; PC: getaddrinfo);
+ *   - DNS: for the game's three server names (game04.st-pso.games.sega.net, ss702.sonicteam.com,
+ *     ddplanet.sega.co.jp: the table at 0x804A6FD8) the game gets the address of settings.ini net_server
+ *     (default psobb.dyndns.org, the name ragol.org's Action Replay code writes over game04; or an IPv4
+ *     address used as it is), looked up with the system's resolver (Switch: its DNS servers from nifm with a
+ *     standard A query of our own; PC: getaddrinfo). If that fails, the game's own name is asked of Schtserv's
+ *     DNS 3.18.217.27 (named by a Schtserv admin, forum post of Sep 2023), then of 144.217.87.48 when the
+ *     first gives no answer after 2 queries. settings.ini net_dns (one address, or two with a comma) replaces
+ *     all of that: the game's name is asked of it only. Other names: the system's resolver;
  *   - TCP and UDP: non-blocking BSD sockets (libnx on the Switch, Winsock on Windows). Handles keep the
  *     library's ranges (TCP 0..3, UDP 0x400 + n), address arguments its {u32 length 4, 4 address bytes in
  *     network order} structures, ports are plain numbers (the library's DNS opens port 0x35 = 53).
@@ -192,8 +194,10 @@ typedef struct Dns {
     int cur_sends;          /* queries sent to servers[cur] */
     sock_t fd;
     uint16_t qid;
-    uint64_t t0, t_sent;
-    int sends;
+    uint64_t t0, t_sent;    /* the lookup's start, the last query */
+    uint64_t t_stage, stage_timeout;
+    int sends, stage;       /* queries in this stage; ST_* */
+    char qname[256];        /* the name asked now (the game's, or net_server) */
     uint8_t ip[4];
     const char* via;        /* for the log */
 } Dns;
@@ -229,11 +233,19 @@ static void set_status(const char* fmt, ...) {
     mtx_unlock(&g_status_lock);
 }
 
+static int server_setting_off(void) {  /* net_server=off: the game's names go straight to the DNS servers */
+    const char* v = g_settings.net_server;
+    return !strcmp(v, "off") || !strcmp(v, "OFF") || !strcmp(v, "none");
+}
+
 void net_status(NetStatus* out) {
     mtx_lock(&g_status_lock);
     snprintf(out->state, sizeof out->state, "%s", g_status);
     mtx_unlock(&g_status_lock);
     snprintf(out->dns, sizeof out->dns, "%s", g_server_str);
+    if (g_dns_override) snprintf(out->server, sizeof out->server, "not used (net_dns is set)");
+    else if (server_setting_off()) snprintf(out->server, sizeof out->server, "off");
+    else snprintf(out->server, sizeof out->server, "%s", g_settings.net_server[0] ? g_settings.net_server : SETTINGS_NET_SERVER_DEFAULT);
     snprintf(out->console_ip, sizeof out->console_ip, "%u.%u.%u.%u%s", g_cfg.ip[0], g_cfg.ip[1], g_cfg.ip[2],
              g_cfg.ip[3], g_cfg_from_system ? "" : " (worked out)");
     out->sockets_ok = g_sock_ok;
@@ -333,7 +345,9 @@ static void read_dns_setting(void) {
             rt_log("[net] settings.ini net_dns=\"%s\" is not one or two IPv4 addresses (a.b.c.d or a.b.c.d:port, a comma "
                    "between two): using the default %s", g_settings.net_dns, DNS_SERVERS_DEFAULT);
         g_dns_override = 0;
-        parse_server_list(DNS_SERVERS_DEFAULT);
+        /* SR_NET_FALLBACK_DNS (env.txt on the Switch; testing): another list in place of Schtserv's */
+        const char* env = getenv("SR_NET_FALLBACK_DNS");
+        if (!(env && *env && parse_server_list(env))) parse_server_list(DNS_SERVERS_DEFAULT);
     }
     size_t k = 0;
     g_server_str[0] = 0;
@@ -703,7 +717,15 @@ static int name_is_server(const char* n) {
     return 0;
 }
 
-static void dns_finish(Dns* d, int result, const char* why) {
+/* The game's server names go through stages (dns_next): 1. settings.ini net_server (default psobb.dyndns.org,
+ * the name ragol.org's Action Replay code for US v1.02 Plus writes over game04 at 0x8043EDA0; an IPv4 address
+ * there is used as it is), looked up with the system's resolver; 2. the game's own name asked of the DNS list
+ * (net_dns, or Schtserv's 3.18.217.27 then 144.217.87.48). With net_dns set, only stage 2 (the override).
+ * Other names: the system's resolver only. */
+enum { ST_NONE, ST_SERVER, ST_DNSLIST, ST_OTHER };
+#define SERVER_STAGE_TIMEOUT_NS 4500000000ull
+
+static void dns_done(Dns* d, int result, const char* why) {
     d->result = result;
     if (d->fd != BAD_SOCK) {
         sock_close(d->fd);
@@ -719,9 +741,40 @@ static void dns_finish(Dns* d, int result, const char* why) {
     }
 }
 
+static void dns_next(Dns* d, int result, const char* why);
+
+static void copy_name(char dst[256], const char* src) {  /* both 256 bytes or shorter strings */
+    size_t n = strlen(src);
+    if (n > 255) n = 255;
+    memmove(dst, src, n);
+    dst[n] = 0;
+}
+
+/* a stage's own failure: on to the next stage, or the game is told */
+static void dns_finish(Dns* d, int result, const char* why) {
+    if (result == 0 || d->stage != ST_SERVER) { dns_done(d, result, why); return; }
+    rt_log("[net] DNS %s: net_server %s failed (%s): asking the DNS servers for %s", d->name, d->qname, why, d->name);
+    dns_next(d, result, why);
+}
+
+static int dns_open_socket(Dns* d) {
+    if (d->fd != BAD_SOCK) return 1;
+    d->fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (d->fd == BAD_SOCK || sock_nonblock(d->fd)) {
+        int e = sock_errno();
+        char why[64];
+        snprintf(why, sizeof why, "no UDP socket: errno %d (%s)", e, err_name(e));
+        if (d->fd != BAD_SOCK) sock_close(d->fd);
+        d->fd = BAD_SOCK;
+        dns_finish(d, DNS_ERR_NONAME, why);
+        return 0;
+    }
+    return 1;
+}
+
 static void dns_send(Dns* d) {
     uint8_t q[300];
-    size_t n = dns_build_query(q, sizeof q, d->qid, d->name);
+    size_t n = dns_build_query(q, sizeof q, d->qid, d->qname);
     struct sockaddr_in sa;
     sa_make(&sa, d->servers[d->cur], d->sports[d->cur]);
     if (!n) { dns_finish(d, DNS_ERR_NONAME, "the name cannot be put in a query"); return; }
@@ -739,8 +792,91 @@ static void dns_send(Dns* d) {
     d->t_sent = platform_now_ns();
 }
 
+/* an A query for d->qname to the servers set up in d, with retries */
+static void dns_query_start(Dns* d, uint64_t timeout) {
+    d->cur = 0;
+    d->cur_sends = 0;
+    d->sends = 0;
+    d->t_stage = platform_now_ns();
+    d->stage_timeout = timeout;
+    d->qid = (uint16_t)((platform_now_ns() >> 10) ^ (uint64_t)(d - g_dns) * 0x9E37u ^ (uint64_t)d->stage * 0x51u);
+    rt_log("[net] DNS %s: A query for %s to %u.%u.%u.%u:%u (%s%s)", d->name, d->qname, IP4(d->servers[0]), d->sports[0],
+           d->via, d->nservers > 1 ? "; the next server if it does not answer" : "");
+    set_status("looking up %s", d->qname);
+    if (!dns_open_socket(d)) return;
+    dns_send(d);
+}
+
+/* the system's resolver for d->qname: the system's DNS servers (Switch, from nifm) with our query, or
+ * getaddrinfo where there are none (PC: this one call blocks, normally a few ms) */
+static void dns_system(Dns* d, uint64_t timeout) {
+    static const uint8_t zero[4];
+    if (g_cfg_from_system && memcmp(g_cfg.dns1, zero, 4)) {
+        memcpy(d->servers[0], g_cfg.dns1, 4);
+        d->sports[0] = 53;
+        d->nservers = 1;
+        if (memcmp(g_cfg.dns2, zero, 4) && memcmp(g_cfg.dns2, g_cfg.dns1, 4)) {
+            memcpy(d->servers[1], g_cfg.dns2, 4);
+            d->sports[1] = 53;
+            d->nservers = 2;
+        }
+        dns_query_start(d, timeout);
+        return;
+    }
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    uint64_t t = platform_now_ns();
+    int r = getaddrinfo(d->qname, NULL, &hints, &res);
+    unsigned ms = (unsigned)((platform_now_ns() - t) / 1000000ull);
+    if (r == 0 && res) {
+        memcpy(d->ip, &((struct sockaddr_in*)res->ai_addr)->sin_addr, 4);
+        freeaddrinfo(res);
+        rt_log("[net] DNS %s: getaddrinfo(%s) -> %u.%u.%u.%u (%u ms)", d->name, d->qname, IP4(d->ip), ms);
+        dns_finish(d, 0, "");
+    } else {
+        if (res) freeaddrinfo(res);
+        char why[64];
+        snprintf(why, sizeof why, "getaddrinfo error %d after %u ms", r, ms);
+        dns_finish(d, DNS_ERR_NONAME, why);
+    }
+}
+
+
+/* to the next stage after `stage` (ST_NONE: the first), or the game is told result */
+static void dns_next(Dns* d, int result, const char* why) {
+    if (d->stage == ST_NONE && !g_dns_override && !server_setting_off()) {
+        d->stage = ST_SERVER;
+        const char* srv = g_settings.net_server[0] ? g_settings.net_server : SETTINGS_NET_SERVER_DEFAULT;
+        uint16_t port = 1;
+        if (dns_parse_ipv4(srv, d->ip, &port) && !port) {
+            d->via = "net_server is an address";
+            dns_done(d, 0, "");
+            return;
+        }
+        copy_name(d->qname, srv);
+        d->via = g_cfg_from_system ? "net_server, asked of the system's DNS servers" : "net_server, the system's resolver";
+        dns_system(d, SERVER_STAGE_TIMEOUT_NS);
+        return;
+    }
+    if (d->stage == ST_NONE || d->stage == ST_SERVER) {
+        d->stage = ST_DNSLIST;
+        copy_name(d->qname, d->name);
+        for (int k = 0; k < g_dns_count; k++) {
+            memcpy(d->servers[k], g_dns_server[k], 4);
+            d->sports[k] = g_dns_port[k];
+        }
+        d->nservers = g_dns_count;
+        d->via = g_dns_override ? "the game's server name, asked of net_dns" : "the game's server name, asked of Schtserv's DNS";
+        dns_query_start(d, DNS_TIMEOUT_NS);
+        return;
+    }
+    dns_done(d, result, why);
+}
+
 static void dns_step(Dns* d) {
-    if (d->result != 1) return;
+    if (d->result != 1 || d->fd == BAD_SOCK) return;
     uint8_t p[1500];
     for (;;) {
         struct sockaddr_in from;
@@ -749,17 +885,16 @@ static void dns_step(Dns* d) {
         if (n < 0) {
             int e = sock_errno();
             if (err_wouldblock(e)) break;
-            rt_log("[net] DNS %s: receive errno %d (%s)", d->name, e, err_name(e));
+            rt_log("[net] DNS %s: receive errno %d (%s)", d->qname, e, err_name(e));
             break;  /* e.g. an ICMP port unreachable: retry and time out as usual */
         }
         int rc = 0;
         int r = dns_parse_answer(p, (size_t)n, d->qid, d->ip, &rc);
         if (r == DNS_NOT_ANSWER || r == DNS_MALFORMED) {
-            rt_log("[net] DNS %s: ignored a %d-byte reply (%s)", d->name, n, r == DNS_MALFORMED ? "malformed" : "not ours");
+            rt_log("[net] DNS %s: ignored a %d-byte reply (%s)", d->qname, n, r == DNS_MALFORMED ? "malformed" : "not ours");
             continue;
         }
-        if (r == DNS_OK || r == DNS_NXDOMAIN || r == DNS_NO_A || r == DNS_SERVFAIL)
-            rt_log("[net] DNS %s: answer from %u.%u.%u.%u:%u", d->name, IP4((uint8_t*)&from.sin_addr), ntohs(from.sin_port));
+        rt_log("[net] DNS %s: answer from %u.%u.%u.%u:%u", d->qname, IP4((uint8_t*)&from.sin_addr), ntohs(from.sin_port));
         if (r == DNS_OK) { dns_finish(d, 0, ""); return; }
         char why[80];
         snprintf(why, sizeof why, "%s (RCODE %d)", r == DNS_NXDOMAIN ? "no such name" : r == DNS_NO_A ?
@@ -768,7 +903,7 @@ static void dns_step(Dns* d) {
         return;
     }
     uint64_t now = platform_now_ns();
-    if (now - d->t0 > DNS_TIMEOUT_NS) {
+    if (now - d->t_stage > d->stage_timeout) {
         char why[96];
         snprintf(why, sizeof why, "no answer from %s after %d queries", d->nservers > 1 ? "either server" : "the server",
                  d->sends);
@@ -777,7 +912,7 @@ static void dns_step(Dns* d) {
         if (d->cur + 1 < d->nservers && d->cur_sends >= DNS_NEXT_QUERIES) {
             d->cur++;
             d->cur_sends = 0;
-            rt_log("[net] DNS %s: no answer from %u.%u.%u.%u:%u after %d queries; asking %u.%u.%u.%u:%u", d->name,
+            rt_log("[net] DNS %s: no answer from %u.%u.%u.%u:%u after %d queries; asking %u.%u.%u.%u:%u", d->qname,
                    IP4(d->servers[d->cur - 1]), d->sports[d->cur - 1], DNS_NEXT_QUERIES, IP4(d->servers[d->cur]),
                    d->sports[d->cur]);
         }
@@ -811,66 +946,30 @@ void hle_net_dns_start(Cpu* c) {
     d->name[len] = 0;
     size_t nl = strlen(d->name);
     if (nl && d->name[nl - 1] == '.') d->name[nl - 1] = 0;
+    copy_name(d->qname, d->name);
     d->t0 = platform_now_ns();
     count_open();
     c->r[3] = (uint32_t)id;
     uint16_t port;
     if (dns_parse_ipv4(d->name, d->ip, &port) && !port) {  /* the game skips DNS for these; just in case */
         d->via = "a numeric address";
-        dns_finish(d, 0, "");
+        dns_done(d, 0, "");
         return;
     }
     net_start();
     if (!g_sock_ok) {
         d->via = "no sockets";
-        dns_finish(d, DNS_ERR_NONAME, "native sockets are not available");
+        dns_done(d, DNS_ERR_NONAME, "native sockets are not available");
         return;
     }
     if (name_is_server(d->name)) {
-        for (int k = 0; k < g_dns_count; k++) {
-            memcpy(d->servers[k], g_dns_server[k], 4);
-            d->sports[k] = g_dns_port[k];
-        }
-        d->nservers = g_dns_count;
-        d->via = g_dns_override ? "the game's server name, asked of net_dns" : "the game's server name, asked of Schtserv's DNS";
-    } else if (g_cfg_from_system && (g_cfg.dns1[0] | g_cfg.dns1[1] | g_cfg.dns1[2] | g_cfg.dns1[3])) {
-        memcpy(d->servers[0], g_cfg.dns1, 4);
-        d->sports[0] = 53;
-        d->nservers = 1;
-        d->via = "another name, asked of the system's DNS server";
-    } else {
-        /* PC: the system's resolver (blocks this one call; the game only ever asks its three names) */
-        d->via = "another name, the system's resolver";
-        struct addrinfo hints, *res = NULL;
-        memset(&hints, 0, sizeof hints);
-        hints.ai_family = AF_INET;
-        hints.ai_socktype = SOCK_STREAM;
-        int r = getaddrinfo(d->name, NULL, &hints, &res);
-        if (r == 0 && res) {
-            memcpy(d->ip, &((struct sockaddr_in*)res->ai_addr)->sin_addr, 4);
-            freeaddrinfo(res);
-            dns_finish(d, 0, "");
-        } else {
-            if (res) freeaddrinfo(res);
-            char why[48];
-            snprintf(why, sizeof why, "getaddrinfo error %d", r);
-            dns_finish(d, DNS_ERR_NONAME, why);
-        }
+        read_dns_setting();  /* settings.ini may have changed (menu) */
+        dns_next(d, DNS_ERR_NONAME, "");
         return;
     }
-    rt_log("[net] DNS %s: A query to %u.%u.%u.%u:%u (%s%s)", d->name, IP4(d->servers[0]), d->sports[0], d->via,
-           d->nservers > 1 ? "; the next server if it does not answer" : "");
-    set_status("looking up %s", d->name);
-    d->fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (d->fd == BAD_SOCK || sock_nonblock(d->fd)) {
-        int e = sock_errno();
-        char why[64];
-        snprintf(why, sizeof why, "no UDP socket: errno %d (%s)", e, err_name(e));
-        dns_finish(d, DNS_ERR_NONAME, why);
-        return;
-    }
-    d->qid = (uint16_t)(platform_now_ns() >> 10) ^ (uint16_t)(id * 0x9E37);
-    dns_send(d);
+    d->stage = ST_OTHER;
+    d->via = g_cfg_from_system ? "another name, asked of the system's DNS servers" : "another name, the system's resolver";
+    dns_system(d, DNS_TIMEOUT_NS);
 }
 
 /* 0x8040A698(id, &{4, addr}, &count, 0, &x, -1): -1 still pending, 0 done, else an error */
