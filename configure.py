@@ -411,6 +411,8 @@ with open(os.path.join(ROOT, "build.ninja"), "w") as f:
         extra = "-O2 -Wall"
         if src.endswith("/switch/rvz_decode.c"):  # portlibs switch-libzstd, switch-liblzma, switch-bzip2 (RVZ conversion)
             extra += " -I%s/portlibs/switch/include" % dkp
+        if src.endswith("/movie_mpeg.c"):  # the movie decoder: vectorised loops; float steps exactly as the game's (no FMA)
+            extra = "-O3 -Wall -ffp-contract=off"
         n.build(o, "cc", src, implicit=[GEN + "/funcs.h"] + shader_h, variables={"extra": extra})
         objs.append(o)
     for src in rt_m:

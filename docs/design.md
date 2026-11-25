@@ -29,6 +29,11 @@ of scope; the network code stays in the game but finds no adapter.
   0x80144988) and OSUnlinks it after (0x80320398). Found by the first PC test, which stopped at the attract
   movie. It is recompiled at a fixed address above MEM1 (0x81800000) like Sonic Riders' `_Main.rel`; OSLink lays
   that image out fresh each time and points the game's module header at it (runtime/src/rel.c).
+  Its MPEG-1 video decoding runs natively: the slice decoder 0x8180E498 is replaced (runtime/src/movie_mpeg.c),
+  bit for bit the game's arithmetic (float AAN IDCT in the game's order, its dequantisation and prescale tables,
+  its rounding, even its dcbz line clearing); headers, reference frames, frame skipping and ADX audio stay the
+  game's code. The recompiled decoder could not keep 30 fps on the Switch (psogc_j.sfd fell to 11 fps).
+  Checked by tools/tests/run_movie_mpeg_diff.sh against the game's own code on the movies.
 - Other executables on the disc (`switcher.dol`, `iwanaga.dol` and debug `D` copies) are not part of the normal
   game boot; to identify later.
 - Libraries found by their version strings: Dolphin OS (SDK "Revision 54"), CRI ADX (ADXT 8.05, ADXF 6.24,

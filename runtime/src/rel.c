@@ -11,6 +11,7 @@
 #include "runtime.h"
 
 void rel_relink(void);  /* loader.c */
+void movie_mpeg_linked(void);  /* movie_mpeg.c */
 
 static int g_linked;
 int rel_is_linked(void) { return g_linked; }  /* frame_pacing.c: no stall report while a movie plays */
@@ -29,6 +30,7 @@ void hle_OSLink(Cpu* c) {
     rt_log("[rel] OSLink(%08X, bss %08X): %s (module %u) runs from its fixed image at %08X (prolog %08X, epilog %08X)",
            m, bss, g_rel_file, id, g_rel_base, g_rel_prolog, g_rel_epilog);
     g_linked = 1;
+    movie_mpeg_linked();
     c->r[3] = 1;
 }
 

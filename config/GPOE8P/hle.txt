@@ -29,6 +29,9 @@
 # --- Movies (runtime/src/movie_xfb.c): the opening movies are written with the CPU into the XFB as YUYV
 # (0x80143C00 -> this converter -> VISetNextFrameBuffer), never through GX; shown natively instead ---
 80143988 movie_xfb
+# movie.rel's MPEG-1 slice decoder (runtime/src/movie_mpeg.c): every slice decoded natively, bit for bit as the
+# game's own code; headers, reference frames, audio and timing stay the game's (0x8180E7E0 calls it per slice)
+8180E498 movie_slice
 
 # --- GX: matrix writers (runtime/src/hle_gx.c): one copy into the pipe batch instead of 9-12 paired-single stores ---
 8038EA3C WriteMTXPS4x3   # called by GXLoadPosMtxImm 8038EAC8, GXLoadTexMtxImm 8038EB80 and others

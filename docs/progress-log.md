@@ -1,5 +1,45 @@
 # Progress log (newest first)
 
+## 2026-11-25: Native MPEG-1 decoding for the movies (test build, not yet run on the console)
+
+- Cause of the slow attract movie (owner's log, build cf64678, 1224 MHz): the game core was 100% busy in movie.rel's
+  own MPEG-1 decoder (CRI Sofdec, recompiled): block stores and prediction 0x818152C0, 0x818145E4, 0x81814B34,
+  coefficient decoding 0x81819EB0, IDCT 0x8180822C / 0x81807E94; 11-16 fps, frames of 67-150 ms.
+- Sofdec's decoder mapped from the disassembly (proven, then checked by running both): picture body 0x8180E7E0
+  calls the slice decoder 0x8180E498 once per slice; the picture header picks the slice loop by picture type
+  (ctx+0x22C) and the macroblock functions from a table (ctx+0x230..0x24C; the paired-single set when
+  ctx+0x180 == 3); reference frames come in at ctx+0x1D0/0x1E0, the output at 0x200 (P pictures: 0x1E0 is the
+  current frame, the skipped-macroblock copy writes there); dequantisation in integers, then (float)value *
+  prescale[i] (ctx+0x34, 64 floats in the decoder's own coefficient order, scan table ctx+0x2C, matrices
+  ctx+0xBE0/0xC20); a float AAN IDCT on paired singles rounded +-0.5 and saturated to s16; prediction with
+  integer half-pel averages; dcbz on every 32-byte aligned destination row.
+- Change: 0x8180E498 is replaced (hle.txt movie_slice, runtime/src/movie_mpeg.c): the slice is decoded natively
+  with the game's exact arithmetic (the IDCT's float operations in the game's order, no FMA contraction:
+  -ffp-contract=off plus a pragma; GCC fuses 8 operations without it), the dcbz clearing reproduced, the
+  decoder state left as the game's loop leaves it, then the game's own start-code skip (0x8180E87C). Headers,
+  reference frames, frame skipping, ADX audio and sync stay the game's code. Anything unexpected (another output
+  mode or macroblock function, simplified half-pel mode, GQR set-up, IDCT constants, a bad code, an address or
+  vector out of range, data running out) runs the game's slice decoder instead, logged once per reason; the
+  macroblocks already written are rewritten identically by it. Pending interrupts are delivered between
+  macroblocks. VLC tables typed from ISO/IEC 11172-2 annex B.
+- Host tests (game data stays under build/ and assets/):
+  - tools/tests/run_movie_mpeg_diff.sh: movie.rel's recompiled functions plus the game's maths library on the
+    host, MPV initialised as the game does (mode 3), both decoders on every picture from the same memory, all 28
+    MiB of guest RAM compared except the stack and the decoder's per-macroblock scratch: psogc_j.sfd 4429
+    pictures, psogc_j2.sfd 4417, ult04.sfd 450: identical, no slice handed back. Damaged streams (bits flipped):
+    112 of 4429 slices handed back on psogc_j, 44-47 of 450 on ult04, final memory still identical.
+  - IDCT alone, 600,000 random blocks through 0x8180822C and the native one: identical (also built with GCC
+    -O3 -march=native). VLC tables against pl_mpeg's (tools/tests/run_movie_vlc_check.sh): every bit pattern
+    identical. Against FFmpeg (PyAV, tools/tests/movie_ref_compare.py, an integer IDCT): PSNR Y 72.4 dB
+    (psogc_j, 1199 frames), 66.1 dB (psogc_j2), 69.7 dB (ult04), largest pixel difference 3, frame order right.
+  - Speed on the host (Xeon 2.1 GHz, one thread, the whole picture call): psogc_j 0.55 ms/picture native vs 4.78
+    ms for the game's code, psogc_j2 1.03 vs 8.95; busiest second of video 50-56 ms of decoding vs 375-424 ms.
+    Switch estimate (the recompiled decoder ran about 7 times slower there than on this host, at 1224 MHz):
+    about 5-9 ms per picture on average and 14-16 ms per picture in the busiest second at 1020 MHz, against 33
+    ms per picture at 30 fps. Not measured on the console yet.
+- The ending movies (ending_normal.sfd, ult01-04.sfd, texture mode) benefit only if their decoder is in the same
+  output mode (ctx+0x180 == 3); otherwise the log says "another output mode" and they run as before.
+
 ## 2026-11-24: 0.6.1 test build (opening movies, RVZ, on 0.6.0)
 
 - Black movies, cause proven in the disassembly: the attract and new-game movies (psogc_j.sfd, psogc_j2.sfd)
