@@ -1,5 +1,45 @@
 # Progress log (newest first)
 
+## 2026-11-26: 16:9 widescreen, build A (test build, not yet run on the console)
+
+The plan is docs/widescreen-research.md section 6, build A. What was built:
+
+- Display > Screen: "4:3 (original)" / "16:9 widescreen" (menu.cpp, settings.c). 4:3 stays the default; a saved
+  16:9 is no longer forced back to 4:3 (the old "16:9 stretched" and "Fit" values read as 16:9). SR_SCREEN=1 for
+  tests. The 10 s [pace] line now ends with "screen 4:3" or "screen 16:9".
+- Three game hooks (config/GPOE8P/hle.txt, runtime/src/pso_wide.c):
+  - 0x803D676C set_perspective_projection_from_fov: in 16:9 the game's own function runs with aspect x k
+    (k = 854 / 640 = 1.334375, the EFB width factor) and the fov changed so the vertical angle stays (tan of the
+    half angle times k, rounded to a whole angle unit; pso_wide.h wide_fov_for). Not for the radar's call
+    (return address 0x801F93F4). Every caller, the visibility tests and screen_projection follow.
+  - 0x8022A87C TObject::render_nodes: the walk done natively (same frame, same loop); in 16:9 it also classifies
+    each object from its layer and class name and tells the GP thread in order with the GX stream (runtime command
+    0xC2, gx_fifo.c gx_host_mark; only while the FIFO is linked, never into a display list).
+  - 0x803E20B0 load_screen_space_matrix: runs the game's function, then marks position matrix 0 as the screen
+    space matrix (sent again when the projection's aspect / screen scale or the frame buffer change, and every
+    256 loads).
+- Placement (gx_render.c, GP thread): HUD layers (tl_window, tl_radermap, tl_clipout, tl_fadeafter), UI classes
+  (TWindow*, TAd*, TTitle*, TLogo, TChCr*, TObjCM*, TObj*Win*, TShop*, TQuestList*, TKeyBoard*, TRaderMap*,
+  TNowLoading, TLoadingCur, TLevelSelect, TCharSave*, TEndingPic, TFontSmall*, TCheckMemoryCard) and draws outside
+  the task tree: screen space draws 4:3 in the middle, or stretched when they (or a band of them) span the width.
+  The radar's own overhead view (3D with its 4:3 camera) also in the middle; HUD 3D with a widened camera is left
+  as drawn. Follow mode already in build A: TWindowFukidasi (speech bubbles, per object) and TEF_LensFlare (per
+  sprite) keep their place and their 4:3 width. Everything else (particles, sprites, fades in tl_fade, starlight
+  trails) is left as the widened projection draws it.
+- gx.vert: GX_WIDE_HUD_PERSP (flag 4 in GX_XR_WIDE_FLAGS) applies the anchor code to perspective draws, adds the
+  follow code (16 + middle), and leaves the field of view setting out of HUD draws. render_deko.c / render_gl.c:
+  for those draws the viewport centre and the scissor move by 320 (k - 1) instead of times k (the radar's scissor
+  box offset included), unless the scissor spans the width.
+- cull.c: no wide_k factor in the side margin (the projection itself is wider).
+- Log: [hud] lines, one per new (layer, class, placement), at most 600 (SR_HUDLOG=0 turns them off); [wide] lines
+  every 10 s with the hook and placement counts. 4:3 sends no marks and changes no draw.
+- Online: nothing the game sends is touched (section 4 of the research): only the local projection and the local
+  placement of the picture's parts.
+- Host test tools/tests/run_pso_wide_test.sh: the projection maths (vertical angle kept within 0.008 degrees for
+  every fov 0x800-0x7000 at three k), 27 class names, 3000 random trees walked by the native loop and the game's own
+  recompiled one (same render calls, r1 / lr per call, stack words, callee-saved registers; 4:3 and 16:9), the
+  marks for a game-shaped tree, and the viewport / scissor offset / follow arithmetic: PASS.
+
 ## 2026-11-25: Release 1.0.0
 
 - The owner's console run of 468ad988: the attract movie at a steady 30 fps, native decode 6.2 to 6.6 ms per

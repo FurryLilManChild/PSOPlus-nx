@@ -220,13 +220,10 @@ void settings_load(void) {
             else if (!strcmp(line, "update_check")) g_settings.update_check = v != 0;
         }
         fclose(f);
-        /* PSO has no camera patch for wider screens (sonic-riders-recomp's widescreen widened the game's own
-         * camera): a wide mode only stretched the 3D picture, so the menu no longer offers it and 4:3 is used.
-         * PC in-between pictures assume a 60-picture game (PSO draws 30): off. */
-        if (g_settings.screen != SCREEN_4_3 || g_settings.pc_fps != 0)
-            rt_log("[settings] saved screen mode %d / PC picture rate %d not used by this port: 4:3, the game's own rate",
-                   g_settings.screen, g_settings.pc_fps);
-        g_settings.screen = SCREEN_4_3;
+        /* PC in-between pictures assume a 60-picture game (PSO draws 30): off. The screen mode is kept: 16:9 widens
+         * the game's own cameras (pso_wide.c); the old wide modes read as it below. */
+        if (g_settings.pc_fps != 0)
+            rt_log("[settings] saved PC picture rate %d not used by this port: the game's own rate", g_settings.pc_fps);
         g_settings.pc_fps = 0;
     } else if (settings_handheld_pc()) {
         /* first run on a Steam Deck (or under gamescope): fill the screen. gamescope scales the window to
@@ -249,12 +246,13 @@ void settings_load(void) {
                &g_settings.grade_warm);
     const char* rs = getenv("SR_RES");
     if (rs && atoi(rs) >= 0 && atoi(rs) < RES_MODES) g_settings.resolution = atoi(rs);
-    /* testing, not saved unless changed in the menu: SR_SCREEN=0 or 3 (SCREEN_*), SR_FOV=80-130 */
+    /* testing, not saved unless changed in the menu: SR_SCREEN=0 or 1 (SCREEN_*), SR_FOV=80-130 */
     const char* sc = getenv("SR_SCREEN");
     if (sc && atoi(sc) >= 0 && atoi(sc) < SCREEN_MODES) g_settings.screen = atoi(sc);
-    /* two screen options only (user, 2026-11-14): 4:3 and Fit to screen (HUD at the edges). The old "16:9
-     * widescreen" (1) and "16:9 stretched" (2) read as Fit; the HUD is never stretched */
-    if (g_settings.screen == SCREEN_WIDE || g_settings.screen == SCREEN_REMOVED_2) g_settings.screen = SCREEN_FIT;
+    /* PSO: two screen options, 4:3 (original) and 16:9 widescreen (pso_wide.c, docs/widescreen-research.md build A;
+     * the HUD 4:3 in the middle). Fit to window (wider than 16:9) is not done yet: the old "16:9 stretched" (2)
+     * and "Fit" (3) read as 16:9. The HUD is never stretched */
+    if (g_settings.screen == SCREEN_REMOVED_2 || g_settings.screen == SCREEN_FIT) g_settings.screen = SCREEN_WIDE;
     g_settings.hud_stretch = 0;
     const char* fv = getenv("SR_FOV");
     if (fv && atoi(fv) >= FOV_MIN && atoi(fv) <= FOV_MAX) g_settings.fov = atoi(fv);

@@ -1,6 +1,7 @@
 # Widescreen (16:9) research
 
-Research pass, 2026-11-26, after release 1.0.0. Nothing here is built yet. Goal: a real 16:9 picture (more of
+Research pass, 2026-11-26, after release 1.0.0. Build A is built (docs/progress-log.md, 2026-11-26), with the
+follow mode for speech bubbles and the lens flare brought forward from build B. Goal: a real 16:9 picture (more of
 the world to the sides, nothing stretched), the HUD first kept 4:3 in the middle, later moved to the screen edges.
 
 Marks: **proven** (read in our DOL's disassembly in `build/GPOE8P/asm`, in our runtime, or in the decomp's

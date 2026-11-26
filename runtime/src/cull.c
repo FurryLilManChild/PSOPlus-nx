@@ -15,7 +15,7 @@
  * (skinned characters).
  * Test: hle_ModelDraw takes the union of the boxes of all the model's display lists, puts its corners
  * through the current matrix and the projection, and skips 803DC460 when every corner is outside the
- * same plane of a view volume widened by a margin (and by the wide screen factor sideways). The
+ * same plane of a view volume widened by a margin (in 16:9 the game's projection is itself wider). The
  * matrix load and the state set and restore still run, so later draws see the same GX state.
  * A model with any list not seen yet is drawn. Off by default; SR_CULL=1 (env.txt) turns it on, and only
  * then do the GP thread's bounds (gx_fifo.c, gx_render.c) run. */
@@ -163,7 +163,7 @@ static int model_hidden(Cpu* c, uint32_t model) {
     float m[12];
     for (int i = 0; i < 12; i++) m[i] = gf(mp + 4u * (uint32_t)i);
     const float margin = 1.15f;
-    float kx = margin * fmaxf(1.0f, settings_wide_k());  /* wide screen modes show more to the sides */
+    float kx = margin;  /* 16:9: the projection itself is already wider (pso_wide.c), no extra side margin */
     if (g_sample_due) {
         g_sample_due = 0;
         rt_log("[cull] sample: model %08X box %.1f %.1f %.1f .. %.1f %.1f %.1f, matrix row z %.3f %.3f %.3f %.1f, "

@@ -23,9 +23,16 @@ extern "C" {
 #define GX_XR_WIDE_FLAGS 0x7F
 #define GX_WIDE_HUD_43 1u     /* orthographic draws placed per draw (gx_render.c wide_anchor), not stretched */
 #define GX_WIDE_HUD_EDGES 2u  /* ... and those left or right of the middle moved to that screen edge */
+/* PSO 16:9 (pso_wide.h): this draw is a perspective draw placed like 2D (the game's HUD goes through its
+ * perspective projection with a screen space matrix): gx.vert applies the vertex's anchor code to it as
+ * to orthographic draws and leaves out the field of view setting; the backends map its viewport and
+ * scissor X around the 4:3 middle (x + 320 (k - 1)) instead of times k, unless the scissor spans the width */
+#define GX_WIDE_HUD_PERSP 4u
 /* per draw, in every vertex's nrm[3] (gx.vert): 4:3 in the middle, moved to the left / right edge, or
- * stretched to the width (draws spanning the whole width: fades, backgrounds, screen effects) */
+ * stretched to the width (draws spanning the whole width: fades, backgrounds, screen effects).
+ * GX_ANCHOR_FOLLOW + c (c = the piece's middle in clip X, -8..8): its middle kept, k times narrower about it */
 enum { GX_ANCHOR_MIDDLE, GX_ANCHOR_LEFT, GX_ANCHOR_RIGHT, GX_ANCHOR_STRETCH };
+#define GX_ANCHOR_FOLLOW 16.0f
 
 /* one decoded vertex: raw attributes as floats (the XF stage runs in the vertex shader) */
 typedef struct GxVertex {

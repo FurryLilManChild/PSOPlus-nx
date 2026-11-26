@@ -37,6 +37,11 @@
 8038EA3C WriteMTXPS4x3   # called by GXLoadPosMtxImm 8038EAC8, GXLoadTexMtxImm 8038EB80 and others
 8038EA70 WriteMTXPS3x3   # called by GXLoadNrmMtxImm 8038EB04
 
+# --- 16:9 widescreen (runtime/src/pso_wide.c, docs/widescreen-research.md build A); in 4:3 the game's own work ---
+803D676C wide_perspective    # set_perspective_projection_from_fov: aspect x k, same vertical angle (not the radar's, 801F93F0)
+8022A87C render_nodes        # TObject::render_nodes: the task tree walk, natively; tells the GP which object draws
+803E20B0 screen_space_matrix # load_screen_space_matrix: marks position matrix 0 as the 2D (screen space) matrix
+
 # --- The game's model routine (runtime/src/cull.c): models wholly outside the view skip their meshes ---
 803DB510 ModelDraw   # 803DC76C matrix load, 803DC600 state, 803DC460 meshes (display lists), 803DC6F4 restore
 

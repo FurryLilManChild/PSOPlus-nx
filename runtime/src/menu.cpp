@@ -414,6 +414,19 @@ void tab_performance() {
 }
 
 void tab_display() {
+    heading("Screen");
+    if (radio("4:3 (original)", g_settings.screen != SCREEN_WIDE,
+              "The GameCube's picture, with black bars at the sides of a wide screen.")) {
+        g_settings.screen = SCREEN_4_3;
+        settings_apply();
+    }
+    ImGui::SameLine();
+    if (radio("16:9 widescreen", g_settings.screen == SCREEN_WIDE,
+              "The game's cameras see more to the sides, nothing stretched. The HUD and menus stay 4:3 in the "
+              "middle. The graphics chip draws a third more pixels, so busy areas can run slower.")) {
+        g_settings.screen = SCREEN_WIDE;
+        settings_apply();
+    }
     heading("Field of view");
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14);
     ImGui::SliderInt("##fov", &g_settings.fov, FOV_MIN, FOV_MAX, "%d%%");
@@ -533,7 +546,8 @@ void tab_display() {
     if (check("Fullscreen  (F11 / Alt+Enter)", &g_settings.fullscreen, "Borderless fullscreen on the current display."))
         settings_apply();
 #endif
-    note("The picture is 4:3, as on the GameCube.");
+    note(g_settings.screen == SCREEN_WIDE ? "16:9: the HUD and menus stay 4:3 in the middle of the picture."
+                                          : "The picture is 4:3, as on the GameCube.");
 }
 
 #ifdef __SWITCH__

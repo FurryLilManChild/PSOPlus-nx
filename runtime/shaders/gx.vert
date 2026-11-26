@@ -89,18 +89,23 @@ void main() {
      vertical angle (taken from the projection), the picture scaled about its centre */
   /* online with a room camera wider than this screen (gx_render.h GX_XR_ASPECT): the same vertical view,
      narrowed to this screen's shape */
+  /* PSO 16:9 (gx_render.h GX_WIDE_HUD_PERSP): a perspective draw placed like 2D (the HUD, which the game
+     draws through its perspective projection): anchored as below, and no field of view change */
+  bool hudp = XR(0x26) == 0u && (XR(0x7F) & 4u) != 0u;
   float ac = uintBitsToFloat(XR(0x7C));
   if (XR(0x26) == 0u && ac > 1.0) clip.x = clip.x * ac;
   float fs = uintBitsToFloat(XR(0x7D));
-  if (XR(0x26) == 0u && fs > 0.0 && fs != 1.0 && P2 != 0.0) {
+  if (XR(0x26) == 0u && !hudp && fs > 0.0 && fs != 1.0 && P2 != 0.0) {
     float m = 1.0 / (tan(fs * atan(1.0 / abs(P2))) * abs(P2));
     clip.x = clip.x * m;
     clip.y = clip.y * m;
   }
-  if (XR(0x26) != 0u && (XR(0x7F) & 1u) != 0u) {
+  if ((XR(0x26) != 0u && (XR(0x7F) & 1u) != 0u) || hudp) {
     float wk = uintBitsToFloat(XR(0x7E));
     float an = a_nrm.w;
     if (wk > 1.0 && an < 2.5) clip.x = clip.x / wk + (an > 1.5 ? 1.0 - 1.0 / wk : an > 0.5 ? 1.0 / wk - 1.0 : 0.0) * clip.w;
+    /* follow (GX_ANCHOR_FOLLOW + the piece's middle c): its middle kept, k times narrower about it */
+    else if (wk > 1.0 && an > 7.5) clip.x = clip.x / wk + (an - 16.0) * (1.0 - 1.0 / wk) * clip.w;
   }
   float xs = uintBitsToFloat(XR(0x1A)), ys = uintBitsToFloat(XR(0x1B)), zs = uintBitsToFloat(XR(0x1C));
   float zo = uintBitsToFloat(XR(0x1F));

@@ -346,14 +346,24 @@ static void apply_state(const GxUniforms* u) {
                xo, yo, u->bp[0x20], u->bp[0x21], sox, soy, u->xfr[0x26], f32(u->xfr[0x20]), f32(u->xfr[0x22]));
     float vx = xo - (xs < 0 ? -xs : xs) - (float)sox, vy = yo - (ys < 0 ? -ys : ys) - (float)soy;
     float k = g_wide_k;
-    glViewport((GLint)(vx * k * EFB_SCALE), (GLint)(vy * EFB_SCALE), (GLsizei)(2 * (xs < 0 ? -xs : xs) * k * EFB_SCALE),
+    /* PSO 16:9, 2D placed through the perspective projection (gx_render.h GX_WIDE_HUD_PERSP): its 4:3 frame sits
+     * in the middle (x + 320 (k - 1)), so the viewport's centre and the scissor move with it, not times k (as in
+     * render_deko.c apply_state); a scissor spanning the width stays full */
+    int hudp = k > 1.0f && (u->xfr[GX_XR_WIDE_FLAGS] & GX_WIDE_HUD_PERSP);
+    float hx = 320.0f * (k - 1.0f), ax = xs < 0 ? -xs : xs;
+    float vpx = hudp ? xo - (float)sox + hx - ax * k : vx * k;
+    glViewport((GLint)(vpx * EFB_SCALE), (GLint)(vy * EFB_SCALE), (GLsizei)(2 * ax * k * EFB_SCALE),
                (GLsizei)(2 * (ys < 0 ? -ys : ys) * EFB_SCALE));
     int x0 = (int)((u->bp[0x20] >> 12) & 0x7FF) - sox, y0 = (int)(u->bp[0x20] & 0x7FF) - soy;
     int x1 = (int)((u->bp[0x21] >> 12) & 0x7FF) - sox + 1, y1 = (int)(u->bp[0x21] & 0x7FF) - soy + 1;
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
     glEnable(GL_SCISSOR_TEST);
-    glScissor(wx(x0), y0 * EFB_SCALE, x1 > x0 ? wx(x1) - wx(x0) : 0, (y1 > y0 ? y1 - y0 : 0) * EFB_SCALE);
+    if (hudp && !(x0 <= 0 && x1 >= EFB_WIDTH)) {
+        int sx0 = (int)((float)x0 + hx + 0.5f) * EFB_SCALE, sx1 = (int)((float)x1 + hx + 0.5f) * EFB_SCALE;
+        glScissor(sx0, y0 * EFB_SCALE, x1 > x0 ? sx1 - sx0 : 0, (y1 > y0 ? y1 - y0 : 0) * EFB_SCALE);
+    } else
+        glScissor(wx(x0), y0 * EFB_SCALE, x1 > x0 ? wx(x1) - wx(x0) : 0, (y1 > y0 ? y1 - y0 : 0) * EFB_SCALE);
     /* depth */
     uint32_t z = u->bp[0x40];
     static const GLenum zf[8] = {GL_NEVER, GL_LESS, GL_EQUAL, GL_LEQUAL, GL_GREATER, GL_NOTEQUAL, GL_GEQUAL, GL_ALWAYS};

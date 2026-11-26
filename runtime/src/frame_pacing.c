@@ -115,9 +115,12 @@ void hle_frame_end(Cpu* c) {
         { void cull_report(void); cull_report(); }
         char clk[96];
         platform_clocks_str(clk, sizeof clk);
-        rt_log("[pace] %.1f frames/s (game target 30), game work %.1f ms per frame (idle waits left out), GPU %.1f ms per frame%s, %u s since the first frame",
+        rt_log("[pace] %.1f frames/s (game target 30), game work %.1f ms per frame (idle waits left out), GPU %.1f ms per frame%s, "
+               "screen %s, %u s since the first frame",
                g_n_frames / s, g_n_frames ? g_work_ns / 1e6 / g_n_frames : 0.0, platform_gpu_frame_ms(), clk,
-               (unsigned)((platform_now_ns() - g_t0_ns) / 1000000000ull));
+               settings_wide_k() > 1.0f ? "16:9" : "4:3", (unsigned)((platform_now_ns() - g_t0_ns) / 1000000000ull));
+        { void pso_wide_report(void); pso_wide_report(); }  /* 16:9: hooks and placements (pso_wide.c, gx_render.c) */
+        { void gx_wide_report(void); gx_wide_report(); }
         { void gx_pace_report(void); gx_pace_report(); }  /* the GP thread's frames and the menu's cost (gx_render.c) */
         g_stat_field = f; g_n_frames = 0; g_work_ns = 0;
     }

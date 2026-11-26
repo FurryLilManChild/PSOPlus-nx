@@ -28,6 +28,7 @@
 #define OS_INTERRUPT_PI_PE_TOKEN  18
 #define OS_INTERRUPT_PI_PE_FINISH 19
 #define GX_HOST_PICTURE 0xC1  /* not a GX opcode: the runtime's own (gx_host_picture) */
+#include "pso_wide.h"           /* GX_HOST_MARK 0xC2: the 16:9 placement marks (gx_host_mark) */
 
 GxState g_gx;
 
@@ -489,6 +490,14 @@ static size_t parse(const uint8_t* p, size_t len, int depth) {
             mark = i;  /* not a GX command: kept out of an SR_DFF recording */
             continue;
         }
+        if (cmd == GX_HOST_MARK && depth == 0) {                        /* ours: 16:9 placement (pso_wide.c) */
+            if (left < 8) { g_parse_need = 8; break; }
+            void gx_wide_mark(int kind, int place, int layer, uint32_t name);
+            gx_wide_mark(p[i + 1], p[i + 2], p[i + 3], rd32(p + i + 4));
+            i += 8;
+            mark = i;  /* not a GX command: kept out of an SR_DFF recording */
+            continue;
+        }
         if (cmd == 0x61) {                                              /* LOAD_BP_REG */
             if (left < 5) break;
             load_bp(rd32(p + i + 1));
@@ -927,6 +936,21 @@ void gx_host_picture(int slot) {
     pipe_flush();
     if (g_gx_async) { ring_push(b, 2); ring_kick(); }
     else gp_feed(b, 2);
+}
+
+/* game thread (pso_wide.c): a runtime command of n bytes (GX_HOST_MARK ...) behind everything the game
+ * queued so far, so the GP thread reads it between the same two GX commands. Only while the CPU FIFO is linked
+ * to the GP (immediate mode): while the game records a display list nothing is drawn, and the bytes must not
+ * reach the list in RAM. No wake-up: the GP thread takes it with the commands that follow. */
+void gx_host_mark(const uint8_t* b, int n) {
+    if ((CP_CR & 0x11) != 0x11) return;
+    if (g_wg_n) {
+        int m = g_wg_n;
+        g_wg_n = 0;
+        burst_out(g_wg, m);
+    }
+    if (g_gx_async) ring_push(b, (size_t)n);
+    else gp_feed(b, (size_t)n);
 }
 
 int gx_async(void) { return g_gx_async; }

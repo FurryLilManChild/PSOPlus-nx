@@ -11,3 +11,10 @@
 805D70D4 # game_addrs.h OS_RUNQUEUE_HINT: __OSThreadInit 0x80374E18
 805D70D8 # game_addrs.h OS_RESCHEDULE: __OSThreadInit 0x80374E74
 8071FEED # dsp.c: not an address, the DSP ROM's boot mail value (as in sonic-riders-recomp)
+801F93F4 # pso_wide.c RADAR_PROJ_RETURN: return address of TRaderMapCore::setup_overhead_projection's call 0x801F93F0 to 0x803D676C (disassembly; docs/widescreen-research.md section 1)
+805E0E18 # pso_wide.c FOV_ANGLE_SCALE: fov_angle_scale 0.85f, lfs at 0x803D67C4 in set_perspective_projection_from_fov
+8058CA60 # pso_wide.c scene_projection_state (+0x4C aspect, +0x54 inv_screen_scale): read by load_screen_space_matrix 0x803E20C4-0x803E20D0
+805D7734 # pso_wide.c frame buffer info pointer (halfwords +4, +6): read by load_screen_space_matrix 0x803E20D4
+805D6340 # pso_wide.h WIDE_LAYER_BASE: tl_su, the first of the 20 task layer pointers (to tl_fadeafter 0x805D638C); decomp symbol map, used by 0x802299DC-0x80229F54
+8022A8B4 # pso_wide.c: return address of render_nodes' render call (bctrl at 0x8022A8B0)
+8022A8BC # pso_wide.c: return address of render_nodes' recursive call (bl at 0x8022A8B8)

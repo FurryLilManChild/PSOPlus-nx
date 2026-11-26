@@ -53,7 +53,9 @@ moves, A chooses, B goes back or closes.
 - **Performance**: CPU clock (Stock, 1224, 1428 or 1785 MHz) and an FPS counter. The clock applies only while
   the game is on screen and returns to stock in the HOME menu, in sleep and on exit. If you use sys-clk, turn
   off its profile for this game, or it overrides the menu.
-- **Display**: resolution, field of view, sharpness (FSR 1), colour.
+- **Display**: screen (4:3 original, or 16:9 widescreen: the game's cameras see more to the sides, nothing
+  stretched, with the HUD and menus kept 4:3 in the middle; 4:3 is the default), resolution, field of view,
+  sharpness (FSR 1), colour.
 - **Controls**: a button map for every GameCube button, and Reset to default. Holding Minus always opens the
   menu, whatever the map.
 - **System**: version, build, current clocks, online status, screenshot.

@@ -498,12 +498,23 @@ static void apply_state(const GxUniforms* u) {
     int sox = (int)(u->bp[0x59] & 0x3FF) * 2, soy = (int)((u->bp[0x59] >> 10) & 0x3FF) * 2;
     float ax = xs < 0 ? -xs : xs, ay = ys < 0 ? -ys : ys;
     DkViewport vp = {(xo - ax - (float)sox) * g_k * g_s, (yo - ay - (float)soy) * g_s, 2 * ax * g_k * g_s, 2 * ay * g_s, 0.0f, 1.0f};
+    /* PSO 16:9, 2D placed through the perspective projection (gx_render.h GX_WIDE_HUD_PERSP): its 4:3 frame sits
+     * in the middle (x + 320 (k - 1)), so the viewport's centre and the scissor (the radar's corner, scrolling
+     * lists) move with it, not times k; gx.vert has already narrowed X by k. A scissor spanning the width stays
+     * full (fades, backgrounds). */
+    int hudp = g_k > 1.0f && (u->xfr[GX_XR_WIDE_FLAGS] & GX_WIDE_HUD_PERSP);
+    float hx = 320.0f * (g_k - 1.0f);
+    if (hudp) vp.x = (xo - (float)sox + hx - ax * g_k) * g_s;
     if (ST_CHANGED(vp, vp)) dkCmdBufSetViewports(g_cmd, 0, &vp, 1);
     int x0 = (int)((u->bp[0x20] >> 12) & 0x7FF) - sox, y0 = (int)(u->bp[0x20] & 0x7FF) - soy;
     int x1 = (int)((u->bp[0x21] >> 12) & 0x7FF) - sox + 1, y1 = (int)(u->bp[0x21] & 0x7FF) - soy + 1;
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
     DkScissor sc = {XSC(x0), SC(y0), x1 > x0 ? XSC(x1) - XSC(x0) : 0, SC(y1 > y0 ? y1 - y0 : 0)};
+    if (hudp && !(x0 <= 0 && x1 >= EFB_WIDTH)) {
+        sc.x = SC((float)x0 + hx);
+        sc.width = x1 > x0 ? SC((float)x1 + hx) - sc.x : 0;
+    }
     if (ST_CHANGED(sc, sc)) dkCmdBufSetScissors(g_cmd, 0, &sc, 1);
 
     static const DkCompareOp zf[8] = {DkCompareOp_Never, DkCompareOp_Less, DkCompareOp_Equal, DkCompareOp_Lequal,

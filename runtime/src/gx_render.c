@@ -12,6 +12,7 @@
 #include "gx_render.h"
 #include "settings.h"
 #include "overlay.h"
+#include "pso_wide.h"
 #include "runtime.h"
 
 void gx_texture_load_tlut(void);
@@ -68,7 +69,7 @@ static GxFrame* frame(void) {
         /* PSO: no game-state probes yet (Riders read its race/menu flags here for the HUD layout and
          * bloom). The HUD stays in the 4:3 middle when the picture is wide; no bloom. */
         g_frame->in_race = 0;
-        g_gx.xf_reg[GX_XR_WIDE_FLAGS] = g_settings.hud_stretch ? 0u : GX_WIDE_HUD_43;
+        g_gx.xf_reg[GX_XR_WIDE_FLAGS] = g_settings.hud_stretch ? 0u : GX_WIDE_HUD_43;  /* GX_WIDE_HUD_PERSP: per draw */
         float fov = (float)g_fov_scale;
         memcpy(&g_gx.xf_reg[GX_XR_FOV], &fov, 4);
         float asp = settings_game_k() / k;  /* online: the room's camera wider than this screen */
@@ -620,9 +621,9 @@ static int is_movie_draw(void) {
     if ((i0 & 0x3FF) != 639 || ((i0 >> 10) & 0x3FF) != 479 || ((i0 >> 20) & 15) != 6) return 0;
     return !gx_texture_is_copy((g_gx.bp[0x94] & 0xFFFFFF) << 5);
 }
-static void wide_anchor(GxFrame* f, uint32_t v0, uint32_t count) {
-    GxVertex* v = &f->verts[v0];
-    uint32_t fl = g_gx.xf_reg[GX_XR_WIDE_FLAGS];
+/* a draw's extent in clip space (X -1..1 = the game's viewport): orthographic, or perspective (PSO's 2D goes
+ * through its perspective projection with a screen space matrix: divided by w; points behind the eye left out) */
+static void draw_extent(const GxVertex* v, uint32_t count, int persp, float* xlo, float* xhi, float* ylo_, float* yhi_) {
     float P0, P1, P2, P3, xs;
     memcpy(&P0, &g_gx.xf_reg[0x20], 4);
     memcpy(&P1, &g_gx.xf_reg[0x21], 4);
@@ -632,23 +633,44 @@ static void wide_anchor(GxFrame* f, uint32_t v0, uint32_t count) {
     float lo = 1e30f, hi = -1e30f, ylo = 1e30f, yhi = -1e30f;
     for (uint32_t i = 0; i < count; i++) {
         uint32_t pm = ((uint32_t)v[i].pos[3] * 4) & 0xFFC;
-        float r[4];
+        float r[12];
         memcpy(r, &g_gx.xf_mem[pm], sizeof r);
-        float x = P0 * (r[0] * v[i].pos[0] + r[1] * v[i].pos[1] + r[2] * v[i].pos[2] + r[3]) + P1;
+        float vx = r[0] * v[i].pos[0] + r[1] * v[i].pos[1] + r[2] * v[i].pos[2] + r[3];
+        float vy = r[4] * v[i].pos[0] + r[5] * v[i].pos[1] + r[6] * v[i].pos[2] + r[7];
+        float x, y;
+        if (persp) {
+            float vz = r[8] * v[i].pos[0] + r[9] * v[i].pos[1] + r[10] * v[i].pos[2] + r[11];
+            if (!(-vz > 1e-6f)) continue;
+            x = (P0 * vx + P1 * vz) / -vz;
+            y = (P2 * vy + P3 * vz) / -vz;
+        } else {
+            x = P0 * vx + P1;
+            y = P2 * vy + P3;
+        }
         if (xs < 0.0f) x = -x;  /* a mirrored viewport */
         if (x < lo) lo = x;
         if (x > hi) hi = x;
-        memcpy(r, &g_gx.xf_mem[pm + 4], sizeof r);
-        float y = P2 * (r[0] * v[i].pos[0] + r[1] * v[i].pos[1] + r[2] * v[i].pos[2] + r[3]) + P3;
         if (y < ylo) ylo = y;
         if (y > yhi) yhi = y;
     }
+    *xlo = lo; *xhi = hi; *ylo_ = ylo; *yhi_ = yhi;
+}
+static int anchor_place(GxFrame* f, uint32_t v0, uint32_t count, float lo, float hi, float ylo, float yhi, int movie_ok);
+static void wide_anchor(GxFrame* f, uint32_t v0, uint32_t count) {
+    float lo, hi, ylo, yhi;
+    draw_extent(&f->verts[v0], count, 0, &lo, &hi, &ylo, &yhi);
+    anchor_place(f, v0, count, lo, hi, ylo, yhi, 1);
+}
+/* the anchor code of a 2D draw from its extent (and the bands it joins); returns the code */
+static int anchor_place(GxFrame* f, uint32_t v0, uint32_t count, float lo, float hi, float ylo, float yhi, int movie_ok) {
+    GxVertex* v = &f->verts[v0];
+    uint32_t fl = g_gx.xf_reg[GX_XR_WIDE_FLAGS];
     int code = GX_ANCHOR_MIDDLE;
-    if (lo <= -0.99f && hi >= 0.99f && ylo <= -0.99f && yhi >= 0.99f && is_movie_draw()) {
+    if (movie_ok && lo <= -0.99f && hi >= 0.99f && ylo <= -0.99f && yhi >= 0.99f && is_movie_draw()) {
         /* a movie frame (story scenes, Theater, intro): kept 4:3 with black bars instead of stretched */
         if (anchor_log()) rt_log("[anchor] draw %u: movie frame -> 4:3", g_nanch);
         for (uint32_t i = 0; i < count; i++) v[i].nrm[3] = (float)GX_ANCHOR_MIDDLE;
-        return;
+        return GX_ANCHOR_MIDDLE;
     }
     if (lo <= -0.99f && hi >= 0.99f) code = GX_ANCHOR_STRETCH;
     else if (fl & GX_WIDE_HUD_EDGES) {
@@ -685,7 +707,7 @@ static void wide_anchor(GxFrame* f, uint32_t v0, uint32_t count) {
         rt_log("[anchor] draw %u: %u verts x %.3f..%.3f y %.3f..%.3f -> %d", g_nanch - 1, count, lo, hi, ylo, yhi, code);
     *me = (Anchored){v0, count, lo, hi, ylo, yhi, GX_ANCHOR_MIDDLE, code == GX_ANCHOR_STRETCH};
     anchor_set(f, me, code);
-    if (code == GX_ANCHOR_STRETCH) return;
+    if (code == GX_ANCHOR_STRETCH) return code;
     /* the band this draw belongs to: the draws connected to it */
     uint64_t in = 1ull << (g_nanch - 1);
     float b0 = lo, b1 = hi;
@@ -710,10 +732,181 @@ static void wide_anchor(GxFrame* f, uint32_t v0, uint32_t count) {
                 anchor_set(f, &g_anch[j], GX_ANCHOR_STRETCH);
                 if (anchor_log()) rt_log("[anchor]   draw %u joins a band: stretched", j);
             }
+    return me->code;
+}
+
+/* ---- PSO 16:9 (pso_wide.h, docs/widescreen-research.md build A): where each perspective draw goes ----
+ * The game thread's marks (pso_wide.c), read here in order with the GX stream, say which object draws now
+ * and how its 2D is placed. A screen space draw is one whose position matrix holds the matrix the last
+ * load_screen_space_matrix calls loaded (kept when they ran: WIDE_MARK_SS). For an object placed as HUD:
+ * its screen space draws are 4:3 in the middle, or stretched when they span the width (anchor_place, the
+ * same rule as the orthographic 2D); its other perspective draws (the radar's own overhead view) likewise,
+ * unless their projection is one of the game's widened ones (WIDE_MARK_PROJ), which already draw right.
+ * Follow: kept at their place, as narrow as in 4:3 (per object for speech bubbles, per draw for the lens
+ * flare's sprites). Everything else is left as the widened projection draws it. */
+static struct { uint8_t place, layer; uint32_t name; unsigned seq; int world_logged; } g_wctx = {WIDE_OUTSIDE, WIDE_NO_LAYER, 0, 0, 0};
+static uint32_t g_ss_mtx[4][12];  /* the last screen space matrices (position matrix 0 after the load) */
+static int g_nss;
+static uint32_t g_wproj[4][6];    /* the last widened projections (XF 0x1020-0x1025) */
+static int g_nwproj;
+static unsigned long long g_wide_draws[5];  /* [wide] line: draws centred, stretched, follow, 3D in HUD left, world 2D */
+static int g_hudlog = -1;         /* SR_HUDLOG=0: no [hud] lines */
+
+void gx_wide_mark(int kind, int place, int layer, uint32_t name) {  /* GP thread (gx_fifo.c) */
+    if (kind == WIDE_MARK_CTX) {
+        g_wctx.place = (uint8_t)place;
+        g_wctx.layer = (uint8_t)layer;
+        g_wctx.name = name;
+        g_wctx.seq++;
+        g_wctx.world_logged = 0;
+    } else if (kind == WIDE_MARK_SS) {
+        memcpy(g_ss_mtx[g_nss++ & 3], &g_gx.xf_mem[0], sizeof g_ss_mtx[0]);
+    } else if (kind == WIDE_MARK_PROJ) {
+        memcpy(g_wproj[g_nwproj++ & 3], &g_gx.xf_reg[0x20], sizeof g_wproj[0]);
+    }
+}
+static int ss_matrix(uint32_t pm) {
+    const uint32_t* m = &g_gx.xf_mem[(pm * 4) & 0xFFC];
+    int n = g_nss < 4 ? g_nss : 4;
+    for (int i = 0; i < n; i++)
+        if (!memcmp(m, g_ss_mtx[i], sizeof g_ss_mtx[i])) return 1;
+    return 0;
+}
+static int proj_widened(void) {
+    int n = g_nwproj < 4 ? g_nwproj : 4;
+    for (int i = 0; i < n; i++)
+        if (!memcmp(&g_gx.xf_reg[0x20], g_wproj[i], sizeof g_wproj[i])) return 1;
+    return 0;
+}
+
+/* [hud] lines: one per new (layer, class, placement), so an element shown wrongly can be named from the log */
+enum { HL_CENTRED, HL_STRETCHED, HL_FOLLOW, HL_3D_LEFT, HL_WORLD_2D };
+static void hud_log(int what) {
+    if (g_hudlog < 0) { const char* e = getenv("SR_HUDLOG"); g_hudlog = !(e && e[0] == '0'); }
+    if (!g_hudlog) return;
+    static struct { uint32_t name; uint8_t layer, place, what, used; } seen[1024];
+    static int nlines;
+    uint32_t h = (g_wctx.name * 2654435761u ^ (uint32_t)g_wctx.layer * 40503u ^ (uint32_t)what * 977u ^ g_wctx.place) & 1023u;
+    for (int k = 0; k < 16; k++) {
+        uint32_t i = (h + (uint32_t)k) & 1023u;
+        if (seen[i].used) {
+            if (seen[i].name == g_wctx.name && seen[i].layer == g_wctx.layer && seen[i].what == what &&
+                seen[i].place == g_wctx.place)
+                return;
+            continue;
+        }
+        seen[i].used = 1;
+        seen[i].name = g_wctx.name; seen[i].layer = g_wctx.layer; seen[i].what = (uint8_t)what; seen[i].place = g_wctx.place;
+        if (++nlines > 600) return;
+        char name[48] = "(no class)";
+        if (g_wctx.place == WIDE_OUTSIDE) snprintf(name, sizeof name, "(outside the task tree)");
+        else if (g_wctx.name && guest_span_ok(g_wctx.name, 1)) {
+            uint32_t n = 0;
+            while (n < sizeof name - 1 && guest_span_ok(g_wctx.name + n, 1) && ld8r(g_wctx.name + n)) {
+                name[n] = (char)ld8r(g_wctx.name + n);
+                n++;
+            }
+            name[n] = 0;
+        }
+        static const char* const places[] = {"world", "HUD", "follow (one piece)", "follow (each sprite)", "outside"};
+        static const char* const whats[] = {"centred 4:3", "2D stretched to the width (spans 640)",
+                                            "2D follows its 3D point", "3D with a widened camera, left as drawn",
+                                            "2D left stretched (world object)"};
+        rt_log("[hud] %s %s (%s): %s", g_wctx.layer < WIDE_LAYERS ? k_wide_layer_names[g_wctx.layer] : "-", name,
+               places[g_wctx.place < 5 ? g_wctx.place : 0], whats[what]);
+        if (nlines == 600) rt_log("[hud] 600 lines: no more");
+        return;
+    }
+}
+
+/* before the state snapshot: 0 = as drawn, 1 = HUD 2D (middle / stretch), 2 = follow (one piece), 3 = follow
+ * (this draw), 4 = HUD 3D (middle, never stretched: the radar's map runs past its scissor) */
+static int wide_kind(void) {
+    uint8_t pl = g_wctx.place;
+    if (pl == WIDE_WORLD && (g_wctx.world_logged || !g_hudlog)) return 0;
+    int ss = !(g_gx.cp[0x50] & 1) && ss_matrix(g_gx.cp[0x30] & 63);
+    switch (pl) {
+    case WIDE_WORLD:
+        if (ss) { hud_log(HL_WORLD_2D); g_wctx.world_logged = 1; g_wide_draws[4]++; }
+        return 0;
+    case WIDE_HUD:
+        if (ss) return 1;
+        if (proj_widened()) { hud_log(HL_3D_LEFT); g_wide_draws[3]++; return 0; }
+        return 4;  /* 3D with a 4:3 camera of its own (the radar's overhead view): 4:3 in the middle */
+    case WIDE_OUTSIDE: return ss ? 1 : 0;
+    case WIDE_FOLLOW_UNIT: return ss ? 2 : 0;
+    case WIDE_FOLLOW_DRAW: return ss ? 3 : 0;
+    }
+    return 0;
+}
+
+/* follow: every vertex gets GX_ANCHOR_FOLLOW + the middle of its piece (one object's draws together) */
+static struct { GxFrame* f; unsigned long long frame; unsigned seq; uint32_t n; uint32_t v0[256], cnt[256]; float lo, hi; } g_unit;
+static void follow_set(GxFrame* f, uint32_t v0, uint32_t n, float mid) {
+    if (mid < -8.0f) mid = -8.0f;
+    if (mid > 8.0f) mid = 8.0f;
+    for (uint32_t i = 0; i < n; i++) f->verts[v0 + i].nrm[3] = GX_ANCHOR_FOLLOW + mid;
+}
+static void wide_place(GxFrame* f, uint32_t v0, uint32_t count, int kind) {
+    if (kind == 4) {
+        for (uint32_t i = 0; i < count; i++) f->verts[v0 + i].nrm[3] = (float)GX_ANCHOR_MIDDLE;
+        g_wide_draws[0]++;
+        hud_log(HL_CENTRED);
+        return;
+    }
+    float lo, hi, ylo, yhi;
+    draw_extent(&f->verts[v0], count, 1, &lo, &hi, &ylo, &yhi);
+    if (!(lo <= hi)) { lo = hi = 0.0f; }  /* nothing in front of the eye: drawn nowhere */
+    if (kind == 1) {
+        int code = anchor_place(f, v0, count, lo, hi, ylo, yhi, 0);
+        g_wide_draws[code == GX_ANCHOR_STRETCH]++;
+        hud_log(code == GX_ANCHOR_STRETCH ? HL_STRETCHED : HL_CENTRED);
+        if (anchor_log())
+            rt_log("[anchor]   (perspective 2D, %s class %08X)", g_wctx.layer < WIDE_LAYERS ? k_wide_layer_names[g_wctx.layer] : "-",
+                   g_wctx.name);
+        return;
+    }
+    g_wide_draws[2]++;
+    hud_log(HL_FOLLOW);
+    float xs;
+    memcpy(&xs, &g_gx.xf_reg[0x1A], 4);
+    if (xs < 0.0f) { float t = -lo; lo = -hi; hi = t; }  /* gx.vert applies the middle before the mirror */
+    if (kind == 3) { follow_set(f, v0, count, 0.5f * (lo + hi)); return; }
+    if (g_unit.f != f || g_unit.frame != g_frames || g_unit.seq != g_wctx.seq) {
+        g_unit.f = f; g_unit.frame = g_frames; g_unit.seq = g_wctx.seq; g_unit.n = 0;
+        g_unit.lo = lo; g_unit.hi = hi;
+    }
+    if (lo < g_unit.lo) g_unit.lo = lo;
+    if (hi > g_unit.hi) g_unit.hi = hi;
+    if (g_unit.n < 256) { g_unit.v0[g_unit.n] = v0; g_unit.cnt[g_unit.n] = count; g_unit.n++; }
+    float mid = 0.5f * (g_unit.lo + g_unit.hi);  /* the piece so far: earlier draws are marked again */
+    for (uint32_t j = 0; j < g_unit.n; j++) follow_set(f, g_unit.v0[j], g_unit.cnt[j], mid);
+    if (g_unit.n == 256) follow_set(f, v0, count, mid);
+}
+
+/* every 10 s with the [pace] line (frame_pacing.c) */
+void gx_wide_report(void) {
+    unsigned long long t = g_wide_draws[0] + g_wide_draws[1] + g_wide_draws[2] + g_wide_draws[3] + g_wide_draws[4];
+    if (!t && !(settings_wide_k() > 1.0f)) return;
+    rt_log("[wide] GP side: 2D draws centred %llu, stretched %llu, follow %llu; HUD 3D left as drawn %llu; world 2D classes %llu",
+           g_wide_draws[0], g_wide_draws[1], g_wide_draws[2], g_wide_draws[3], g_wide_draws[4]);
+    memset(g_wide_draws, 0, sizeof g_wide_draws);
 }
 
 static void draw_impl(int prim, int vat, uint32_t count, const uint8_t* vertices, uint32_t vertex_size) {
     if (!count) return;
+    /* PSO 16:9: a perspective draw placed like 2D sets GX_WIDE_HUD_PERSP in its state (pso_wide.h) */
+    int wkind = 0;
+    {
+        GxFrame* fw = frame();
+        if (fw->wide_k > 1.0f && g_gx.xf_reg[0x26] == 0) wkind = wide_kind();
+        uint32_t fl = g_gx.xf_reg[GX_XR_WIDE_FLAGS], want = wkind ? fl | GX_WIDE_HUD_PERSP : fl & ~GX_WIDE_HUD_PERSP;
+        if (want != fl) {
+            g_gx.xf_reg[GX_XR_WIDE_FLAGS] = want;
+            g_gx.regs_dirty = 1;
+            g_state_dirty = 1;
+        }
+    }
     if (g_state_dirty) {
         uint64_t ts = rt_ticks();
         push_state();
@@ -745,7 +938,7 @@ static void draw_impl(int prim, int vat, uint32_t count, const uint8_t* vertices
     if (check < 0) check = getenv("SR_DECODECHECK") != NULL;
     uint64_t td = rt_ticks(), dec0 = g_decode_all;  /* a full helper queue syncs inside: counted once below */
     /* 2D in a wide mode: decoded here, the anchor needs the positions (wide_anchor) */
-    int anchor = g_gx.xf_reg[0x26] != 0 && (g_gx.xf_reg[GX_XR_WIDE_FLAGS] & GX_WIDE_HUD_43) && f->wide_k > 1.0f;
+    int anchor = (g_gx.xf_reg[0x26] != 0 && (g_gx.xf_reg[GX_XR_WIDE_FLAGS] & GX_WIDE_HUD_43) && f->wide_k > 1.0f) || wkind;
     if (!check) {
         if (anchor || !dj_queue(&fplan, &f->verts[f->nverts], count, vertices, count * vertex_size))
             for (uint32_t i = 0; i < count; i++) decode_fast(&p, &fplan, &f->verts[f->nverts + i]);
@@ -768,7 +961,8 @@ static void draw_impl(int prim, int vat, uint32_t count, const uint8_t* vertices
         if ((checked & ~0xFFFFFull) != ((checked - count) & ~0xFFFFFull))
             rt_log("[decodecheck] %llu vertices compared, %llu mismatches", checked, bad);
     }
-    if (anchor) wide_anchor(f, f->nverts, count);
+    if (wkind) wide_place(f, f->nverts, count, wkind);
+    else if (anchor) wide_anchor(f, f->nverts, count);
     { uint64_t d = rt_ticks() - td; g_decode_ticks += d; g_decode_all = dec0 + d; }
     f->idx = grow(f->idx, &f->cap_idx, f->nidx + out_n, sizeof(uint32_t));
     uint32_t* o = f->idx + f->nidx;
