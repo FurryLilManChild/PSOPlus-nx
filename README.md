@@ -7,7 +7,7 @@ the Schtserv community server.
 
 **No game data is included.** You need your own copy of the game.
 
-Current release: **0.6.0** (adds online play).
+Current release: **1.0.0**.
 
 ## What you need
 
@@ -67,17 +67,25 @@ Schtserv by itself; no network setup is needed in the game. **First time on Scht
 number first, see [ONLINE.md](ONLINE.md).** While online, press the right stick to chat with the Switch
 keyboard. Your memory card is backed up before each online session.
 
-## Performance
+## Performance and testing
 
-The game runs at its original 30 fps. At stock clocks the Episode I areas tested so far hold 30 fps. Busy
-parts of Episode II can drop to about 24 fps at stock; 1428 MHz in the port menu holds 30 there. Higher
-resolutions and sharpness cost graphics time and can lower the frame rate in busy areas.
+The game runs at its original 30 fps. Episode I and Episode II were both played through every area, offline
+and online.
+
+- **Episode I** runs at full speed at stock clocks.
+- **Episode II**: set the CPU to **1224 MHz** in the port menu (Performance). At stock clocks its busiest
+  spots can dip below 30 fps now and then.
+- Movies are decoded natively and play at full speed.
+
+Higher resolutions and sharpness cost graphics time and can lower the frame rate in busy areas.
+
+Every area was tested, but that cannot rule out every bug. If you find one, please report it (see below).
 
 ## Known issues
 
 - The ending movies use a different path from the opening movies and have not been checked on the console yet.
 - Resetting the game from inside the game can hang. Close it from the HOME menu instead.
-- Some busy areas dip below 30 fps at stock clocks.
+- Some busy Episode II areas dip below 30 fps at stock clocks; use 1224 MHz (see Performance).
 - The port menu does not pause the game (it keeps running behind the menu, with your buttons going to the
   menu), and the frame rate can drop while the menu is open.
 - Only the USA disc, revision 2.

@@ -1,5 +1,14 @@
 # Progress log (newest first)
 
+## 2026-11-25: Release 1.0.0
+
+- The owner's console run of 468ad988: the attract movie at a steady 30 fps, native decode 6.2 to 6.6 ms per
+  picture (longest 9.7) at 1224 MHz, guest idle about 19 ms per frame, 0 slices by the game's decoder.
+- The owner then played every area of Episode I and Episode II, offline and online: Episode I at full speed at
+  stock clocks; Episode II recommended at 1224 MHz to avoid occasional dips.
+- 1.0.0 is main at this point: online play (0.6.0), the RVZ conversion, opening movies shown natively and decoded
+  natively. Version and README only changed since the tested build.
+
 ## 2026-11-25: Native MPEG-1 decoding for the movies (test build, not yet run on the console)
 
 - Cause of the slow attract movie (owner's log, build cf64678, 1224 MHz): the game core was 100% busy in movie.rel's
