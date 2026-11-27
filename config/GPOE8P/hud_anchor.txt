@@ -1,0 +1,40 @@
+# 16:9 HUD placement (runtime/src/pso_wide.c, docs/widescreen-research.md build B). Used with
+# Display > HUD: "Screen edges". Built into the program; a copy named hud_anchor.txt next to settings.ini
+# (Switch: sdmc:/switch/psoplus/hud_anchor.txt) is read instead, so a placement can be tried without a new build.
+#
+# One line per game class: <class name> <placement>. A name ending in * matches every class starting with
+# it; an exact name wins over a prefix, a longer prefix over a shorter one. The line "* <placement>" is the
+# default for every HUD class not listed. Placements:
+#   left / right  the window keeps its distance from the 4:3 edge, now from the 16:9 screen edge
+#   centre        4:3 in the middle (as build A)
+#   stretch       stretched to the full width
+#   auto          from where the window draws: inside the left third and the left half -> left,
+#                 inside the right third and the right half -> right, anything else -> centre
+#   follow        placed from a 3D point, its width kept (speech bubbles)
+# A window moves in one piece (its frame, bars, text and icons together). The [hud] lines of the log name
+# every window with its placement and the x range it drew in (0..640 of the 4:3 frame).
+# Positions below are from the game's 1-player window layout table (0x8044FE00) unless marked.
+
+# Everything else stays in the middle: menus, shops, bank, quest board, guild card, dialogue and message
+# windows, word select, keyboard, title, character select, options, pause, results, loading.
+*                         centre
+
+# Player status: name, level, HP / TP bars, status icons (layout 28,37, 153 x 50; icons from 226,37)
+TWindowSimpleStatus       left
+TWindowEffectParty        left     # its flash, drawn at the status window's place (layout 28,37)
+# Other players' HP (layout 30,116, 114 x 46)
+TWindowPartyStatus        left
+# Lock-on window: the target's name and HP (layout x 30, bottom at y 444)
+TWindowLockOn             left
+# Action palette (layout 471,337) and its light effect (same place)
+TWindowActionPalette      right
+TWindowEffectLight        right
+# Information popups (layout 373,203 or 373,123, 255 x 120: x 373..628)
+TWindowMessageInfomation  right
+# Radar: corner 480..608 in normal play; its larger map modes (x 32..480 and 96..544) span the middle,
+# so measured: they stay centred
+TRaderMap*                auto
+# Smaller notices (inferred from their layout entries; measured to be safe)
+TWindowTradeRequest       auto     # layout 17,277
+TObjSoloPlayWin           auto     # layout 20,120
+TObjDeadListWin           auto     # layout 400,340

@@ -27,6 +27,8 @@ typedef struct Settings {
     int handheld_gpu;   /* Switch: Nintendo's 384 MHz handheld GPU configuration (platform_set_handheld_gpu) */
     int hud_stretch;    /* SCREEN_WIDE: 2D (HUD, menus) stretched to the width instead of 4:3 in the middle;
                            SCREEN_FIT always moves the HUD to the screen edges */
+    int hud_edges;      /* PSO, SCREEN_WIDE: the HUD windows at the screen edges (1, default) or 4:3 in the middle (0)
+                           (pso_hud.h, gx_render.c wide_units_finish) */
     int fov;            /* field of view in percent of the game's (FOV_MIN..FOV_MAX, 100 = original) */
     int pc_scale;       /* PC: internal resolution, 1-4 x 640x528 (2 = the old fixed 2x) */
     int msaa;           /* PC: anti-aliasing samples per pixel, 1 (off), 2, 4 or 8 */

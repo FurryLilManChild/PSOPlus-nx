@@ -28,6 +28,14 @@ extern "C" {
  * to orthographic draws and leaves out the field of view setting; the backends map its viewport and
  * scissor X around the 4:3 middle (x + 320 (k - 1)) instead of times k, unless the scissor spans the width */
 #define GX_WIDE_HUD_PERSP 4u
+/* PSO 16:9, build B (pso_hud.h): this HUD draw's window was pinned to the left / right screen edge. Set on the
+ * frame's states after the frame is complete (gx_render.c wide_units_finish); the backends shift the scissor by
+ * -320 (k - 1) / +320 (k - 1) (gx.vert moves the vertices by the anchor code GX_ANCHOR_LEFT / RIGHT). Bits 8-15
+ * name the window within the frame (0: none), so no state is shared by two windows. */
+#define GX_WIDE_PIN_LEFT 8u
+#define GX_WIDE_PIN_RIGHT 16u
+#define GX_WIDE_UNIT_SHIFT 8
+#define GX_WIDE_UNIT_MASK 0xFF00u
 /* per draw, in every vertex's nrm[3] (gx.vert): 4:3 in the middle, moved to the left / right edge, or
  * stretched to the width (draws spanning the whole width: fades, backgrounds, screen effects).
  * GX_ANCHOR_FOLLOW + c (c = the piece's middle in clip X, -8..8): its middle kept, k times narrower about it */

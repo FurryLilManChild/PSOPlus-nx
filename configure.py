@@ -400,6 +400,12 @@ with open(os.path.join(ROOT, "build.ninja"), "w") as f:
         shader_h = [shader_h, spec_h, icons_h]
     else:
         shader_h = [shader_h] if shader_h else []
+    # the 16:9 HUD placement table (config/GPOE8P/hud_anchor.txt), built into the program (runtime/src/pso_wide.c)
+    anchor_h = OUT + "/gen/hud_anchor_txt.h"
+    n.rule("embedtext", "%s tools/embed_text.py $out $sym $in" % py, description="TEXT $out", restat=True)
+    n.build(anchor_h, "embedtext", "config/GPOE8P/hud_anchor.txt", implicit=["tools/embed_text.py"],
+            variables={"sym": "k_hud_anchor_txt"})
+    shader_h = shader_h + [anchor_h]
 
     objs = []
     for src in gen_c:

@@ -103,7 +103,11 @@ void main() {
   if ((XR(0x26) != 0u && (XR(0x7F) & 1u) != 0u) || hudp) {
     float wk = uintBitsToFloat(XR(0x7E));
     float an = a_nrm.w;
-    if (wk > 1.0 && an < 2.5) clip.x = clip.x / wk + (an > 1.5 ? 1.0 - 1.0 / wk : an > 0.5 ? 1.0 / wk - 1.0 : 0.0) * clip.w;
+    /* left / right: the edge shift 320 (k - 1) pixels; a HUD draw's viewport is 4:3 ax columns half wide,
+       drawn ax k wide (pso_hud.h hud_shift_clip), so the shift in clip units is (320 / ax) (1 - 1 / k) */
+    float sh = 1.0 - 1.0 / wk;
+    if (hudp) sh = sh * 320.0 / max(abs(uintBitsToFloat(XR(0x1A))), 1.0);
+    if (wk > 1.0 && an < 2.5) clip.x = clip.x / wk + (an > 1.5 ? sh : an > 0.5 ? -sh : 0.0) * clip.w;
     /* follow (GX_ANCHOR_FOLLOW + the piece's middle c): its middle kept, k times narrower about it */
     else if (wk > 1.0 && an > 7.5) clip.x = clip.x / wk + (an - 16.0) * (1.0 - 1.0 / wk) * clip.w;
   }

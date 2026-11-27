@@ -491,10 +491,10 @@ static size_t parse(const uint8_t* p, size_t len, int depth) {
             continue;
         }
         if (cmd == GX_HOST_MARK && depth == 0) {                        /* ours: 16:9 placement (pso_wide.c) */
-            if (left < 8) { g_parse_need = 8; break; }
-            void gx_wide_mark(int kind, int place, int layer, uint32_t name);
-            gx_wide_mark(p[i + 1], p[i + 2], p[i + 3], rd32(p + i + 4));
-            i += 8;
+            if (left < WIDE_MARK_BYTES) { g_parse_need = WIDE_MARK_BYTES; break; }
+            void gx_wide_mark(int kind, int place, int layer, uint32_t name, uint32_t unit);
+            gx_wide_mark(p[i + 1], p[i + 2], p[i + 3], rd32(p + i + 4), rd32(p + i + 8));
+            i += WIDE_MARK_BYTES;
             mark = i;  /* not a GX command: kept out of an SR_DFF recording */
             continue;
         }

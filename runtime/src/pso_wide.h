@@ -1,9 +1,10 @@
-/* 16:9 widescreen (docs/widescreen-research.md, build A): shared by the game thread side (pso_wide.c: the
- * three game hooks) and the GP thread side (gx_render.c: where each draw goes).
+/* 16:9 widescreen (docs/widescreen-research.md, builds A and B): shared by the game thread side (pso_wide.c:
+ * the three game hooks) and the GP thread side (gx_render.c: where each draw goes).
  *
  * The game thread tells the GP thread, in order with the GX command stream, which object is drawing and how
- * its 2D is placed, with 8-byte runtime commands that are not GX opcodes (gx_fifo.c gx_host_mark):
- *   GX_HOST_MARK, kind, placement, layer, class name pointer (big-endian guest address). */
+ * its 2D is placed, with 12-byte runtime commands that are not GX opcodes (gx_fifo.c gx_host_mark):
+ *   GX_HOST_MARK, kind, placement byte (WIDE_MARK_PLACE...), layer, class name pointer, window (the object
+ *   whose draws move as one piece: build B), both big-endian guest addresses. */
 #pragma once
 #include <math.h>
 #include <stdint.h>
@@ -25,6 +26,12 @@ enum {
     WIDE_OUTSIDE,      /* drawn outside the task tree (loading screens, the info icon): screen space as HUD */
 };
 #define WIDE_NO_LAYER 0xFFu
+#define WIDE_MARK_BYTES 12
+/* the placement byte: WIDE_* in bits 0-2, the class's own hud_anchor.txt line (pso_hud.h HUD_*) in bits 3-5,
+ * split screen on (the game's view count above 1) in bit 6 */
+static inline uint8_t wide_place_byte(int place, int force, int split) {
+    return (uint8_t)((place & 7) | (force & 7) << 3 | (split ? 0x40 : 0));
+}
 
 /* The game's task layers, in address order from tl_su (0x805D6340) to tl_fadeafter (0x805D638C):
  * names from the decomp's symbol map (zeroz41/pso-decomp, MIT). */

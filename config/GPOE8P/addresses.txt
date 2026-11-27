@@ -18,3 +18,4 @@
 805D6340 # pso_wide.h WIDE_LAYER_BASE: tl_su, the first of the 20 task layer pointers (to tl_fadeafter 0x805D638C); decomp symbol map, used by 0x802299DC-0x80229F54
 8022A8B4 # pso_wide.c: return address of render_nodes' render call (bctrl at 0x8022A8B0)
 8022A8BC # pso_wide.c: return address of render_nodes' recursive call (bl at 0x8022A8B8)
+805D34B8 # pso_wide.c VIEW_COUNT: camera_split_screen_selector (1, or 2 to 4 in split screen), read by TCameraCtrl::get_view_count 0x8006B330 (lwz r3,-0x7148(r13)); decomp symbol map

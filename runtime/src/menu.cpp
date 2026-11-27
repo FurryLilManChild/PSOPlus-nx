@@ -422,11 +422,26 @@ void tab_display() {
     }
     ImGui::SameLine();
     if (radio("16:9 widescreen", g_settings.screen == SCREEN_WIDE,
-              "The game's cameras see more to the sides, nothing stretched. The HUD and menus stay 4:3 in the "
-              "middle. The graphics chip draws a third more pixels, so busy areas can run slower.")) {
+              "The game's cameras see more to the sides, nothing stretched. The graphics chip draws a third more "
+              "pixels, so busy areas can run slower.")) {
         g_settings.screen = SCREEN_WIDE;
         settings_apply();
     }
+    heading("HUD (16:9 only)");
+    ImGui::BeginDisabled(g_settings.screen != SCREEN_WIDE);
+    if (radio("Middle", !g_settings.hud_edges,
+              "The whole HUD stays 4:3 in the middle of the picture, as on the GameCube.")) {
+        g_settings.hud_edges = 0;
+        settings_apply();
+    }
+    ImGui::SameLine();
+    if (radio("Screen edges", g_settings.hud_edges != 0,
+              "Status, party HP, lock-on window, action palette, radar and info popups move to the sides of the "
+              "screen. Menus, shops, dialogue and word select stay in the middle.")) {
+        g_settings.hud_edges = 1;
+        settings_apply();
+    }
+    ImGui::EndDisabled();
     heading("Field of view");
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14);
     ImGui::SliderInt("##fov", &g_settings.fov, FOV_MIN, FOV_MAX, "%d%%");
@@ -546,8 +561,9 @@ void tab_display() {
     if (check("Fullscreen  (F11 / Alt+Enter)", &g_settings.fullscreen, "Borderless fullscreen on the current display."))
         settings_apply();
 #endif
-    note(g_settings.screen == SCREEN_WIDE ? "16:9: the HUD and menus stay 4:3 in the middle of the picture."
-                                          : "The picture is 4:3, as on the GameCube.");
+    note(g_settings.screen != SCREEN_WIDE ? "The picture is 4:3, as on the GameCube."
+         : g_settings.hud_edges ? "16:9: the HUD at the screen edges; menus stay 4:3 in the middle."
+                                : "16:9: the HUD and menus stay 4:3 in the middle of the picture.");
 }
 
 #ifdef __SWITCH__

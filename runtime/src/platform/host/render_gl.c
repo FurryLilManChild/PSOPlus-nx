@@ -360,7 +360,10 @@ static void apply_state(const GxUniforms* u) {
     if (y0 < 0) y0 = 0;
     glEnable(GL_SCISSOR_TEST);
     if (hudp && !(x0 <= 0 && x1 >= EFB_WIDTH)) {
-        int sx0 = (int)((float)x0 + hx + 0.5f) * EFB_SCALE, sx1 = (int)((float)x1 + hx + 0.5f) * EFB_SCALE;
+        /* a window pinned to a screen edge (GX_WIDE_PIN_*, build B): its scissor moves with it */
+        uint32_t wf = u->xfr[GX_XR_WIDE_FLAGS];
+        float px = hx + (wf & GX_WIDE_PIN_LEFT ? -hx : wf & GX_WIDE_PIN_RIGHT ? hx : 0.0f);
+        int sx0 = (int)((float)x0 + px + 0.5f) * EFB_SCALE, sx1 = (int)((float)x1 + px + 0.5f) * EFB_SCALE;
         glScissor(sx0, y0 * EFB_SCALE, x1 > x0 ? sx1 - sx0 : 0, (y1 > y0 ? y1 - y0 : 0) * EFB_SCALE);
     } else
         glScissor(wx(x0), y0 * EFB_SCALE, x1 > x0 ? wx(x1) - wx(x0) : 0, (y1 > y0 ? y1 - y0 : 0) * EFB_SCALE);

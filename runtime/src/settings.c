@@ -12,7 +12,7 @@
 /* defaults: stock CPU clock (the project's goal is full speed at stock clocks), no FPS counter */
 Settings g_settings = {
     .screen = SCREEN_4_3, .perf_overlay = 0, .resolution = RES_1X, .fullscreen = 0, .framerate = FR_AUTO,
-    .handheld_gpu = 1, .hud_stretch = 0, .fov = 100, .pc_scale = 2, .msaa = 1, .bloom = 0, .grade_bright = 0,
+    .handheld_gpu = 1, .hud_stretch = 0, .hud_edges = 1, .fov = 100, .pc_scale = 2, .msaa = 1, .bloom = 0, .grade_bright = 0,
     .grade_contrast = 100, .grade_sat = 100, .grade_warm = 0, .char_light = 0, .pc_fps = 0, .pad_background = 1,
     .sharpness = 0, .update_check = 0, .cpu_clock = 0,
     .pad_map = {SW_A, SW_B, SW_X, SW_Y, SW_R, SW_ZL, SW_ZR, SW_PLUS, SW_UP, SW_DOWN, SW_LEFT, SW_RIGHT},
@@ -116,10 +116,11 @@ static void settings_log(const char* when) {
     if (g_settings.cpu_clock) snprintf(cpu, sizeof cpu, "%d MHz", g_settings.cpu_clock);
     else snprintf(cpu, sizeof cpu, "stock");
     rt_log("[settings] %sCPU clock %s, handheld graphics %s, FPS counter %s, resolution %s, field of view %d%%, "
-           "sharpness %d%%, colour %+d/%d/%d/%+d, screen %s",
+           "sharpness %d%%, colour %+d/%d/%d/%+d, screen %s%s",
            when, cpu, g_settings.handheld_gpu ? "384 MHz" : "system default", g_settings.perf_overlay ? "on" : "off",
            settings_resolution_name(g_settings.resolution), g_settings.fov, g_settings.sharpness, g_settings.grade_bright,
-           g_settings.grade_contrast, g_settings.grade_sat, g_settings.grade_warm, settings_screen_name(g_settings.screen));
+           g_settings.grade_contrast, g_settings.grade_sat, g_settings.grade_warm, settings_screen_name(g_settings.screen),
+           g_settings.screen == SCREEN_WIDE ? (g_settings.hud_edges ? " (HUD at the screen edges)" : " (HUD in the middle)") : "");
 #ifdef __SWITCH__
     char map[256];
     size_t k = 0;
@@ -205,6 +206,7 @@ void settings_load(void) {
             else if (!strcmp(line, "framerate") && v >= 0 && v < FR_MODES) g_settings.framerate = v;
             else if (!strcmp(line, "handheld_gpu")) g_settings.handheld_gpu = v != 0;
             else if (!strcmp(line, "hud_stretch")) g_settings.hud_stretch = v != 0;
+            else if (!strcmp(line, "hud_edges")) g_settings.hud_edges = v != 0;
             else if (!strcmp(line, "fov") && v >= FOV_MIN && v <= FOV_MAX) g_settings.fov = v;
             else if (!strcmp(line, "pc_scale") && v >= PC_SCALE_MIN) g_settings.pc_scale = v > PC_SCALE_MAX ? PC_SCALE_MAX : v;
             else if (!strcmp(line, "msaa") && (v == 1 || v == 2 || v == 4 || v == 8)) g_settings.msaa = v;
@@ -290,10 +292,10 @@ void settings_apply(void) {
         return;
     }
     fprintf(f, "perf_overlay=%d\ncpu_clock=%d\nscreen=%d\nresolution=%d\nfullscreen=%d\nframerate=%d\nhandheld_gpu=%d\n"
-               "hud_stretch=%d\nfov=%d\npc_scale=%d\nmsaa=%d\nbloom=%d\ngrade_bright=%d\ngrade_contrast=%d\ngrade_sat=%d\n"
+               "hud_stretch=%d\nhud_edges=%d\nfov=%d\npc_scale=%d\nmsaa=%d\nbloom=%d\ngrade_bright=%d\ngrade_contrast=%d\ngrade_sat=%d\n"
                "grade_warm=%d\nchar_light=%d\npc_fps=%d\npad_background=%d\nsharpness=%d\nupdate_check=%d\n",
             g_settings.perf_overlay, g_settings.cpu_clock, g_settings.screen, g_settings.resolution, g_settings.fullscreen,
-            g_settings.framerate, g_settings.handheld_gpu, g_settings.hud_stretch, g_settings.fov, g_settings.pc_scale,
+            g_settings.framerate, g_settings.handheld_gpu, g_settings.hud_stretch, g_settings.hud_edges, g_settings.fov, g_settings.pc_scale,
             g_settings.msaa, g_settings.bloom, g_settings.grade_bright, g_settings.grade_contrast, g_settings.grade_sat,
             g_settings.grade_warm, g_settings.char_light, g_settings.pc_fps, g_settings.pad_background, g_settings.sharpness,
             g_settings.update_check);

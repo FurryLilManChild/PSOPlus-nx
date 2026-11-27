@@ -54,8 +54,10 @@ moves, A chooses, B goes back or closes.
   the game is on screen and returns to stock in the HOME menu, in sleep and on exit. If you use sys-clk, turn
   off its profile for this game, or it overrides the menu.
 - **Display**: screen (4:3 original, or 16:9 widescreen: the game's cameras see more to the sides, nothing
-  stretched, with the HUD and menus kept 4:3 in the middle; 4:3 is the default), resolution, field of view,
-  sharpness (FSR 1), colour.
+  stretched; 4:3 is the default), HUD in 16:9 (screen edges, the default: status, party HP, lock-on window, action
+  palette, radar and info popups move to the sides of the screen, while menus, shops and dialogue stay 4:3 in the
+  middle; or middle: the whole HUD 4:3 in the middle), resolution, field of view, sharpness (FSR 1), colour.
+  Which window goes where is set in config/GPOE8P/hud_anchor.txt (built in; a copy beside settings.ini overrides it).
 - **Controls**: a button map for every GameCube button, and Reset to default. Holding Minus always opens the
   menu, whatever the map.
 - **System**: version, build, current clocks, online status, screenshot.

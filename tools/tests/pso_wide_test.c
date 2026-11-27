@@ -11,6 +11,15 @@
  *    objects.
  * 4. The backend arithmetic (render_deko.c / render_gl.c apply_state with gx.vert's anchor): a HUD draw lands
  *    at x + 320 (k - 1) in the wide EFB, the scissor offset (the radar) included.
+ * Build B (pso_hud.h, HUD windows at the screen edges):
+ * 5. hud_anchor.txt: the shipped file (embedded by run_pso_wide_test.sh as the program does) reads without
+ *    errors and gives the placements planned; the parser's rules (comments, prefixes, precedence, bad lines).
+ * 6. One placement per window from the x range of all its draws: windows whose draws alone would split
+ *    (the status window's icons sit in the middle third) stay in one piece; the radar's modes; split screen.
+ * 7. The edge shift: a pinned window keeps its distance from the 4:3 edge, measured from the 16:9 edge, in
+ *    gx.vert's clip arithmetic and the backends' scissor, for full and offset viewports.
+ * 8. The walk's windows: with containers (TWindowCtrlScreen walking a window root), each window and its parts
+ *    share one window id, the class's own hud_anchor.txt line and the split screen bit are in the marks.
  *
  * Usage: pso_wide_test [trees] [seed] */
 #include <math.h>
@@ -43,6 +52,7 @@ unsigned long long g_pipe_stores, g_pipe_bytes;
 static float g_k = 1.0f;
 float settings_wide_k(void) { return g_k; }
 void f_803D676C_orig(Cpu* c) { (void)c; }
+const char* platform_settings_path(void) { return "build/tests/no-such-folder/settings.ini"; }  /* built-in table */
 void f_803E20B0_orig(Cpu* c) { (void)c; }
 
 static uint8_t g_tmarks[1 << 16];
@@ -182,10 +192,14 @@ static void run_walk(uint32_t root, int hle, Run* out) {
     out->ctr = c.ctr;
     for (uint32_t i = 0; i < 0x400u; i++) out->stack[i] = ld8(STACK_TOP - 0x400u + i);
 }
+#define NAME_AT(i) (0x80003000u + 0x20u * (uint32_t)(i))
+enum { N_CTRLSCREEN = 8, N_TOBJECT, N_SIMPLESTATUS, N_PALETTE, N_MAINMENU, N_RADAR, N_NAMES };
 static void set_names(void) {
-    static const char* const names[8] = {"TWindowPartyStatus", "TObjEnePanarms", "TWindowFukidasi", "TEF_LensFlare",
-                                         "TParticle", "TAdTitleGC", "TObjResultWin", "TQuadSpriteNormal"};
-    for (int i = 0; i < 8; i++) {
+    static const char* const names[N_NAMES] = {"TWindowPartyStatus", "TObjEnePanarms", "TWindowFukidasi", "TEF_LensFlare",
+                                               "TParticle", "TAdTitleGC", "TObjResultWin", "TQuadSpriteNormal",
+                                               "TWindowCtrlScreen", "TObject", "TWindowSimpleStatus",
+                                               "TWindowActionPalette", "TWindowMainMenu1P", "TRaderMapCore"};
+    for (int i = 0; i < N_NAMES; i++) {
         uint32_t a = 0x80003000u + 0x20u * (uint32_t)i;
         for (size_t j = 0; j <= strlen(names[i]); j++) st8(a + (uint32_t)j, (uint8_t)names[i][j]);
     }
@@ -251,13 +265,13 @@ static int test_marks(void) {
         {flare, WIDE_FOLLOW_DRAW}, {title, WIDE_HUD}, {radar_part, WIDE_HUD}, {fade, WIDE_WORLD},
     };
     int fails = 0, ctx = 0, last_place = -1;
-    for (int i = 0; i < g_ntmarks; i += 8) {
+    for (int i = 0; i < g_ntmarks; i += WIDE_MARK_BYTES) {
         if (g_tmarks[i] != GX_HOST_MARK || g_tmarks[i + 1] != WIDE_MARK_CTX) { printf("  bad mark  FAIL\n"); fails++; continue; }
         ctx++;
-        last_place = g_tmarks[i + 2];
+        last_place = g_tmarks[i + 2] & 7;
     }
     /* replay: the walk's per-object context, as classify gives it */
-    WideCtx base = {WIDE_WORLD, WIDE_NO_LAYER, 0};
+    WideCtx base = {WIDE_WORLD, WIDE_NO_LAYER, HUD_NONE, 1, 0, 0};
     for (int i = 0; i < WIDE_LAYERS; i++) g_layer[i] = layers[i];
     for (size_t i = 0; i < sizeof want / sizeof *want; i++) {
         uint32_t o = want[i].obj;
@@ -307,18 +321,226 @@ static int test_mapping(void) {
     return fails;
 }
 
+/* ---- 5. hud_anchor.txt ---- */
+static int test_anchor_file(void) {
+    int fails = 0;
+    const HudRules* r = pso_hud_rules();  /* the built-in copy of config/GPOE8P/hud_anchor.txt */
+    if (r->errors) { printf("  shipped hud_anchor.txt: %d bad lines (first %d)  FAIL\n", r->errors, r->first_error_line); fails++; }
+    if (r->dflt != HUD_CENTRE) { printf("  shipped default %d  FAIL\n", r->dflt); fails++; }
+    struct { const char* n; int want; } t[] = {
+        {"TWindowSimpleStatus", HUD_LEFT}, {"TWindowEffectParty", HUD_LEFT}, {"TWindowPartyStatus", HUD_LEFT},
+        {"TWindowLockOn", HUD_LEFT}, {"TWindowActionPalette", HUD_RIGHT}, {"TWindowEffectLight", HUD_RIGHT},
+        {"TWindowMessageInfomation", HUD_RIGHT}, {"TRaderMapCore", HUD_AUTO}, {"TWindowTradeRequest", HUD_AUTO},
+        /* no line of their own: the default (centre) */
+        {"TWindowMainMenu1P", HUD_NONE}, {"TShopItemListWindow", HUD_NONE}, {"TWindowDeposit", HUD_NONE},
+        {"TWindowMessageYesNo", HUD_NONE}, {"TWindowDD_WS_Word", HUD_NONE}, {"TWindowSubQuestBoard", HUD_NONE},
+        {"TAdTitleGC", HUD_NONE}, {"TWindowOptionCtrl", HUD_NONE}, {"TNowLoading", HUD_NONE}, {"TWindowFukidasi", HUD_NONE},
+        {"TWindowSimpleStatusX", HUD_NONE},  /* exact names do not match longer ones */
+    };
+    for (size_t i = 0; i < sizeof t / sizeof *t; i++) {
+        int got = hud_rules_lookup(r, t[i].n);
+        if (got != t[i].want) { printf("  shipped: %s -> %s (want %s)  FAIL\n", t[i].n, k_hud_place_names[got], k_hud_place_names[t[i].want]); fails++; }
+    }
+    /* a class named in the file is HUD wherever it sits; follow lines make follow classes */
+    if (name_rule("TWindowLockOn") != WIDE_HUD) { printf("  TWindowLockOn not HUD  FAIL\n"); fails++; }
+    /* the parser */
+    static HudRules p;
+    const char* text =
+        "# comment line\r\n"
+        "   \r\n"
+        "*            auto      # default\r\n"
+        "TWin*        right\n"
+        "TWindow*     left\n"
+        "TWindowSub*  center\n"
+        "TWindowSubItem stretch\n"
+        "TWindowSubItem middle\n"     /* the later line wins */
+        "TBubble      follow\n"
+        "TBad         sideways\n"     /* bad word */
+        "TBad2\n"                    /* no placement */
+        "TBad3 left extra\n"          /* trailing word */
+        "* follow\n"                  /* not a default */
+        "TLast        right";         /* no newline at the end */
+    hud_rules_parse(&p, text);
+    struct { const char* n; int want; } q[] = {
+        {"TWindowSubItem", HUD_CENTRE}, {"TWindowSubItemList", HUD_CENTRE}, {"TWindowLockOn", HUD_LEFT},
+        {"TWinX", HUD_RIGHT}, {"TBubble", HUD_FOLLOW}, {"TBad", HUD_NONE}, {"TLast", HUD_RIGHT}, {"TOther", HUD_NONE},
+    };
+    for (size_t i = 0; i < sizeof q / sizeof *q; i++) {
+        int got = hud_rules_lookup(&p, q[i].n);
+        if (got != q[i].want) { printf("  parser: %s -> %s (want %s)  FAIL\n", q[i].n, k_hud_place_names[got], k_hud_place_names[q[i].want]); fails++; }
+    }
+    if (p.dflt != HUD_AUTO || p.errors != 4 || p.first_error_line != 10 || p.n != 6) {
+        printf("  parser: default %d, %d errors (first line %d), %d rules  FAIL\n", p.dflt, p.errors, p.first_error_line, p.n);
+        fails++;
+    }
+    printf("  shipped file: %d classes, default %s; %zu lookups and the parser's rules checked\n", r->n,
+           k_hud_place_names[r->dflt], sizeof t / sizeof *t + sizeof q / sizeof *q);
+    return fails;
+}
+
+/* ---- 6. one placement per window ---- */
+typedef struct { float lo, hi; } Rng;
+static int window_place(const Rng* d, int n, int force, int split, int* why) {  /* gx_render.c: the union of its draws */
+    float lo = 1e30f, hi = -1e30f;
+    for (int i = 0; i < n; i++) { if (d[i].lo < lo) lo = d[i].lo; if (d[i].hi > hi) hi = d[i].hi; }
+    return hud_decide(force, HUD_CENTRE, lo, hi, split, why);
+}
+static int test_windows(void) {
+    int fails = 0, why;
+    /* the player status window measured: frame and bars 28..181, status icons from 226 (the middle third) */
+    Rng status[] = {{28, 181}, {67, 152}, {47, 60}, {226, 242}, {244, 260}};
+    for (size_t i = 0; i < sizeof status / sizeof *status; i++)  /* drawn alone, the icons would stay centred */
+        if (i >= 3 && hud_measured(status[i].lo, status[i].hi) != HUD_CENTRE) { printf("  icon alone  FAIL\n"); fails++; }
+    if (window_place(status, 5, HUD_AUTO, 0, &why) != HUD_LEFT || why != HUD_WHY_MEASURED) { printf("  status window (auto)  FAIL\n"); fails++; }
+    Rng palette[] = {{471, 560}, {500, 620}, {600, 621}};
+    if (window_place(palette, 3, HUD_AUTO, 0, &why) != HUD_RIGHT) { printf("  action palette  FAIL\n"); fails++; }
+    struct { Rng r; int want; const char* what; } m[] = {
+        {{480, 608}, HUD_RIGHT, "radar, corner"}, {{32, 480}, HUD_CENTRE, "radar, wide map"},
+        {{96, 544}, HUD_CENTRE, "radar, middle map"}, {{373, 628}, HUD_RIGHT, "information popup"},
+        {{30, 180}, HUD_LEFT, "party status"}, {{254, 386}, HUD_CENTRE, "timer"}, {{0, 640}, HUD_CENTRE, "full width"},
+        {{13, 400}, HUD_CENTRE, "a wide window from the left"}, {{214, 300}, HUD_CENTRE, "left half, middle third"},
+        {{212, 300}, HUD_LEFT, "just into the left third"}, {{100, 324}, HUD_LEFT, "4 columns of slack"},
+        {{100, 325}, HUD_CENTRE, "past the slack"}, {{316, 500}, HUD_RIGHT, "right, with slack"},
+        {{315, 500}, HUD_CENTRE, "right, past the slack"},
+    };
+    for (size_t i = 0; i < sizeof m / sizeof *m; i++)
+        if (hud_measured(m[i].r.lo, m[i].r.hi) != m[i].want) { printf("  %s  FAIL\n", m[i].what); fails++; }
+    /* own lines win over the measurement; the default; nothing measured */
+    if (hud_decide(HUD_RIGHT, HUD_CENTRE, 28, 181, 0, &why) != HUD_RIGHT || why != HUD_WHY_FILE) { printf("  forced right  FAIL\n"); fails++; }
+    if (hud_decide(HUD_NONE, HUD_CENTRE, 28, 181, 0, &why) != HUD_CENTRE || why != HUD_WHY_DEFAULT) { printf("  default centre  FAIL\n"); fails++; }
+    if (hud_decide(HUD_NONE, HUD_AUTO, 28, 181, 0, &why) != HUD_LEFT || why != HUD_WHY_MEASURED) { printf("  default auto  FAIL\n"); fails++; }
+    if (hud_decide(HUD_AUTO, HUD_CENTRE, 1, 0, 0, &why) != HUD_CENTRE || why != HUD_WHY_NO_DRAWS) { printf("  no draws  FAIL\n"); fails++; }
+    if (hud_decide(HUD_STRETCH, HUD_CENTRE, 28, 181, 0, &why) != HUD_STRETCH) { printf("  stretch  FAIL\n"); fails++; }
+    if (hud_decide(HUD_FOLLOW, HUD_CENTRE, 28, 181, 0, &why) != HUD_CENTRE) { printf("  follow is no window placement  FAIL\n"); fails++; }
+    /* split screen: everything stays in the middle of its view */
+    int forces[] = {HUD_NONE, HUD_AUTO, HUD_LEFT, HUD_RIGHT, HUD_STRETCH, HUD_CENTRE};
+    for (size_t i = 0; i < sizeof forces / sizeof *forces; i++)
+        if (hud_decide(forces[i], HUD_AUTO, 28, 181, 1, &why) != HUD_CENTRE || why != HUD_WHY_SPLIT) { printf("  split %d  FAIL\n", forces[i]); fails++; }
+    printf("  per-window union, %zu measured ranges, own lines, default and split screen checked\n", sizeof m / sizeof *m);
+    return fails;
+}
+
+/* ---- 7. the edge shift ---- */
+static int test_shift(void) {
+    int fails = 0;
+    float k = 854.0f / 640.0f, W = 640.0f * k;
+    if (fabsf(hud_shift_px(HUD_LEFT, k) + 320.0f * (k - 1)) > 1e-4f || fabsf(hud_shift_px(HUD_RIGHT, k) - 320.0f * (k - 1)) > 1e-4f ||
+        hud_shift_px(HUD_CENTRE, k) != 0.0f || hud_shift_px(HUD_STRETCH, k) != 0.0f || hud_shift_px(HUD_LEFT, 1.0f) != 0.0f) {
+        printf("  shift sizes  FAIL\n");
+        fails++;
+    }
+    /* viewports: full, the radar's (centre moved by the scissor offset), and smaller ones */
+    struct { float xo, ax, sox; } vps[] = {{320, 320, 0}, {320, 320, -224}, {320, 320, 64}, {160, 160, 0}, {480, 160, 0}};
+    for (size_t i = 0; i < sizeof vps / sizeof *vps; i++)
+        for (float ndc = -1.0f; ndc <= 1.0f; ndc += 0.125f) {
+            float p43 = vps[i].xo - vps[i].sox + ndc * vps[i].ax;  /* the 4:3 frame's pixel */
+            float cx = vps[i].xo - vps[i].sox + 320.0f * (k - 1.0f), half = vps[i].ax * k;  /* the backend's HUD viewport */
+            for (int pl = HUD_LEFT; pl <= HUD_RIGHT; pl++) {
+                /* gx.vert: clip / k + sh, sh = (320 / ax) (1 - 1 / k) */
+                float sh = (1.0f - 1.0f / k) * 320.0f / vps[i].ax;
+                float clip = ndc / k + (pl == HUD_RIGHT ? sh : -sh);
+                float got = cx + clip * half;
+                float want = pl == HUD_LEFT ? p43 : p43 + 640.0f * (k - 1.0f);  /* same distance from its own edge */
+                float dist = pl == HUD_LEFT ? got : W - got, dist43 = pl == HUD_LEFT ? p43 : 640.0f - p43;
+                if (fabsf(got - want) > 2e-3f || fabsf(dist - dist43) > 2e-3f ||
+                    fabsf(clip - (ndc / k + hud_shift_clip(pl, k, vps[i].ax))) > 1e-5f) {
+                    printf("  viewport %zu ndc %.3f %s: %.3f want %.3f  FAIL\n", i, ndc, k_hud_place_names[pl], got, want);
+                    fails++;
+                }
+            }
+        }
+    /* the scissor (render_deko.c / render_gl.c): x + 320 (k - 1) + the shift, the radar's corner box 480..608 */
+    float hx = 320.0f * (k - 1.0f);
+    float r0 = 480.0f + hx + hud_shift_px(HUD_RIGHT, k), r1 = 608.0f + hx + hud_shift_px(HUD_RIGHT, k);
+    if (fabsf((W - r1) - (640.0f - 608.0f)) > 1e-3f || fabsf(r1 - r0 - 128.0f) > 1e-3f || r1 > W + 1e-3f) {
+        printf("  radar scissor %.2f..%.2f of %.2f  FAIL\n", r0, r1, W);
+        fails++;
+    }
+    float l0 = 28.0f + hx + hud_shift_px(HUD_LEFT, k);
+    if (fabsf(l0 - 28.0f) > 1e-3f) { printf("  left scissor %.2f  FAIL\n", l0); fails++; }
+    printf("  edge shift for %zu viewports, both sides, and the scissor checked\n", sizeof vps / sizeof *vps);
+    return fails;
+}
+
+/* ---- 8. windows in the walk ---- */
+static int test_units(void) {
+    int fails = 0;
+    g_nobj = 0;
+    g_k = 854.0f / 640.0f;
+    uint32_t root = new_obj(NAME_AT(1), 0);
+    st16(root + 4u, 0);
+    uint32_t layers[WIDE_LAYERS];
+    for (int i = 0; i < WIDE_LAYERS; i++) {
+        layers[i] = new_obj(0, 0);
+        st16(layers[i] + 4u, 0);
+        st32(WIDE_LAYER_BASE + 4u * (uint32_t)i, layers[i]);
+        add_child(root, layers[i]);
+    }
+    /* tl_window -> TWindowCtrlScreen, whose render walks a window root (a plain TObject) holding the windows */
+    uint32_t screen = new_obj(NAME_AT(N_CTRLSCREEN), 1);
+    st16(screen + 4u, 0);
+    add_child(layers[13], screen);
+    uint32_t wroot = new_obj(NAME_AT(N_TOBJECT), 0);
+    st16(wroot + 4u, 0);
+    st32(screen + 0x20u, wroot);
+    uint32_t status = OBJ(wroot, N_SIMPLESTATUS);
+    uint32_t status_part = OBJ(status, 4);    /* a part of it (any class) */
+    uint32_t status_group = OBJ(status, N_TOBJECT);    /* a plain TObject of its own: not a window root */
+    uint32_t status_sub = OBJ(status_group, N_RADAR);  /* below it: still the status window's, no line */
+    uint32_t palette = OBJ(wroot, N_PALETTE);
+    uint32_t menu = OBJ(wroot, N_MAINMENU);
+    uint32_t menu_part = OBJ(menu, N_PALETTE);  /* a part named like a pinned class: still the menu's, no line */
+    uint32_t radar = OBJ(layers[17], N_RADAR);  /* tl_clipout */
+    uint32_t radar_part = OBJ(radar, 7);
+    struct { uint32_t obj, unit; int force; } want[] = {
+        {screen, screen, HUD_NONE}, {status, status, HUD_LEFT}, {status_part, status, HUD_NONE}, {status_group, status, HUD_NONE}, {status_sub, status, HUD_NONE},
+        {palette, palette, HUD_RIGHT}, {menu, menu, HUD_NONE}, {menu_part, menu, HUD_NONE},
+        {radar, radar, HUD_AUTO}, {radar_part, radar, HUD_NONE},
+    };
+    for (int split = 0; split < 2; split++) {
+        st32(VIEW_COUNT, split ? 2u : 1u);
+        g_ntmarks = 0;
+        run_walk(root, 1, &(Run){0});
+        /* the render calls in order give the object of each context mark (the walk marks before each render) */
+        int seen[sizeof want / sizeof *want] = {0}, bad_split = 0;
+        for (int i = 0; i < g_ntmarks; i += WIDE_MARK_BYTES) {
+            const uint8_t* b = g_tmarks + i;
+            if (b[1] != WIDE_MARK_CTX) continue;
+            uint32_t name = (uint32_t)b[4] << 24 | (uint32_t)b[5] << 16 | (uint32_t)b[6] << 8 | b[7];
+            uint32_t unit = (uint32_t)b[8] << 24 | (uint32_t)b[9] << 16 | (uint32_t)b[10] << 8 | b[11];
+            if (((b[2] >> 6) & 1) != split) bad_split++;
+            for (size_t j = 0; j < sizeof want / sizeof *want; j++)
+                if (unit == want[j].unit && name == ld32(want[j].obj)) {
+                    int force = (b[2] >> 3) & 7;
+                    if (force == want[j].force && (b[2] & 7) == WIDE_HUD) seen[j] = 1;
+                }
+        }
+        for (size_t j = 0; j < sizeof want / sizeof *want; j++)
+            if (!seen[j]) { printf("  split %d: object %zu: no mark with window %08X and own line %s  FAIL\n", split, j, want[j].unit, k_hud_place_names[want[j].force]); fails++; }
+        if (bad_split) { printf("  split %d: %d marks with the wrong split bit  FAIL\n", split, bad_split); fails++; }
+    }
+    st32(VIEW_COUNT, 0);
+    g_split = 0;
+    printf("  windows under a container, their parts, own lines and the split screen bit checked\n");
+    return fails;
+}
+
 int main(int argc, char** argv) {
     long trees = argc > 1 ? atol(argv[1]) : 3000;
     g_rng = argc > 2 ? strtoull(argv[2], NULL, 0) : 0x9E3779B97F4A7C15ull;
     mem_init();
     set_names();
-    int f1, f2, f3, f4, f5;
+    int f1, f2, f3, f4, f5, f6, f7, f8, f9;
     printf("projection:\n"); f1 = test_projection();
     printf("class rules:\n"); f2 = test_names();
     printf("walk:\n"); f3 = test_walk(trees);
     printf("marks:\n"); f4 = test_marks();
     printf("mapping:\n"); f5 = test_mapping();
-    int total = f1 + f2 + f3 + f4 + f5;
+    printf("hud_anchor.txt:\n"); f6 = test_anchor_file();
+    printf("windows:\n"); f7 = test_windows();
+    printf("edge shift:\n"); f8 = test_shift();
+    printf("walk windows:\n"); f9 = test_units();
+    int total = f1 + f2 + f3 + f4 + f5 + f6 + f7 + f8 + f9;
     printf("RESULT: %s (%d failures)\n", total ? "FAIL" : "PASS", total);
     return total != 0;
 }

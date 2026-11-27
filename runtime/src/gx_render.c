@@ -12,6 +12,7 @@
 #include "gx_render.h"
 #include "settings.h"
 #include "overlay.h"
+#include "pso_hud.h"
 #include "pso_wide.h"
 #include "runtime.h"
 
@@ -55,6 +56,7 @@ static uint32_t g_feat_copy_fmts;                                   /* their tar
 
 volatile int g_render_counts_fps;
 static uint32_t g_nanch;  /* 2D draws of this frame remembered for wide_anchor */
+static int g_frame_edges;  /* PSO 16:9 build B: this frame's HUD windows go to the screen edges (settings hud_edges) */
 static GxFrame* frame(void) {
     if (!g_frame) {
         uint64_t t = rt_ticks();
@@ -70,6 +72,7 @@ static GxFrame* frame(void) {
          * bloom). The HUD stays in the 4:3 middle when the picture is wide; no bloom. */
         g_frame->in_race = 0;
         g_gx.xf_reg[GX_XR_WIDE_FLAGS] = g_settings.hud_stretch ? 0u : GX_WIDE_HUD_43;  /* GX_WIDE_HUD_PERSP: per draw */
+        g_frame_edges = k > 1.0f && g_settings.hud_edges && !g_settings.hud_stretch;
         float fov = (float)g_fov_scale;
         memcpy(&g_gx.xf_reg[GX_XR_FOV], &fov, 4);
         float asp = settings_game_k() / k;  /* online: the room's camera wider than this screen */
@@ -744,7 +747,8 @@ static int anchor_place(GxFrame* f, uint32_t v0, uint32_t count, float lo, float
  * unless their projection is one of the game's widened ones (WIDE_MARK_PROJ), which already draw right.
  * Follow: kept at their place, as narrow as in 4:3 (per object for speech bubbles, per draw for the lens
  * flare's sprites). Everything else is left as the widened projection draws it. */
-static struct { uint8_t place, layer; uint32_t name; unsigned seq; int world_logged; } g_wctx = {WIDE_OUTSIDE, WIDE_NO_LAYER, 0, 0, 0};
+static struct { uint8_t place, layer, force, split, tag; uint32_t name, unit; unsigned seq; int world_logged; } g_wctx = {
+    WIDE_OUTSIDE, WIDE_NO_LAYER, 0, 0, 0, 0, 0, 0, 0};
 static uint32_t g_ss_mtx[4][12];  /* the last screen space matrices (position matrix 0 after the load) */
 static int g_nss;
 static uint32_t g_wproj[4][6];    /* the last widened projections (XF 0x1020-0x1025) */
@@ -752,13 +756,18 @@ static int g_nwproj;
 static unsigned long long g_wide_draws[5];  /* [wide] line: draws centred, stretched, follow, 3D in HUD left, world 2D */
 static int g_hudlog = -1;         /* SR_HUDLOG=0: no [hud] lines */
 
-void gx_wide_mark(int kind, int place, int layer, uint32_t name) {  /* GP thread (gx_fifo.c) */
+static int wide_unit_tag(void);
+void gx_wide_mark(int kind, int place, int layer, uint32_t name, uint32_t unit) {  /* GP thread (gx_fifo.c) */
     if (kind == WIDE_MARK_CTX) {
-        g_wctx.place = (uint8_t)place;
+        g_wctx.place = (uint8_t)(place & 7);
+        g_wctx.force = (uint8_t)((place >> 3) & 7);
+        g_wctx.split = (uint8_t)((place >> 6) & 1);
         g_wctx.layer = (uint8_t)layer;
         g_wctx.name = name;
+        g_wctx.unit = unit;
         g_wctx.seq++;
         g_wctx.world_logged = 0;
+        g_wctx.tag = (uint8_t)wide_unit_tag();
     } else if (kind == WIDE_MARK_SS) {
         memcpy(g_ss_mtx[g_nss++ & 3], &g_gx.xf_mem[0], sizeof g_ss_mtx[0]);
     } else if (kind == WIDE_MARK_PROJ) {
@@ -819,6 +828,170 @@ static void hud_log(int what) {
     }
 }
 
+/* ---- PSO 16:9 build B (pso_hud.h): HUD windows at the screen edges ----
+ * Every HUD draw of a window (pso_wide.c: the object under a layer or a container that its draws belong to)
+ * is noted with the x range it covers on the 4:3 frame (its extent through the projection and the viewport,
+ * cut to its scissor) and the vertices it wrote. When the frame is complete (its XFB copy), each window gets
+ * one placement from all its draws (hud_decide: its hud_anchor.txt line, the measured rule, split screen),
+ * and all its vertices and states are marked at once: a window never comes apart. The states carry the window
+ * (GX_WIDE_UNIT_*), so the pin flags for the backends' scissor can be set on them afterwards. */
+#define WUNITS 255
+typedef struct { uint32_t unit, name; uint8_t layer, force, split, mirror; float lo, hi; uint32_t draws; } WUnit;
+static WUnit g_wu[WUNITS];
+static int g_nwu, g_wu_full_logged;
+static uint16_t g_wu_hash[512];  /* index + 1 */
+typedef struct { uint32_t v0, v1; uint8_t tag; } WSeg;
+static WSeg* g_wseg;
+static uint32_t g_nwseg, g_cap_wseg;
+static GxFrame* g_wseg_frame;
+static unsigned long long g_hud_units[HUD_PLACES], g_hud_forced, g_hud_split, g_hud_unit_draws[HUD_PLACES];
+
+/* the window of the current context: its index + 1 in this frame's table (0: none, not HUD, or table full) */
+static int wide_unit_tag(void) {
+    if (!g_wctx.unit || g_wctx.place != WIDE_HUD) return 0;
+    uint32_t h = (g_wctx.unit >> 2) * 2654435761u >> 23;
+    for (int k = 0; k < 512; k++) {
+        uint32_t i = (h + (uint32_t)k) & 511u;
+        int t = g_wu_hash[i];
+        if (t && g_wu[t - 1].unit == g_wctx.unit) {
+            WUnit* u = &g_wu[t - 1];
+            if (u->force == HUD_NONE) u->force = g_wctx.force;  /* the first own line among its classes */
+            u->split |= g_wctx.split;
+            return t;
+        }
+        if (!t) {
+            if (g_nwu == WUNITS) {
+                if (!g_wu_full_logged++) rt_log("[hud] more than %d windows in a frame: the rest stay in the middle", WUNITS);
+                return 0;
+            }
+            WUnit* u = &g_wu[g_nwu++];
+            *u = (WUnit){g_wctx.unit, g_wctx.name, g_wctx.layer, g_wctx.force, g_wctx.split, 0, 1e30f, -1e30f, 0};
+            g_wu_hash[i] = (uint16_t)g_nwu;
+            return g_nwu;
+        }
+    }
+    return 0;
+}
+
+/* one HUD draw of the current window: x range lo..hi in clip units of its viewport (lo > hi: nothing seen) */
+static void wide_unit_note(GxFrame* f, uint32_t v0, uint32_t count, float lo, float hi) {
+    if (!g_frame_edges || !g_wctx.tag) return;
+    WUnit* u = &g_wu[g_wctx.tag - 1];
+    float xs, xo;
+    memcpy(&xs, &g_gx.xf_reg[0x1A], 4);
+    memcpy(&xo, &g_gx.xf_reg[0x1D], 4);
+    if (xs < 0.0f) u->mirror = 1;
+    float ax = xs < 0.0f ? -xs : xs;
+    int sox = (int)(g_gx.bp[0x59] & 0x3FF) * 2;
+    if (lo <= hi) {
+        float p0 = xo - (float)sox + lo * ax, p1 = xo - (float)sox + hi * ax;
+        float s0 = (float)((int)((g_gx.bp[0x20] >> 12) & 0x7FF) - sox), s1 = (float)((int)((g_gx.bp[0x21] >> 12) & 0x7FF) - sox + 1);
+        if (s0 < 0.0f) s0 = 0.0f;
+        if (s1 > 640.0f) s1 = 640.0f;
+        if (p0 < s0) p0 = s0;  /* what the scissor lets through (the radar's map runs past its box) */
+        if (p1 > s1) p1 = s1;
+        if (p0 <= p1) {
+            if (p0 < u->lo) u->lo = p0;
+            if (p1 > u->hi) u->hi = p1;
+        }
+    }
+    u->draws++;
+    if (g_wseg_frame != f) { g_wseg_frame = f; g_nwseg = 0; }
+    if (g_nwseg && g_wseg[g_nwseg - 1].tag == g_wctx.tag && g_wseg[g_nwseg - 1].v1 == v0) {
+        g_wseg[g_nwseg - 1].v1 = v0 + count;
+        return;
+    }
+    g_wseg = grow(g_wseg, &g_cap_wseg, g_nwseg + 1, sizeof(WSeg));
+    g_wseg[g_nwseg++] = (WSeg){v0, v0 + count, g_wctx.tag};
+}
+
+static void wide_class_name(uint32_t name, char* out, size_t n) {
+    snprintf(out, n, "(no class)");
+    if (!name || !guest_span_ok(name, 1)) return;
+    uint32_t i = 0;
+    while (i < n - 1 && guest_span_ok(name + i, 1) && ld8r(name + i)) {
+        out[i] = (char)ld8r(name + i);
+        i++;
+    }
+    out[i] = 0;
+}
+
+/* [hud] window lines: one per (class, layer, placement), with the x range measured the first time */
+static void wide_unit_log(const WUnit* u, int code, int why) {
+    if (g_hudlog < 0) { const char* e = getenv("SR_HUDLOG"); g_hudlog = !(e && e[0] == '0'); }
+    if (!g_hudlog) return;
+    static struct { uint32_t name; uint8_t layer, code, used; } seen[1024];
+    static int nlines;
+    uint32_t h = (u->name * 2654435761u ^ (uint32_t)u->layer * 40503u ^ (uint32_t)code * 977u) & 1023u;
+    for (int k = 0; k < 16; k++) {
+        uint32_t i = (h + (uint32_t)k) & 1023u;
+        if (seen[i].used) {
+            if (seen[i].name == u->name && seen[i].layer == u->layer && seen[i].code == code) return;
+            continue;
+        }
+        seen[i].used = 1;
+        seen[i].name = u->name; seen[i].layer = u->layer; seen[i].code = (uint8_t)code;
+        if (++nlines > 400) return;
+        char name[48], range[48];
+        wide_class_name(u->name, name, sizeof name);
+        if (u->lo <= u->hi) snprintf(range, sizeof range, "x %.0f..%.0f of 640", u->lo, u->hi);
+        else snprintf(range, sizeof range, "no x range");
+        const char* line = u->force != HUD_NONE ? k_hud_place_names[u->force] : "-";
+        rt_log("[hud] window %s %s: %s (%s, %s; own line %s; %u draws)", u->layer < WIDE_LAYERS ? k_wide_layer_names[u->layer] : "-",
+               name, code == HUD_LEFT ? "pinned left" : code == HUD_RIGHT ? "pinned right" : code == HUD_STRETCH ? "stretched" : "centred",
+               range, k_hud_why[why], line, u->draws);
+        if (nlines == 400) rt_log("[hud] 400 window lines: no more");
+        return;
+    }
+}
+
+/* the frame is complete: one placement per window, applied to all its vertices and states */
+static void wide_units_finish(GxFrame* f) {
+    if (g_frame_edges && f->wide_k > 1.0f && g_nwu) {
+        const HudRules* rules = pso_hud_rules();
+        uint8_t code[WUNITS];
+        int pins = 0;
+        for (int i = 0; i < g_nwu; i++) {
+            const WUnit* u = &g_wu[i];
+            int why;
+            int c = hud_decide(u->force, rules->dflt, u->lo, u->hi, u->split, &why);
+            if (u->mirror && c != HUD_CENTRE) { c = HUD_CENTRE; why = HUD_WHY_MIRROR; }
+            code[i] = (uint8_t)c;
+            pins |= c == HUD_LEFT || c == HUD_RIGHT;
+            if (u->draws) {
+                g_hud_units[c]++;
+                g_hud_unit_draws[c] += u->draws;
+                if (why == HUD_WHY_FILE) g_hud_forced++;
+                if (why == HUD_WHY_SPLIT) g_hud_split++;
+                wide_unit_log(u, c, why);
+            }
+        }
+        if (g_wseg_frame == f)
+            for (uint32_t j = 0; j < g_nwseg; j++) {
+                const WSeg* sg = &g_wseg[j];
+                int c = sg->tag && sg->tag <= g_nwu ? code[sg->tag - 1] : HUD_CENTRE;
+                if (c == HUD_CENTRE) continue;
+                float a = c == HUD_LEFT ? (float)GX_ANCHOR_LEFT : c == HUD_RIGHT ? (float)GX_ANCHOR_RIGHT : (float)GX_ANCHOR_STRETCH;
+                uint32_t v1 = sg->v1 < f->nverts ? sg->v1 : f->nverts;
+                for (uint32_t v = sg->v0; v < v1; v++)
+                    if (f->verts[v].nrm[3] == (float)GX_ANCHOR_MIDDLE) f->verts[v].nrm[3] = a;
+            }
+        if (pins)
+            for (uint32_t i = 0; i < f->nunis; i++) {
+                uint32_t* fl = &f->unis[i].xfr[GX_XR_WIDE_FLAGS];
+                uint32_t t = (*fl & GX_WIDE_UNIT_MASK) >> GX_WIDE_UNIT_SHIFT;
+                if (!t || t > (uint32_t)g_nwu) continue;
+                if (code[t - 1] == HUD_LEFT) *fl |= GX_WIDE_PIN_LEFT;
+                else if (code[t - 1] == HUD_RIGHT) *fl |= GX_WIDE_PIN_RIGHT;
+            }
+    }
+    g_nwu = 0;
+    memset(g_wu_hash, 0, sizeof g_wu_hash);
+    g_nwseg = 0;
+    g_wseg_frame = NULL;
+    g_wctx.tag = 0;
+}
+
 /* before the state snapshot: 0 = as drawn, 1 = HUD 2D (middle / stretch), 2 = follow (one piece), 3 = follow
  * (this draw), 4 = HUD 3D (middle, never stretched: the radar's map runs past its scissor) */
 static int wide_kind(void) {
@@ -848,16 +1021,22 @@ static void follow_set(GxFrame* f, uint32_t v0, uint32_t n, float mid) {
     for (uint32_t i = 0; i < n; i++) f->verts[v0 + i].nrm[3] = GX_ANCHOR_FOLLOW + mid;
 }
 static void wide_place(GxFrame* f, uint32_t v0, uint32_t count, int kind) {
+    float lo, hi, ylo, yhi;
     if (kind == 4) {
         for (uint32_t i = 0; i < count; i++) f->verts[v0 + i].nrm[3] = (float)GX_ANCHOR_MIDDLE;
         g_wide_draws[0]++;
         hud_log(HL_CENTRED);
+        if (g_frame_edges && g_wctx.tag) {  /* build B: its window's x range (cut to the scissor) */
+            draw_extent(&f->verts[v0], count, 1, &lo, &hi, &ylo, &yhi);
+            wide_unit_note(f, v0, count, lo, hi);
+        }
         return;
     }
-    float lo, hi, ylo, yhi;
     draw_extent(&f->verts[v0], count, 1, &lo, &hi, &ylo, &yhi);
-    if (!(lo <= hi)) { lo = hi = 0.0f; }  /* nothing in front of the eye: drawn nowhere */
+    int seen = lo <= hi;
+    if (!seen) { lo = hi = 0.0f; }  /* nothing in front of the eye: drawn nowhere */
     if (kind == 1) {
+        if (g_frame_edges && g_wctx.tag) wide_unit_note(f, v0, count, seen ? lo : 1.0f, seen ? hi : -1.0f);
         int code = anchor_place(f, v0, count, lo, hi, ylo, yhi, 0);
         g_wide_draws[code == GX_ANCHOR_STRETCH]++;
         hud_log(code == GX_ANCHOR_STRETCH ? HL_STRETCHED : HL_CENTRED);
@@ -891,6 +1070,17 @@ void gx_wide_report(void) {
     rt_log("[wide] GP side: 2D draws centred %llu, stretched %llu, follow %llu; HUD 3D left as drawn %llu; world 2D classes %llu",
            g_wide_draws[0], g_wide_draws[1], g_wide_draws[2], g_wide_draws[3], g_wide_draws[4]);
     memset(g_wide_draws, 0, sizeof g_wide_draws);
+    if (g_settings.hud_edges)
+        rt_log("[wide] HUD windows (frames x windows): left %llu (%llu draws), right %llu (%llu), centred %llu (%llu), "
+               "stretched %llu (%llu); by own hud_anchor.txt line %llu, kept in the middle for split screen %llu",
+               g_hud_units[HUD_LEFT], g_hud_unit_draws[HUD_LEFT], g_hud_units[HUD_RIGHT], g_hud_unit_draws[HUD_RIGHT],
+               g_hud_units[HUD_CENTRE], g_hud_unit_draws[HUD_CENTRE], g_hud_units[HUD_STRETCH], g_hud_unit_draws[HUD_STRETCH],
+               g_hud_forced, g_hud_split);
+    else
+        rt_log("[wide] HUD windows: all in the middle (Display > HUD: middle)");
+    memset(g_hud_units, 0, sizeof g_hud_units);
+    memset(g_hud_unit_draws, 0, sizeof g_hud_unit_draws);
+    g_hud_forced = g_hud_split = 0;
 }
 
 static void draw_impl(int prim, int vat, uint32_t count, const uint8_t* vertices, uint32_t vertex_size) {
@@ -901,6 +1091,9 @@ static void draw_impl(int prim, int vat, uint32_t count, const uint8_t* vertices
         GxFrame* fw = frame();
         if (fw->wide_k > 1.0f && g_gx.xf_reg[0x26] == 0) wkind = wide_kind();
         uint32_t fl = g_gx.xf_reg[GX_XR_WIDE_FLAGS], want = wkind ? fl | GX_WIDE_HUD_PERSP : fl & ~GX_WIDE_HUD_PERSP;
+        /* build B: a window's HUD draws carry its number, so its states can be pinned when the frame is done */
+        want &= ~GX_WIDE_UNIT_MASK;
+        if ((wkind == 1 || wkind == 4) && g_frame_edges && g_wctx.tag) want |= (uint32_t)g_wctx.tag << GX_WIDE_UNIT_SHIFT;
         if (want != fl) {
             g_gx.xf_reg[GX_XR_WIDE_FLAGS] = want;
             g_gx.regs_dirty = 1;
@@ -1794,6 +1987,7 @@ static void efb_copy(uint32_t v) {
         game_mods_frame();
         push_cmd(GXC_PRESENT);
         gx_decode_sync();
+        wide_units_finish(g_frame);  /* PSO 16:9 build B: the HUD windows' placements */
         if (p < 0) local_hud_frame(g_frame);
         if (own) ownview_frame(g_frame, p);
         uint32_t ndraws = 0;

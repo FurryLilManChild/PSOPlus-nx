@@ -512,8 +512,11 @@ static void apply_state(const GxUniforms* u) {
     if (y0 < 0) y0 = 0;
     DkScissor sc = {XSC(x0), SC(y0), x1 > x0 ? XSC(x1) - XSC(x0) : 0, SC(y1 > y0 ? y1 - y0 : 0)};
     if (hudp && !(x0 <= 0 && x1 >= EFB_WIDTH)) {
-        sc.x = SC((float)x0 + hx);
-        sc.width = x1 > x0 ? SC((float)x1 + hx) - sc.x : 0;
+        /* a window pinned to a screen edge (GX_WIDE_PIN_*, build B): its scissor moves with it */
+        uint32_t wf = u->xfr[GX_XR_WIDE_FLAGS];
+        float px = hx + (wf & GX_WIDE_PIN_LEFT ? -hx : wf & GX_WIDE_PIN_RIGHT ? hx : 0.0f);
+        sc.x = SC((float)x0 + px);
+        sc.width = x1 > x0 ? SC((float)x1 + px) - sc.x : 0;
     }
     if (ST_CHANGED(sc, sc)) dkCmdBufSetScissors(g_cmd, 0, &sc, 1);
 

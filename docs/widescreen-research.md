@@ -1,8 +1,10 @@
 # Widescreen (16:9) research
 
-Research pass, 2026-11-26, after release 1.0.0. Build A is built (docs/progress-log.md, 2026-11-26), with the
-follow mode for speech bubbles and the lens flare brought forward from build B. Goal: a real 16:9 picture (more of
-the world to the sides, nothing stretched), the HUD first kept 4:3 in the middle, later moved to the screen edges.
+Research pass, 2026-11-26, after release 1.0.0. Build A is built and passed the owner's console test (3D widened,
+HUD centred 4:3, no problems reported), with the follow mode for speech bubbles and the lens flare brought forward
+from build B. Build B (HUD windows at the screen edges) is built, not yet run on the console: section 6 and
+docs/progress-log.md. Goal: a real 16:9 picture (more of the world to the sides, nothing stretched), the HUD first
+kept 4:3 in the middle, then moved to the screen edges.
 
 Marks: **proven** (read in our DOL's disassembly in `build/GPOE8P/asm`, in our runtime, or in the decomp's
 source where the decomp's function is shown to match ours), **inferred** (reasoning, not checked at run time).
@@ -213,16 +215,17 @@ A (SR_ANCHORLOG plus the class name per draw).
 
 | Element | Class / layer | Build A | Build B |
 |---|---|---|---|
-| Player status (name, level, HP/TP bars) | TWindowSimpleStatus, TWindowSubStatusDisp*, TWindowStatusGauge (tl_window) | C | L (or R, from its measured side) |
-| Party status (other players' HP) | TWindowPartyStatus (tl_window) | C | same side as player status |
-| Action palette | TWindowActionPalette (tl_window) | C | R or L, from its measured side |
-| Radar / minimap | TRaderMapCore (tl_radermap, parts in tl_clipout), centre 544,128 | C | R |
+| Player status (name, level, HP/TP bars) | TWindowSimpleStatus (+ TWindowEffectParty), window roots | C | **L** (layout 28,37; icons from 226,37) |
+| Party status (other players' HP) | TWindowPartyStatus | C | **L** (layout 30,116) |
+| Action palette | TWindowActionPalette (+ TWindowEffectLight) | C | **R** (layout 471,337) |
+| Radar / minimap | TRaderMapCore (tl_radermap or tl_clipout, by split screen: TRaderMapCore::create), centre 544,128 | C | **auto**: R in the corner mode (480..608), C in its larger map modes (32..480, 96..544) |
 | Lock-on cursors | TLockOnCursor, TMainCursor (tl_loc_*), 3D models | 3D | 3D |
-| Locked target window | TWindowLockOn (tl_window) | C | C (top) or measured side |
+| Locked target window | TWindowLockOn | C | **L** (layout x 30, bottom at 444) |
+| Information popups | TWindowMessageInfomation | C | **R** (layout 373,203 / 373,123, 255 wide) |
 | Damage numbers | particles (inferred), tl_particle | 3D | 3D |
 | Speech bubbles | TWindowFukidasi | 3D (k wider) | follow |
-| Chat log | TWindowChat (tl_00), TWindowMessageLog | C | L |
-| Word select, symbol chat | TWindowDD_WS_*, TWindowSubSymbolChat* | C | C |
+| Chat log | TWindowChat (tl_00: the typing composer), TWindowMessageLog (the menu's Log page, 17,36, 303 x 408) | C | C (a menu page; the in-field chat shows as speech bubbles, follow) |
+| Word select, symbol chat | TWindowDD, TWindowDD_WS_* (several windows of their own), TWindowSubSymbolChat* | C | C (several windows: pinning one could tear the set) |
 | Software keyboard | TWindowKeyBoardSoft/Hard, TKeyBoardControl (tl_00) | C | C |
 | Message windows, yes / no, quest text | TWindowMessage*, TWindowCtrlMain (tl_fadeafter) | C | C |
 | Main menu (in field) | TWindowMainMenu1P/4P, TWindowMenuMainMenu | C | C |
@@ -240,7 +243,7 @@ A (SR_ANCHORLOG plus the class name per draw).
 | Loading screen | TNowLoading, TLoadingCur, loading compass (outside the tree) | C | C |
 | Full-screen fades | TScreenFade*, TAdFadeGC (tl_fade) | S | S |
 | Menu dimming, window backgrounds spanning 640 | any HUD draw spanning the width | S | S |
-| Info icon (memory card / network) | render_info_icon_overlay (803384D4) | C | R or L, measured |
+| Info icon (memory card / network) | render_info_icon_overlay (803384D4), outside the task tree | C | C (outside the tree: no window to measure) |
 | The port's movie picture | movie_xfb.c, presented by the backend | 4:3 | 4:3 |
 | The port's own menu and perf readout | menu.cpp, overlay | unchanged | unchanged |
 
@@ -342,6 +345,15 @@ Expected: the 3D right on the first try is likely (one hook, formulas checked). 
 likely to need a second pass: some UI class missing from the table would show stretched; the log names it.
 
 ### Build B: HUD elements pinned
+
+Status 2026-11-26: built (docs/progress-log.md), waiting for the owner's console test. What differs from the plan
+below: windows are units of the task tree (an object directly under a layer, a window manager TWindowCtrl* or a
+window root, a plain TObject walked by a manager: every TWindowBase is made under get_client_window_root), the
+placement is decided when the frame is complete and written to all of the window's vertices and states, the
+default for classes not in hud_anchor.txt is centre (only the in-field HUD is listed), split screen keeps every
+window in the middle (camera_split_screen_selector 0x805D34B8 above 1), and the info icon stays centred. The
+positions in the table above come from the game's 1-player window layout table window_layout_rect_table
+(0x8044FE00, read from our DOL through get_window_layout_position 0x8026CBB8; split screen uses other tables).
 
 - `runtime/src/pso_wide.c` (about 120 lines more): placement units, union of x ranges, codes per unit, class
   overrides from a new `config/GPOE8P/hud_anchor.txt` (class name, L / R / C / S / follow).

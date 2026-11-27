@@ -14,7 +14,9 @@ else
       awk '/^void f_8022A87C\(/,/^}/' "$src" | sed '1s/f_8022A87C(/f_8022A87C_orig(/'; } > $out/walk_orig.c
 fi
 CC=${CC:-clang}  # the generated code uses musttail (clang, or GCC 15+)
-FLAGS="-std=gnu11 -O2 -Wall -Iruntime/include -Iruntime/src -Ibuild/gen"
+# the built-in hud_anchor.txt, embedded as the program's build does (configure.py embedtext)
+python3 tools/embed_text.py $out/hud_anchor_txt.h k_hud_anchor_txt config/GPOE8P/hud_anchor.txt
+FLAGS="-std=gnu11 -O2 -Wall -Iruntime/include -Iruntime/src -Ibuild/gen -I$out"
 $CC $FLAGS -c $out/walk_orig.c -o $out/walk_orig.o
 $CC $FLAGS -c runtime/src/memory.c -o $out/memory.o
 $CC $FLAGS -c tools/tests/pso_wide_test.c -o $out/pso_wide_test.o

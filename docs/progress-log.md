@@ -1,5 +1,48 @@
 # Progress log (newest first)
 
+## 2026-11-26: 16:9 widescreen, build B (test build, not yet run on the console)
+
+Build A (3caa2c7) passed the owner's console test: "It was so beautiful!! Successful test." 3D widened, HUD centred
+4:3, no problems reported. His log of that run is not in hand yet, so build B's positions come from the decomp and
+our DOL (below), and every window's measured x range goes to the log so they can be corrected from the next run.
+
+The plan is docs/widescreen-research.md section 6, build B. What was built:
+
+- Display > HUD (16:9 only): "Middle" / "Screen edges" (menu.cpp; settings.ini hud_edges, default 1 = screen edges).
+  The [settings] line says which.
+- Windows (pso_wide.c): the walk now names, with every object, the window it belongs to: an object directly under
+  a layer, under a window manager (TWindowCtrl*) or under a window root (a plain TObject walked by a manager:
+  TWindowCtrlScreen::render walks get_viewport_window_root, where every TWindowBase is made). Everything below a
+  window is part of it, a plain TObject of its own included. The marks (command 0xC2) grew from 8 to 12 bytes:
+  the window's object address, the class's own hud_anchor.txt line (only the window's own class counts) and a
+  split screen bit (camera_split_screen_selector 0x805D34B8 above 1, read by TCameraCtrl::get_view_count 0x8006B330).
+- config/GPOE8P/hud_anchor.txt (new, built in by tools/embed_text.py; a copy beside settings.ini is read
+  instead): class -> left / right / centre / stretch / auto / follow, prefixes with *, default line "* centre".
+  Listed: TWindowSimpleStatus, TWindowEffectParty, TWindowPartyStatus, TWindowLockOn left; TWindowActionPalette,
+  TWindowEffectLight, TWindowMessageInfomation right; TRaderMap*, TWindowTradeRequest, TObjSoloPlayWin,
+  TObjDeadListWin auto. Positions from the game's 1-player layout table window_layout_rect_table (0x8044FE00, read
+  from our DOL; get_window_layout_position 0x8026CBB8) and the decomp's TRaderMapCore tables (corner 480..608;
+  its larger map modes 32..480 and 96..544, which stay centred by the measured rule).
+- gx_render.c: each HUD draw of a window adds its x range on the 4:3 frame (through the projection and the
+  viewport, cut to its scissor) and its vertices. At the frame's XFB copy each window gets one placement
+  (pso_hud.h hud_decide: its own line, else the default; auto = inside the left third and left half pins left,
+  inside the right third and right half pins right, else centre; split screen: centre), written to all its
+  vertices (anchor codes LEFT / RIGHT, STRETCH for stretch) and its states (GX_WIDE_PIN_* flags; states carry the
+  window's number in GX_XR_WIDE_FLAGS bits 8-15 so no state is shared by two windows).
+- gx.vert: the left / right shift for HUD draws is (320 / ax) (1 - 1 / k) clip units (320 (k - 1) pixels in any
+  viewport size; the same as before for full-width viewports). render_deko.c / render_gl.c: a pinned window's
+  scissor moves by the same 320 (k - 1) (the radar's box).
+- Log: a [hud] window line once per (class, layer, placement) with the x range, why (measured, hud_anchor.txt,
+  default, split screen) and the draw count, at most 400; [hud] placements line at start (table source, classes,
+  default); [wide] split screen on / off; the 10 s [wide] line adds windows per placement (frames x windows and
+  draws), how many by their own line and how many kept in the middle for split screen.
+- 4:3: no marks, no tags, no change to any draw (as build A). "Middle": exactly build A's placement.
+- Host test tools/tests/run_pso_wide_test.sh, extended: the shipped hud_anchor.txt (no bad lines, 20 lookups), the
+  parser (comments, CRLF, prefix precedence, later lines win, 4 kinds of bad line), one placement per window from
+  the union of its draws (the status window's icons alone would stay centred), 14 measured ranges, own lines and
+  the default, split screen, the edge shift in gx.vert's arithmetic for 5 viewports and the scissor, and the walk's
+  windows under a container with their parts and the split bit; all build A checks: PASS.
+
 ## 2026-11-26: 16:9 widescreen, build A (test build, not yet run on the console)
 
 The plan is docs/widescreen-research.md section 6, build A. What was built:
