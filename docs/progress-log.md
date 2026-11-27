@@ -23,15 +23,19 @@ Change:
   paired singles, the same ppc.h memory and SPR helpers). It returns to the recompiled caller on a branch to the lr
   it was entered with while r1 is as at entry; calls to recompiled functions run them; jumps to recompiled functions
   are tail calls whose end goes wherever lr points; anything else is interpreted from guest RAM. Unknown
-  instructions and runaways (50 million instructions in one entry) are clean fatals naming the address.
+  instructions and runaways (50 million instructions with no call into the game's code) are clean fatals naming
+  the address. Targets inside the loaded DOL or REL images (data, bss, the middle of a function) stay an
+  immediate fatal: there they are a bad pointer, not server code (review finding).
 - Log lines for the tester (all `[interp]`): `first entry at 80004000 (lr 801F2ED4, r1 ...)` with the first 64
-  words, `wrote guest RAM 80000000-8000FFFF to sdmc:/switch/psoplus/server_code_80004000.bin`, `entry N at ...: K
+  words, `wrote guest RAM 80003000-8000AFFF to sdmc:/switch/psoplus/server_code_80004000.bin` (4 KiB before the entry
+  to 28 KiB after it, cut short where the game's code begins; still game RAM, so never committed or posted), `entry N at ...: K
   instructions, back to ...` (first 40, then a summary every 1000), `calls the recompiled function ...` (first time
   per function), `store to the game's code at ...: old -> new` (first 200; these patches do not reach the
   recompiled code).
 - rt_fatal on the Switch now syncs the log and ends the process with svcExitProcess (platform_fatal_exit), so no
   library teardown races the render thread; the console goes back to HOME. PC builds still abort().
-- tools/tests/run_interp_test.sh: hand-assembled sequences through the interpreter, RESULT: PASS.
+- tools/tests/run_interp_test.sh: hand-assembled sequences through the interpreter, RESULT: PASS. Independent
+  review: no blocking findings; its three should-fix items (entry gating, dump window, step limit) are in.
 - Not known yet: what the Schtserv code does after it runs. If it relies on its patches to game code, the dump and
   the store lines show which ones, for native replacements.
 

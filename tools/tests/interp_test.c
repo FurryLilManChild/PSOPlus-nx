@@ -380,13 +380,13 @@ int main(void) {
         long size = -1;
         uint8_t w[4] = {0};
         if (f) {
-            fseek(f, 0x6000, SEEK_SET);
+            fseek(f, 0x1000, SEEK_SET);  /* the dump starts 4 KiB before the entry */
             CHECK(fread(w, 1, 4, f) == 4, "dump read");
             fseek(f, 0, SEEK_END);
             size = ftell(f);
             fclose(f);
         }
-        CHECK(size == 0x10000 && w[0] == 0x38 && w[1] == 0x60 && w[3] == 0x01, "RAM dump size %ld first word %02X%02X%02X%02X", size, w[0], w[1], w[2], w[3]);
+        CHECK(size == 0x7000 && w[0] == 0x38 && w[1] == 0x60 && w[3] == 0x01, "RAM dump size %ld first word %02X%02X%02X%02X", size, w[0], w[1], w[2], w[3]);
         g_log_n = 0; g_log[0] = 0;
         fresh(&c, 0x80006000u);
         ppc_interp(&c);
@@ -418,7 +418,7 @@ int main(void) {
             ppc_interp(&c);
             CHECK(0, "no fatal for an endless loop");
         } else {
-            CHECK(strstr(g_fatal_msg, "without returning") != NULL, "fatal message: %s", g_fatal_msg);
+            CHECK(strstr(g_fatal_msg, "or returning") != NULL, "fatal message: %s", g_fatal_msg);
         }
         g_fatal_armed = 0;
     }
@@ -430,6 +430,9 @@ int main(void) {
         CHECK(ppc_interp_can_run(0x80007000u), "can run aligned code");
         CHECK(ppc_interp_can_run(0xC0007000u), "can run through the uncached mirror");
         CHECK(!ppc_interp_can_run(0x80007002u), "unaligned");
+        CHECK(!ppc_interp_can_run(0x80100000u), "inside the DOL image: a bad pointer, not server code");
+        CHECK(!ppc_interp_can_run(0x80500000u), "inside the DOL bss");
+        CHECK(!ppc_interp_can_run(0x81810000u), "inside the REL image");
         CHECK(!ppc_interp_can_run(0x80007004u), "zero word");
         CHECK(!ppc_interp_can_run(0x00007000u), "physical address");
         CHECK(!ppc_interp_can_run(0xCC003000u), "device range");

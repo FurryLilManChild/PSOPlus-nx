@@ -52,7 +52,7 @@
 PpcFunc ppc_dispatch_lookup(uint32_t a);  /* dispatch.c */
 
 #ifndef INTERP_STEP_LIMIT
-#define INTERP_STEP_LIMIT 50000000ull     /* per entry: about a second of interpreting; a hang ends in a fatal */
+#define INTERP_STEP_LIMIT 50000000ull     /* between calls into the game's code: about a second of interpreting; a hang ends in a fatal */
 #endif
 #ifndef INTERP_DUMP_DIR                    /* the first-entry guest RAM dump goes next to the log */
 #ifdef __SWITCH__
@@ -61,8 +61,8 @@ PpcFunc ppc_dispatch_lookup(uint32_t a);  /* dispatch.c */
 #define INTERP_DUMP_DIR ""
 #endif
 #endif
-#define DUMP_LO 0x80000000u
-#define DUMP_SIZE 0x10000u
+#define DUMP_BEFORE 0x1000u   /* the dump: 4 KiB before the entry address and 28 KiB from it, cut short where */
+#define DUMP_AFTER 0x7000u    /* the game's own code begins (no disc code in the file), and at the end of RAM */
 #define LOG_ENTRIES 40          /* entries logged one by one; then a summary every SUMMARY_EVERY entries */
 #define SUMMARY_EVERY 1000u
 #define LOG_CODE_STORES 200
@@ -73,6 +73,7 @@ typedef struct {
     Cpu* c;
     uint32_t start, entry_lr, entry_sp;
     unsigned long long steps;
+    unsigned long long since_call;  /* steps since the last call into recompiled code: the hang limit counts these */
     int past_frame_logged;
 } Interp;
 
@@ -93,8 +94,22 @@ static int is_backed_code(uint32_t a) {
     return p >= 0x100 && p <= GUEST_RAM_SIZE - 4;
 }
 
+/* The DOL and REL images as loaded (text, data and bss; the [load] log lines): a dispatch into them that is
+ * not a function entry is a bad pointer (data, or the middle of a game function), never server code, so it
+ * stays a fatal at once instead of running data as instructions. */
+static const struct { uint32_t lo, hi; } g_image_ranges[] = {
+    {0x0000C000u, 0x005E1224u},   /* PsoV3.dol: text from 8000C000, bss 804FE020+E3204 */
+    {0x01800000u, 0x018999B4u},   /* movie.rel at 81800000, bss 81845C80+53D34 */
+};
+static int in_loaded_image(uint32_t a) {
+    uint32_t p = a & PPC_PHYS_MASK;
+    for (unsigned i = 0; i < sizeof g_image_ranges / sizeof g_image_ranges[0]; i++)
+        if (p >= g_image_ranges[i].lo && p < g_image_ranges[i].hi) return 1;
+    return 0;
+}
+
 int ppc_interp_can_run(uint32_t a) {
-    return is_backed_code(a) && ld32(a) != 0;
+    return is_backed_code(a) && !in_loaded_image(a) && ld32(a) != 0;
 }
 
 /* the game's own code: the DOL's (and REL's) text sections, as the recompiler saw them (build/gen/table.c) */
@@ -165,10 +180,19 @@ static void first_entry(const Interp* I) {
     }
     char path[256];
     snprintf(path, sizeof path, "%sserver_code_%08X.bin", INTERP_DUMP_DIR, I->start);
-    FILE* f = fopen(path, "wb");
-    size_t w = f ? fwrite(ppc_ptr(DUMP_LO), 1, DUMP_SIZE, f) : 0;
-    if (f && fclose(f) == 0 && w == DUMP_SIZE)
-        rt_log("[interp] wrote guest RAM %08X-%08X to %s", DUMP_LO, DUMP_LO + DUMP_SIZE - 1, path);
+    uint32_t sp = I->start & PPC_PHYS_MASK, lo = sp > 0x100 + DUMP_BEFORE ? sp - DUMP_BEFORE : 0x100, hi = sp + DUMP_AFTER;
+    if (hi > GUEST_RAM_SIZE) hi = GUEST_RAM_SIZE;
+    for (unsigned i = 0; i < g_code_range_count; i++) {
+        uint32_t clo = g_code_ranges[i].lo & PPC_PHYS_MASK, chi = g_code_ranges[i].hi & PPC_PHYS_MASK;
+        if (clo <= sp && sp < chi) { hi = lo; break; }          /* never: entries in game code are refused */
+        if (clo > sp && clo < hi) hi = clo;
+        if (chi <= sp && chi > lo) lo = chi;
+    }
+    uint32_t dlo = 0x80000000u | lo, dsize = hi > lo ? hi - lo : 0;
+    FILE* f = dsize ? fopen(path, "wb") : NULL;
+    size_t w = f ? fwrite(ppc_ptr(dlo), 1, dsize, f) : 0;
+    if (f && fclose(f) == 0 && w == dsize)
+        rt_log("[interp] wrote guest RAM %08X-%08X to %s", dlo, dlo + dsize - 1, path);
     else
         rt_log("[interp] could not write the guest RAM dump %s", path);
 }
@@ -255,15 +279,17 @@ static int transfer(Interp* I, uint32_t pc, uint32_t t, int link, uint32_t* npc)
         c->pc = t;
         fn(c);
         g_ppc_cur_fn = I->start;
+        I->since_call = 0;  /* waiting through the game's functions (OSSleepThread, VIWaitForRetrace) is not a hang */
         if (link) {  /* the call returned: on at the instruction after it */
             *npc = pc + 4;
             return 0;
         }
         /* a tail call: the callee returned through lr, as a blr to c->lr; the same rules decide where to */
         t = c->lr & ~3u;
-        if (++I->steps > INTERP_STEP_LIMIT)
+        I->steps++;
+        if (++I->since_call > INTERP_STEP_LIMIT)
             rt_fatal("interpreted code entered at %08X: %llu steps without returning (tail calls at %08X): stopped",
-                     I->start, I->steps, pc);
+                     I->start, I->since_call, pc);
     }
 }
 
@@ -273,9 +299,10 @@ static void run(Interp* I) {
     Cpu* c = I->c;
     uint32_t pc = c->pc;
     for (;;) {
-        if (__builtin_expect(++I->steps > INTERP_STEP_LIMIT, 0))
-            rt_fatal("interpreted code entered at %08X ran %llu instructions without returning (now at %08X, lr %08X): stopped",
-                     I->start, I->steps - 1, pc, I->entry_lr);
+        I->steps++;
+        if (__builtin_expect(++I->since_call > INTERP_STEP_LIMIT, 0))
+            rt_fatal("interpreted code entered at %08X ran %llu instructions without calling the game or returning (now at %08X, lr %08X): stopped",
+                     I->start, I->since_call - 1, pc, I->entry_lr);
         if (__builtin_expect(!is_backed_code(pc), 0))
             rt_fatal("interpreted code ran on to %08X, which is not code in guest RAM (code entered at %08X, lr %08X)",
                      pc, I->start, I->entry_lr);
@@ -742,7 +769,7 @@ static void run(Interp* I) {
 }
 
 void ppc_interp(Cpu* c) {
-    Interp I = {c, c->pc, c->lr, c->r[1], 0, 0};
+    Interp I = {.c = c, .start = c->pc, .entry_lr = c->lr, .entry_sp = c->r[1]};
     unsigned n = ++g_entries;
     uint32_t prev_fn = g_ppc_cur_fn;
     first_entry(&I);
