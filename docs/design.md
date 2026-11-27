@@ -70,6 +70,19 @@ Unknown, to measure later: CPU load on the original hardware, how far below 30 f
 | Controls | GameCube pad layout on Joy-Cons and Pro Controller, per-button remapping, up to 4 pads for split screen | sonic-riders-recomp `si.c`, `input_hid.c` |
 | Port menu | Settings, controls, resolution, performance, exit | sonic-riders-recomp `menu.cpp` (trimmed) |
 
+## Execution model
+
+The game runs as C recompiled from PsoV3.dol: every function the analysis found is a C function, and indirect calls
+and jumps go through ppc_dispatch (runtime/src/dispatch.c), which maps a guest address to its recompiled function.
+Code the game did not ship with has no such function. PSO servers send exactly that: a download quest makes the
+quest script interpreter call code the server wrote into low memory (0x80004000), as newserv documents. For that
+case ppc_dispatch falls back to a PowerPC interpreter (runtime/src/interp.c) when the target is not a recompiled
+function but looks like code. The interpreter runs from guest RAM with the recompiler's own semantics (ppc2c.py and
+the ppc.h helpers), calls recompiled functions where the code calls them, and returns to the recompiled caller when
+the code branches back to the lr it was entered with, r1 as at entry. Normal game paths never reach it (the
+recompiled lookup comes first). Patches the server writes into the game's own code do not change the recompiled
+functions; the interpreter logs each one so they can be replaced natively if a server depends on them.
+
 ## Phases
 
 1. **Analysis**: dtk config for PsoV3.dol, function list, SDK map, the loader handoff from main.dol, the HLE

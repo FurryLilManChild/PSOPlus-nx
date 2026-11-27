@@ -25,6 +25,10 @@ static int g_logs;
 void rt_log(const char* fmt, ...) { (void)fmt; g_logs++; }
 _Noreturn void rt_fatal(const char* fmt, ...) { va_list ap; va_start(ap, fmt); vfprintf(stderr, fmt, ap); va_end(ap); fputc('\n', stderr); exit(2); }
 PpcFunc ppc_dispatch_lookup(uint32_t a);
+/* dispatch.c's interpreter fallback (interp.c, tested by interp_test.c): never reached here, the test
+ * dispatches only to function entries */
+int ppc_interp_can_run(uint32_t a) { (void)a; return 0; }
+void ppc_interp(Cpu* c) { rt_fatal("interpreter entered at %08X", c->pc); }
 
 static PpcFunc ref_search(uint32_t a) {  /* ppc_dispatch before the cache */
     unsigned lo = 0, hi = g_recomp_func_count;

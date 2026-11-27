@@ -564,6 +564,7 @@ void platform_set_handheld_gpu(int on) { (void)on; }
 void platform_set_cpu_clock(int mhz) { (void)mhz; }  /* PC: the clocks are the OS's */
 void platform_clock_info(PlatformClockInfo* out) { memset(out, 0, sizeof *out); }
 void platform_clock_release_at_exit(void) {}
+_Noreturn void platform_fatal_exit(void) { abort(); }  /* the crash handler and a core dump, as before */
 
 /* ---- "Save a bug report" (settings menu, About): one zip in the game folder with what a report needs:
  * psoplus.log (this run, flushed first), psoplus.prev.log (.prev2-.prev4 on PC), setup.log, saves/settings.ini, crash.txt

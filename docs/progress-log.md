@@ -1,5 +1,40 @@
 # Progress log (newest first)
 
+## 2026-11-27: Schtserv login crash: an interpreter for server code, and a clean fatal exit (not yet run on the console)
+
+A player's console crashed seconds after logging in to the Schtserv server. Evidence: the log ends with
+`FATAL: dispatch to 80004000: not a function entry (lr 801F2ED4)`, and the Atmosphere crash report, resolved against
+build/switch/psoplus-83bf5ec.elf, is an svcBreak in hid (result 0x1159) on the render thread
+(render_deko.c render_thread, input_hid.c input_pump, padUpdate).
+
+Cause, two parts:
+- At login the server sent a download quest (the game's download window TDLGraph appeared). Its script makes the
+  game's quest interpreter (0x801F2E64; opcode byte, F8/F9 prefixes, handler table 0x804C69D8, bctrl at 0x801F2ED0,
+  return address 0x801F2ED4) call code the server wrote into unused low memory at 0x80004000. This is the known
+  technique servers use to run their own code on GameCube clients (newserv documents it); that code may install
+  more handlers and patch the game's code. A GameCube runs it; our port only has the recompiled DOL functions, so
+  ppc_dispatch stopped.
+- rt_fatal ended in abort(), whose exit path (__libnx_exit) closed hid and applet services while the render thread
+  still polled the controllers, so hid aborted and Atmosphere showed a crash screen instead of a clean exit.
+
+Change:
+- runtime/src/interp.c: a PowerPC interpreter used only when ppc_dispatch's target is not a recompiled function and
+  looks like code (aligned, in guest RAM, not a zero word). Same semantics as tools/recomp/ppc2c.py (integer, FP,
+  paired singles, the same ppc.h memory and SPR helpers). It returns to the recompiled caller on a branch to the lr
+  it was entered with while r1 is as at entry; calls to recompiled functions run them; jumps to recompiled functions
+  are tail calls whose end goes wherever lr points; anything else is interpreted from guest RAM. Unknown
+  instructions and runaways (50 million instructions in one entry) are clean fatals naming the address.
+- Log lines for the tester (all `[interp]`): `first entry at 80004000 (lr 801F2ED4, r1 ...)` with the first 64
+  words, `wrote guest RAM 80000000-8000FFFF to sdmc:/switch/psoplus/server_code_80004000.bin`, `entry N at ...: K
+  instructions, back to ...` (first 40, then a summary every 1000), `calls the recompiled function ...` (first time
+  per function), `store to the game's code at ...: old -> new` (first 200; these patches do not reach the
+  recompiled code).
+- rt_fatal on the Switch now syncs the log and ends the process with svcExitProcess (platform_fatal_exit), so no
+  library teardown races the render thread; the console goes back to HOME. PC builds still abort().
+- tools/tests/run_interp_test.sh: hand-assembled sequences through the interpreter, RESULT: PASS.
+- Not known yet: what the Schtserv code does after it runs. If it relies on its patches to game code, the dump and
+  the store lines show which ones, for native replacements.
+
 ## 2026-11-27: Release 1.1.0 (16:9 widescreen)
 
 - The owner's run of build C (5d599768): menu screen on/off 21 times, the main menu kept as one layout, every

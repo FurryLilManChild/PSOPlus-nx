@@ -21,6 +21,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <switch.h>
+#include <unistd.h>
 
 #include "chat_kbd.h"
 #include "net_native.h"
@@ -231,6 +232,24 @@ void platform_clock_release_at_exit(void) {
     Result rc = clk_set_cpu_locked(CPU_STOCK_HZ);
     remove(CLOCK_MARKER);
     rt_log("[clocks] exit: CPU set back to stock %u MHz: rc 0x%X", CPU_STOCK_HZ / 1000000, rc);
+}
+
+/* rt_fatal's end (log.c), after it has written the message, set the clock back and flushed the log.
+ * Before, rt_fatal ended in abort(): newlib's exit path ran __libnx_exit, which closes hid, applet and the
+ * other services while the render thread (render_deko.c render_thread, input_hid.c input_pump) still polls
+ * the controllers, so hid itself aborted with svcBreak (result 0x1159) and Atmosphere showed a crash
+ * screen instead of our message (the Schtserv download quest crash, 2026-11-27). Stopping the other host
+ * threads first is not robust: the fatal can come from any thread, even the render thread itself or one
+ * holding a lock the others wait for. So the process ends at once: the log is synced to the SD card, then
+ * svcExitProcess, which ends every thread together and lets the kernel close all handles (services,
+ * files, sockets, the guest memory mappings) without running any library teardown. The system then
+ * returns to HOME, as after closing the game there. No atexit handlers run (they never did after abort):
+ * the memory card file is written by exi.c's writer half a second after the game's last card write. */
+_Noreturn void platform_fatal_exit(void) {
+    fflush(stderr);
+    fsync(fileno(stderr));
+    svcExitProcess();
+    __builtin_unreachable();
 }
 
 /* ---- a crash (data abort, bad instruction, ...): the CPU clock back to stock first ----

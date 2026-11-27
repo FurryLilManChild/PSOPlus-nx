@@ -81,5 +81,5 @@ _Noreturn void rt_fatal(const char* fmt, ...) {
     fputc('\n', stderr);
     platform_clock_release_at_exit();  /* Switch: no CPU override left behind */
     fflush(stderr);
-    abort();
+    platform_fatal_exit();  /* Switch: ends the process without libnx's exit cleanup; elsewhere abort() */
 }

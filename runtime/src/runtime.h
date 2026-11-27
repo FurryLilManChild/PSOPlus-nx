@@ -30,6 +30,10 @@ typedef struct PlatformClockInfo {
 /* cheap (no system calls); calling it asks for fresh reads for the next few seconds */
 void platform_clock_info(PlatformClockInfo* out);
 void platform_clock_release_at_exit(void);  /* Switch: exit and rt_fatal set the CPU back to stock */
+/* rt_fatal's end, after the log is flushed. Switch: the log file synced, then the process ends at once
+ * (svcExitProcess), without newlib's exit and libnx's service teardown, which raced the render thread's
+ * controller polling (hid aborted with svcBreak). Elsewhere abort(), for the host's crash handling. */
+_Noreturn void platform_fatal_exit(void);
 double platform_gpu_frame_ms(void);  /* GPU time of recent frames (Switch: timestamps, render_deko.c); < 0: unknown */
 void platform_local_time(int* year, int* month, int* day, int* hour, int* minute, int* second);  /* local wall clock */
 uint64_t platform_now_ns(void);  /* monotonic, cheap (called thousands of times a frame) */

@@ -13,9 +13,10 @@
  * with relaxed atomics, so a reader on another host thread sees either a whole old entry or a whole new
  * one; both are valid, because the table never changes. The function called for an address is the one
  * the binary search finds, always: the cache only remembers results of that search, and an address
- * that is not a function entry is never cached (it ends in rt_fatal as before). */
+ * that is not a function entry is never cached (it goes to the interpreter fallback, interp.c, or rt_fatal). */
 #include <stdint.h>
 
+#include "interp.h"
 #include "recomp_table.h"
 #include "runtime.h"
 
@@ -63,5 +64,11 @@ void ppc_dispatch(Cpu* c) {
         fn(c);
         return;
     }
-    rt_fatal("dispatch to %08X: not a function entry (lr %08X)", a, c->lr);
+    /* not a recompiled function: code the game did not ship with (a PSO server's code in low memory,
+     * interp.c), or the middle of a function. When it looks like code, the interpreter runs it. */
+    if (ppc_interp_can_run(a)) {
+        ppc_interp(c);
+        return;
+    }
+    rt_fatal("dispatch to %08X: not a function entry, and not code the interpreter can run (lr %08X)", a, c->lr);
 }
