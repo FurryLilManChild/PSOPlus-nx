@@ -11,6 +11,12 @@
 #   auto          from where the window draws: inside the left third and the left half -> left,
 #                 inside the right third and the right half -> right, anything else -> centre
 #   follow        placed from a 3D point, its width kept (speech bubbles)
+# Lines starting with "menu:" are for the menu screen (the in-field main menu, Start: the 3D view shrinks into a
+# box at the top right, panels fill the rest; its pages Item Pack, Customize, Technique, Chat, Status, Options,
+# Guild Card, Log, Quest and the rest keep it up). While it is up every window takes its class's menu: line, or
+# the menu: default ("menu: * centre" when not given); its ordinary line does not apply. Centred, the menu's
+# pieces and the status window keep their 4:3 places relative to each other, and the panels' edges are carried
+# out to the screen edges (built in, not a line here).
 # A window moves in one piece (its frame, bars, text and icons together). The [hud] lines of the log name
 # every window with its placement and the x range it drew in (0..640 of the 4:3 frame).
 # Positions below are from the game's 1-player window layout table (0x8044FE00) unless marked.
@@ -19,7 +25,9 @@
 # windows, word select, keyboard, title, character select, options, pause, results, loading.
 *                         centre
 
-# Player status: name, level, HP / TP bars, status icons (layout 28,37, 153 x 50; icons from 226,37)
+# Player status: name, level, HP / TP bars, status icons (layout 28,37, 153 x 50; icons from 226,37).
+# TWindowStatus is the one-player status window (measured x 0..256), TWindowSimpleStatus the split screen one.
+TWindowStatus             left
 TWindowSimpleStatus       left
 TWindowEffectParty        left     # its flash, drawn at the status window's place (layout 28,37)
 # Other players' HP (layout 30,116, 114 x 46)
@@ -38,3 +46,15 @@ TRaderMap*                auto
 TWindowTradeRequest       auto     # layout 17,277
 TObjSoloPlayWin           auto     # layout 20,120
 TObjDeadListWin           auto     # layout 400,340
+
+# The menu screen. Default: everything in the middle as in 4:3, the status window included (the game keeps it
+# shown on this screen: TWindowCtrlPlayer::update_trade_window_visibility closes it only in split screen).
+menu: *                   centre
+# The game closes these when the menu opens and shows them again when it closes; they keep their field place
+# so they do not jump while they animate out and back in.
+menu: TWindowActionPalette right
+menu: TWindowEffectLight  right
+menu: TWindowLockOn       left
+# Information popups: the game moves them into the 3D view's box while the menu is open (layout 373,123); the
+# box reaches the right screen edge in 16:9 as in 4:3, so they keep their right pin there too.
+menu: TWindowMessageInfomation right

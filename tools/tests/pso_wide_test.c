@@ -20,6 +20,16 @@
  *    gx.vert's clip arithmetic and the backends' scissor, for full and offset viewports.
  * 8. The walk's windows: with containers (TWindowCtrlScreen walking a window root), each window and its parts
  *    share one window id, the class's own hud_anchor.txt line and the split screen bit are in the marks.
+ * The menu screen (docs/widescreen-research.md section 7):
+ * 9. When it is up (the 3D view's box from TWindowCtrlMain::viewport_states[0], every step of the game's
+ *    transition, the Log page's wider box, never in split screen or before the states are set up); the
+ *    menu: lines of hud_anchor.txt (parser, shipped file); the walk's marks: menu flag on every window, the
+ *    class's menu: placement as its own line, the panel flag only on TWindowCtrlScreen's own draws.
+ * 10. The panels: every piece draw_menu_backdrop_gradients draws, for every left / bottom of the transition,
+ *    placed per vertex (hud_backdrop_place) and mapped to the 854 wide screen as gx.vert does: the left column
+ *    reaches the screen's left edge and ends where the 4:3 layout puts it, the bottom band and the box's
+ *    bottom line reach both edges, the corner piece sits at the column's edge, the widened 3D view never shows
+ *    a gap between the column and itself, and the menu's windows keep their 4:3 places relative to the panels.
  *
  * Usage: pso_wide_test [trees] [seed] */
 #include <math.h>
@@ -193,12 +203,13 @@ static void run_walk(uint32_t root, int hle, Run* out) {
     for (uint32_t i = 0; i < 0x400u; i++) out->stack[i] = ld8(STACK_TOP - 0x400u + i);
 }
 #define NAME_AT(i) (0x80003000u + 0x20u * (uint32_t)(i))
-enum { N_CTRLSCREEN = 8, N_TOBJECT, N_SIMPLESTATUS, N_PALETTE, N_MAINMENU, N_RADAR, N_NAMES };
+enum { N_CTRLSCREEN = 8, N_TOBJECT, N_SIMPLESTATUS, N_PALETTE, N_MAINMENU, N_RADAR, N_STATUS, N_INFO, N_MENULIST, N_NAMES };
 static void set_names(void) {
     static const char* const names[N_NAMES] = {"TWindowPartyStatus", "TObjEnePanarms", "TWindowFukidasi", "TEF_LensFlare",
                                                "TParticle", "TAdTitleGC", "TObjResultWin", "TQuadSpriteNormal",
                                                "TWindowCtrlScreen", "TObject", "TWindowSimpleStatus",
-                                               "TWindowActionPalette", "TWindowMainMenu1P", "TRaderMapCore"};
+                                               "TWindowActionPalette", "TWindowMainMenu1P", "TRaderMapCore",
+                                               "TWindowStatus", "TWindowMessageInfomation", "TWindowMenuMainMenu"};
     for (int i = 0; i < N_NAMES; i++) {
         uint32_t a = 0x80003000u + 0x20u * (uint32_t)i;
         for (size_t j = 0; j <= strlen(names[i]); j++) st8(a + (uint32_t)j, (uint8_t)names[i][j]);
@@ -266,12 +277,12 @@ static int test_marks(void) {
     };
     int fails = 0, ctx = 0, last_place = -1;
     for (int i = 0; i < g_ntmarks; i += WIDE_MARK_BYTES) {
-        if (g_tmarks[i] != GX_HOST_MARK || g_tmarks[i + 1] != WIDE_MARK_CTX) { printf("  bad mark  FAIL\n"); fails++; continue; }
+        if (g_tmarks[i] != GX_HOST_MARK || (g_tmarks[i + 1] & WIDE_MARK_KIND) != WIDE_MARK_CTX) { printf("  bad mark  FAIL\n"); fails++; continue; }
         ctx++;
         last_place = g_tmarks[i + 2] & 7;
     }
     /* replay: the walk's per-object context, as classify gives it */
-    WideCtx base = {WIDE_WORLD, WIDE_NO_LAYER, HUD_NONE, 1, 0, 0};
+    WideCtx base = {WIDE_WORLD, WIDE_NO_LAYER, HUD_NONE, 1, 0, 0, 0};
     for (int i = 0; i < WIDE_LAYERS; i++) g_layer[i] = layers[i];
     for (size_t i = 0; i < sizeof want / sizeof *want; i++) {
         uint32_t o = want[i].obj;
@@ -328,7 +339,7 @@ static int test_anchor_file(void) {
     if (r->errors) { printf("  shipped hud_anchor.txt: %d bad lines (first %d)  FAIL\n", r->errors, r->first_error_line); fails++; }
     if (r->dflt != HUD_CENTRE) { printf("  shipped default %d  FAIL\n", r->dflt); fails++; }
     struct { const char* n; int want; } t[] = {
-        {"TWindowSimpleStatus", HUD_LEFT}, {"TWindowEffectParty", HUD_LEFT}, {"TWindowPartyStatus", HUD_LEFT},
+        {"TWindowSimpleStatus", HUD_LEFT}, {"TWindowStatus", HUD_LEFT}, {"TWindowEffectParty", HUD_LEFT}, {"TWindowPartyStatus", HUD_LEFT},
         {"TWindowLockOn", HUD_LEFT}, {"TWindowActionPalette", HUD_RIGHT}, {"TWindowEffectLight", HUD_RIGHT},
         {"TWindowMessageInfomation", HUD_RIGHT}, {"TRaderMapCore", HUD_AUTO}, {"TWindowTradeRequest", HUD_AUTO},
         /* no line of their own: the default (centre) */
@@ -369,7 +380,7 @@ static int test_anchor_file(void) {
         int got = hud_rules_lookup(&p, q[i].n);
         if (got != q[i].want) { printf("  parser: %s -> %s (want %s)  FAIL\n", q[i].n, k_hud_place_names[got], k_hud_place_names[q[i].want]); fails++; }
     }
-    if (p.dflt != HUD_AUTO || p.errors != 4 || p.first_error_line != 10 || p.n != 6) {
+    if (p.dflt != HUD_AUTO || p.errors != 4 || p.first_error_line != 10 || p.n != 6 || p.menu_dflt != HUD_CENTRE) {
         printf("  parser: default %d, %d errors (first line %d), %d rules  FAIL\n", p.dflt, p.errors, p.first_error_line, p.n);
         fails++;
     }
@@ -505,7 +516,8 @@ static int test_units(void) {
         int seen[sizeof want / sizeof *want] = {0}, bad_split = 0;
         for (int i = 0; i < g_ntmarks; i += WIDE_MARK_BYTES) {
             const uint8_t* b = g_tmarks + i;
-            if (b[1] != WIDE_MARK_CTX) continue;
+            if ((b[1] & WIDE_MARK_KIND) != WIDE_MARK_CTX) continue;
+            if (b[1] & WIDE_CTX_MENU) { printf("  menu flag with no menu screen  FAIL\n"); fails++; }
             uint32_t name = (uint32_t)b[4] << 24 | (uint32_t)b[5] << 16 | (uint32_t)b[6] << 8 | b[7];
             uint32_t unit = (uint32_t)b[8] << 24 | (uint32_t)b[9] << 16 | (uint32_t)b[10] << 8 | b[11];
             if (((b[2] >> 6) & 1) != split) bad_split++;
@@ -525,12 +537,187 @@ static int test_units(void) {
     return fails;
 }
 
+/* ---- 9. the menu screen: when, hud_anchor.txt menu: lines, the walk's marks ---- */
+static int test_menu(void) {
+    int fails = 0, why;
+    /* the 3D view's box at every step of TWindowMainMenu1P::update_backdrop_transition: x 0..3 (6: Log page) */
+    for (int tx = 0; tx <= 6; tx++)
+        for (int ty = 0; ty <= 3; ty++) {
+            float left = 53.333332f * (float)tx, bottom = 480.0f - 74.666664f * (float)ty;
+            int want = tx || ty;
+            if (hud_menu_screen(left, bottom, 0) != want || hud_menu_screen(left, bottom, 1)) {
+                printf("  box x %d y %d: menu screen %d  FAIL\n", tx, ty, hud_menu_screen(left, bottom, 0));
+                fails++;
+            }
+        }
+    if (hud_menu_screen(0.0f, 0.0f, 0) || hud_menu_screen(NAN, NAN, 0)) { printf("  states not set up yet  FAIL\n"); fails++; }
+    /* the parser's menu: lines */
+    static HudRules p;
+    hud_rules_parse(&p, "TStatus left\nmenu: TStatus right\nmenu:   TPal*   left\nmenu: * stretch\nmenu:\nmenu: TX\n* auto\n");
+    if (p.errors != 2 || p.dflt != HUD_AUTO || p.menu_dflt != HUD_STRETCH || hud_rules_lookup(&p, "TStatus") != HUD_LEFT ||
+        hud_rules_lookup_menu(&p, "TStatus") != HUD_RIGHT || hud_rules_lookup(&p, "TPalette") != HUD_NONE ||
+        hud_menu_place(&p, "TPalette") != HUD_LEFT || hud_menu_place(&p, "TOther") != HUD_STRETCH) {
+        printf("  parser: menu: lines (%d errors)  FAIL\n", p.errors);
+        fails++;
+    }
+    hud_rules_parse(&p, "TStatus left\n");
+    if (p.menu_dflt != HUD_CENTRE || hud_menu_place(&p, "TStatus") != HUD_CENTRE) { printf("  menu: default  FAIL\n"); fails++; }
+    /* the shipped file */
+    const HudRules* r = pso_hud_rules();
+    struct { const char* n; int want; } t[] = {
+        {"TWindowStatus", HUD_CENTRE}, {"TWindowSimpleStatus", HUD_CENTRE}, {"TWindowEffectParty", HUD_CENTRE},
+        {"TWindowPartyStatus", HUD_CENTRE}, {"TWindowMenuMainMenu", HUD_CENTRE}, {"TWindowSubStatusDisp", HUD_CENTRE},
+        {"TWindowMessage", HUD_CENTRE}, {"TWindowSubItem", HUD_CENTRE}, {"TRaderMapCore", HUD_CENTRE},
+        {"TWindowActionPalette", HUD_RIGHT}, {"TWindowEffectLight", HUD_RIGHT}, {"TWindowLockOn", HUD_LEFT},
+        {"TWindowMessageInfomation", HUD_RIGHT},
+    };
+    for (size_t i = 0; i < sizeof t / sizeof *t; i++)
+        if (hud_menu_place(r, t[i].n) != t[i].want) { printf("  shipped menu: %s -> %s  FAIL\n", t[i].n, k_hud_place_names[hud_menu_place(r, t[i].n)]); fails++; }
+    if (hud_decide_menu(HUD_CENTRE, HUD_CENTRE, 0, 256, 0, 1, &why) != HUD_CENTRE || why != HUD_WHY_MENU) { printf("  decide: menu centre  FAIL\n"); fails++; }
+    if (hud_decide_menu(HUD_RIGHT, HUD_CENTRE, 471, 640, 0, 1, &why) != HUD_RIGHT || why != HUD_WHY_MENU) { printf("  decide: menu right  FAIL\n"); fails++; }
+    if (hud_decide_menu(HUD_RIGHT, HUD_CENTRE, 471, 640, 1, 1, &why) != HUD_CENTRE || why != HUD_WHY_SPLIT) { printf("  decide: menu split  FAIL\n"); fails++; }
+
+    /* the walk: tl_window -> TWindowCtrlScreen -> window root -> status, menu list, palette, info popup */
+    g_nobj = 0;
+    g_k = 854.0f / 640.0f;
+    uint32_t root = new_obj(NAME_AT(1), 0);
+    st16(root + 4u, 0);
+    uint32_t layers[WIDE_LAYERS];
+    for (int i = 0; i < WIDE_LAYERS; i++) {
+        layers[i] = new_obj(0, 0);
+        st16(layers[i] + 4u, 0);
+        st32(WIDE_LAYER_BASE + 4u * (uint32_t)i, layers[i]);
+        add_child(root, layers[i]);
+    }
+    uint32_t screen = new_obj(NAME_AT(N_CTRLSCREEN), 1);
+    st16(screen + 4u, 0);
+    add_child(layers[13], screen);
+    uint32_t wroot = new_obj(NAME_AT(N_TOBJECT), 0);
+    st16(wroot + 4u, 0);
+    st32(screen + 0x20u, wroot);
+    uint32_t status = OBJ(wroot, N_STATUS);
+    uint32_t status_part = OBJ(status, 4);
+    uint32_t list = OBJ(wroot, N_MENULIST);
+    uint32_t palette = OBJ(wroot, N_PALETTE);
+    uint32_t info = OBJ(wroot, N_INFO);
+    struct { uint32_t obj, unit; int field, menu, backdrop; } want[] = {
+        {screen, screen, HUD_NONE, HUD_CENTRE, 1}, {status, status, HUD_LEFT, HUD_CENTRE, 0}, {status_part, status, HUD_NONE, HUD_NONE, 0},
+        {list, list, HUD_NONE, HUD_CENTRE, 0}, {palette, palette, HUD_RIGHT, HUD_RIGHT, 0}, {info, info, HUD_RIGHT, HUD_RIGHT, 0},
+    };
+    struct { float left, bottom; uint32_t views; int menu; } states[] = {
+        {0.0f, 480.0f, 1, 0}, {160.0f, 256.0f, 1, 1}, {53.333332f, 480.0f, 1, 1}, {320.0f, 480.0f, 1, 1},
+        {160.0f, 256.0f, 2, 0}, {0.0f, 0.0f, 1, 0},
+    };
+    for (size_t s_ = 0; s_ < sizeof states / sizeof *states; s_++) {
+        st32(VIEW_COUNT, states[s_].views);
+        uint32_t lb, bb;
+        memcpy(&lb, &states[s_].left, 4);
+        memcpy(&bb, &states[s_].bottom, 4);
+        st32(VIEWPORT_STATES + 0x0Cu, lb);
+        st32(VIEWPORT_STATES + 0x18u, bb);
+        g_ntmarks = 0;
+        run_walk(root, 1, &(Run){0});
+        int split = states[s_].views > 1;
+        if (g_menu != states[s_].menu) { printf("  state %zu: menu screen %d  FAIL\n", s_, g_menu); fails++; }
+        int seen[sizeof want / sizeof *want] = {0}, bad = 0;
+        for (int i = 0; i < g_ntmarks; i += WIDE_MARK_BYTES) {
+            const uint8_t* b = g_tmarks + i;
+            if ((b[1] & WIDE_MARK_KIND) != WIDE_MARK_CTX) continue;
+            uint32_t name = (uint32_t)b[4] << 24 | (uint32_t)b[5] << 16 | (uint32_t)b[6] << 8 | b[7];
+            uint32_t unit = (uint32_t)b[8] << 24 | (uint32_t)b[9] << 16 | (uint32_t)b[10] << 8 | b[11];
+            int in_tree = (b[2] & 7) != WIDE_OUTSIDE;
+            if (in_tree && !!(b[1] & WIDE_CTX_MENU) != states[s_].menu) bad++;
+            for (size_t j = 0; j < sizeof want / sizeof *want; j++)
+                if (unit == want[j].unit && name == ld32(want[j].obj)) {
+                    int force = (b[2] >> 3) & 7, wf = states[s_].menu ? want[j].menu : want[j].field;
+                    int bd = !!(b[1] & WIDE_CTX_BACKDROP);
+                    if (force == wf && bd == want[j].backdrop && (b[2] & 7) == WIDE_HUD) seen[j] = 1;
+                }
+            if ((b[1] & WIDE_CTX_BACKDROP) && name != ld32(screen)) { printf("  state %zu: panel flag on another object  FAIL\n", s_); fails++; }
+        }
+        for (size_t j = 0; j < sizeof want / sizeof *want; j++)
+            if (!seen[j]) { printf("  state %zu (split %d): object %zu: no mark with the right line / panel flag  FAIL\n", s_, split, j); fails++; }
+        if (bad) { printf("  state %zu: %d marks with the wrong menu flag  FAIL\n", s_, bad); fails++; }
+    }
+    st32(VIEW_COUNT, 0);
+    st32(VIEWPORT_STATES + 0x0Cu, 0);
+    st32(VIEWPORT_STATES + 0x18u, 0);
+    g_split = 0;
+    g_menu = 0;
+    printf("  box states (28 steps), menu: lines (parser, %zu shipped), marks in %zu game states checked\n",
+           sizeof t / sizeof *t, sizeof states / sizeof *states);
+    return fails;
+}
+
+/* ---- 10. the panels on the 854 wide screen ---- */
+static float screen_x(float x, int place, float k) {  /* gx.vert for a full-viewport HUD draw, in wide pixels */
+    float clip = (x - 320.0f) / 320.0f, sh = 1.0f - 1.0f / k;
+    clip = clip / k + (place == HUD_LEFT ? -sh : place == HUD_RIGHT ? sh : 0.0f);
+    return (clip + 1.0f) * 320.0f * k;
+}
+typedef struct { float x0, x1; } Piece;
+static Piece place_piece(float x0, float x1, float k) {  /* one quad or line of draw_menu_backdrop_gradients */
+    Piece o = {screen_x(x0, hud_backdrop_place(x0, x0, x1), k), screen_x(x1, hud_backdrop_place(x1, x0, x1), k)};
+    return o;
+}
+static int test_panels(void) {
+    int fails = 0, n = 0;
+    float k = 854.0f / 640.0f, W = 640.0f * k, hx = 320.0f * (k - 1.0f);
+    for (int tx = 0; tx <= 6; tx++)
+        for (int ty = 0; ty <= 3; ty++) {
+            float left = 53.333332f * (float)tx, bottom = 480.0f - 74.666664f * (float)ty;
+            /* the pieces, as the game draws them (decomp TWindowCtrlMain.cpp, matching 0x8024CE68) */
+            Piece black_left = place_piece(0.0f, 0.5f * left, k);       /* black, 0..left/2, full height */
+            Piece black_bottom = place_piece(0.5f * left, 640.0f, k);   /* black, below the middle of the band */
+            Piece fade_left = place_piece(0.5f * left, left, k);        /* black to clear, left of the box */
+            Piece fade_bottom = place_piece(0.5f * left, 640.0f, k);    /* black to clear, under the box */
+            Piece column = place_piece(0.0f, left, k);                  /* teal tiles, 0..left above the band */
+            Piece band = place_piece(0.0f, 640.0f, k);                  /* teal tiles, the band */
+            Piece corner = place_piece(left, 16.0f + left, k);          /* the box's corner piece */
+            Piece vline = place_piece(left, left, k);                   /* the box's left line */
+            Piece hline = place_piece(16.0f + left, 640.0f, k);         /* the box's bottom line */
+            float col_edge = left + hx;                                 /* the 4:3 layout's column edge, centred */
+            float view_left = left * k;                                 /* the widened 3D view's left edge */
+            n++;
+            if (left > 16.5f) {
+                if (fabsf(column.x0) > 1e-3f || fabsf(column.x1 - col_edge) > 1e-3f) { printf("  x %d: column %.1f..%.1f  FAIL\n", tx, column.x0, column.x1); fails++; }
+                if (fabsf(black_left.x0) > 1e-3f) { printf("  x %d: black left from %.1f  FAIL\n", tx, black_left.x0); fails++; }
+                if (fabsf(corner.x0 - col_edge) > 1e-3f || fabsf(corner.x1 - corner.x0 - 16.0f) > 1e-3f) { printf("  x %d: corner %.1f..%.1f  FAIL\n", tx, corner.x0, corner.x1); fails++; }
+                if (fabsf(vline.x0 - col_edge) > 1e-3f) { printf("  x %d: left line %.1f  FAIL\n", tx, vline.x0); fails++; }
+            } else {  /* left 0: the panels fading out; pieces at the edge stay at the edge, unstretched */
+                if (fabsf(corner.x0) > 1e-3f || fabsf(corner.x1 - 16.0f) > 1e-3f) { printf("  x %d: corner %.1f..%.1f  FAIL\n", tx, corner.x0, corner.x1); fails++; }
+                if (fabsf(vline.x0) > 1e-3f) { printf("  x %d: left line %.1f  FAIL\n", tx, vline.x0); fails++; }
+            }
+            if (fabsf(band.x0) > 1e-3f || fabsf(band.x1 - W) > 1e-3f) { printf("  band %.1f..%.1f  FAIL\n", band.x0, band.x1); fails++; }
+            if (fabsf(black_bottom.x1 - W) > 1e-3f || fabsf(fade_bottom.x1 - W) > 1e-3f || fabsf(hline.x1 - W) > 1e-3f) {
+                printf("  x %d: bottom pieces end at %.1f / %.1f / %.1f  FAIL\n", tx, black_bottom.x1, fade_bottom.x1, hline.x1); fails++;
+            }
+            if (left > 16.5f && fabsf(fade_left.x1 - col_edge) > 1e-3f) { printf("  x %d: fade ends %.1f  FAIL\n", tx, fade_left.x1); fails++; }
+            /* no gap: the column (drawn over the 3D) reaches at least the widened view's left edge */
+            if (left > 0.0f && view_left > column.x1 + 1e-3f) { printf("  x %d: gap %.1f..%.1f  FAIL\n", tx, column.x1, view_left); fails++; }
+            (void)bottom;
+        }
+    /* the menu's windows, centred, keep their 4:3 places relative to the column's edge and the band */
+    float left = 160.0f;
+    struct { const char* n; float x0, x1; } w[] = {{"status", 0, 256}, {"menu list", 28, 144}, {"help", 17, 223}, {"stats", 299, 611}};
+    for (size_t i = 0; i < sizeof w / sizeof *w; i++) {
+        float a = screen_x(w[i].x0, HUD_CENTRE, k), b = screen_x(w[i].x1, HUD_CENTRE, k);
+        if (fabsf((a - (left + hx)) - (w[i].x0 - left)) > 1e-3f || fabsf((b - a) - (w[i].x1 - w[i].x0)) > 1e-3f) {
+            printf("  %s: %.1f..%.1f  FAIL\n", w[i].n, a, b);
+            fails++;
+        }
+    }
+    printf("  %d box states: column, band, black and fade pieces, corner, lines, no gap to the 3D; %zu windows checked\n", n,
+           sizeof w / sizeof *w);
+    return fails;
+}
+
 int main(int argc, char** argv) {
     long trees = argc > 1 ? atol(argv[1]) : 3000;
     g_rng = argc > 2 ? strtoull(argv[2], NULL, 0) : 0x9E3779B97F4A7C15ull;
     mem_init();
     set_names();
-    int f1, f2, f3, f4, f5, f6, f7, f8, f9;
+    int f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11;
     printf("projection:\n"); f1 = test_projection();
     printf("class rules:\n"); f2 = test_names();
     printf("walk:\n"); f3 = test_walk(trees);
@@ -540,7 +727,9 @@ int main(int argc, char** argv) {
     printf("windows:\n"); f7 = test_windows();
     printf("edge shift:\n"); f8 = test_shift();
     printf("walk windows:\n"); f9 = test_units();
-    int total = f1 + f2 + f3 + f4 + f5 + f6 + f7 + f8 + f9;
+    printf("menu screen:\n"); f10 = test_menu();
+    printf("menu screen panels:\n"); f11 = test_panels();
+    int total = f1 + f2 + f3 + f4 + f5 + f6 + f7 + f8 + f9 + f10 + f11;
     printf("RESULT: %s (%d failures)\n", total ? "FAIL" : "PASS", total);
     return total != 0;
 }

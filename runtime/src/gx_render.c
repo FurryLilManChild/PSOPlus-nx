@@ -747,18 +747,23 @@ static int anchor_place(GxFrame* f, uint32_t v0, uint32_t count, float lo, float
  * unless their projection is one of the game's widened ones (WIDE_MARK_PROJ), which already draw right.
  * Follow: kept at their place, as narrow as in 4:3 (per object for speech bubbles, per draw for the lens
  * flare's sprites). Everything else is left as the widened projection draws it. */
-static struct { uint8_t place, layer, force, split, tag; uint32_t name, unit; unsigned seq; int world_logged; } g_wctx = {
-    WIDE_OUTSIDE, WIDE_NO_LAYER, 0, 0, 0, 0, 0, 0, 0};
+static struct { uint8_t place, layer, force, split, tag, menu, backdrop; uint32_t name, unit; unsigned seq; int world_logged; } g_wctx = {
+    WIDE_OUTSIDE, WIDE_NO_LAYER, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 static uint32_t g_ss_mtx[4][12];  /* the last screen space matrices (position matrix 0 after the load) */
 static int g_nss;
 static uint32_t g_wproj[4][6];    /* the last widened projections (XF 0x1020-0x1025) */
 static int g_nwproj;
-static unsigned long long g_wide_draws[5];  /* [wide] line: draws centred, stretched, follow, 3D in HUD left, world 2D */
+static unsigned long long g_wide_draws[6];  /* [wide] line: draws centred, stretched, follow, 3D in HUD left, world 2D,
+                                            * menu screen panels */
 static int g_hudlog = -1;         /* SR_HUDLOG=0: no [hud] lines */
 
 static int wide_unit_tag(void);
 void gx_wide_mark(int kind, int place, int layer, uint32_t name, uint32_t unit) {  /* GP thread (gx_fifo.c) */
+    int flags = kind & ~(int)WIDE_MARK_KIND;
+    kind &= (int)WIDE_MARK_KIND;
     if (kind == WIDE_MARK_CTX) {
+        g_wctx.menu = (flags & WIDE_CTX_MENU) != 0;
+        g_wctx.backdrop = (flags & WIDE_CTX_BACKDROP) != 0;
         g_wctx.place = (uint8_t)(place & 7);
         g_wctx.force = (uint8_t)((place >> 3) & 7);
         g_wctx.split = (uint8_t)((place >> 6) & 1);
@@ -789,7 +794,7 @@ static int proj_widened(void) {
 }
 
 /* [hud] lines: one per new (layer, class, placement), so an element shown wrongly can be named from the log */
-enum { HL_CENTRED, HL_STRETCHED, HL_FOLLOW, HL_3D_LEFT, HL_WORLD_2D };
+enum { HL_CENTRED, HL_STRETCHED, HL_FOLLOW, HL_3D_LEFT, HL_WORLD_2D, HL_BACKDROP };
 static void hud_log(int what) {
     if (g_hudlog < 0) { const char* e = getenv("SR_HUDLOG"); g_hudlog = !(e && e[0] == '0'); }
     if (!g_hudlog) return;
@@ -820,7 +825,8 @@ static void hud_log(int what) {
         static const char* const places[] = {"world", "HUD", "follow (one piece)", "follow (each sprite)", "outside"};
         static const char* const whats[] = {"centred 4:3", "2D stretched to the width (spans 640)",
                                             "2D follows its 3D point", "3D with a widened camera, left as drawn",
-                                            "2D left stretched (world object)"};
+                                            "2D left stretched (world object)",
+                                            "menu screen panel: its 4:3 edges carried to the screen edges"};
         rt_log("[hud] %s %s (%s): %s", g_wctx.layer < WIDE_LAYERS ? k_wide_layer_names[g_wctx.layer] : "-", name,
                places[g_wctx.place < 5 ? g_wctx.place : 0], whats[what]);
         if (nlines == 600) rt_log("[hud] 600 lines: no more");
@@ -836,7 +842,7 @@ static void hud_log(int what) {
  * and all its vertices and states are marked at once: a window never comes apart. The states carry the window
  * (GX_WIDE_UNIT_*), so the pin flags for the backends' scissor can be set on them afterwards. */
 #define WUNITS 255
-typedef struct { uint32_t unit, name; uint8_t layer, force, split, mirror; float lo, hi; uint32_t draws; } WUnit;
+typedef struct { uint32_t unit, name; uint8_t layer, force, split, mirror, menu; float lo, hi; uint32_t draws; } WUnit;
 static WUnit g_wu[WUNITS];
 static int g_nwu, g_wu_full_logged;
 static uint16_t g_wu_hash[512];  /* index + 1 */
@@ -844,7 +850,7 @@ typedef struct { uint32_t v0, v1; uint8_t tag; } WSeg;
 static WSeg* g_wseg;
 static uint32_t g_nwseg, g_cap_wseg;
 static GxFrame* g_wseg_frame;
-static unsigned long long g_hud_units[HUD_PLACES], g_hud_forced, g_hud_split, g_hud_unit_draws[HUD_PLACES];
+static unsigned long long g_hud_units[HUD_PLACES], g_hud_forced, g_hud_split, g_hud_menu, g_hud_unit_draws[HUD_PLACES];
 
 /* the window of the current context: its index + 1 in this frame's table (0: none, not HUD, or table full) */
 static int wide_unit_tag(void) {
@@ -857,6 +863,7 @@ static int wide_unit_tag(void) {
             WUnit* u = &g_wu[t - 1];
             if (u->force == HUD_NONE) u->force = g_wctx.force;  /* the first own line among its classes */
             u->split |= g_wctx.split;
+            u->menu |= g_wctx.menu;
             return t;
         }
         if (!t) {
@@ -865,7 +872,7 @@ static int wide_unit_tag(void) {
                 return 0;
             }
             WUnit* u = &g_wu[g_nwu++];
-            *u = (WUnit){g_wctx.unit, g_wctx.name, g_wctx.layer, g_wctx.force, g_wctx.split, 0, 1e30f, -1e30f, 0};
+            *u = (WUnit){g_wctx.unit, g_wctx.name, g_wctx.layer, g_wctx.force, g_wctx.split, 0, g_wctx.menu, 1e30f, -1e30f, 0};
             g_wu_hash[i] = (uint16_t)g_nwu;
             return g_nwu;
         }
@@ -954,7 +961,8 @@ static void wide_units_finish(GxFrame* f) {
         for (int i = 0; i < g_nwu; i++) {
             const WUnit* u = &g_wu[i];
             int why;
-            int c = hud_decide(u->force, rules->dflt, u->lo, u->hi, u->split, &why);
+            /* the menu screen: the game thread already gave each window its class's menu: placement */
+            int c = hud_decide_menu(u->force, u->menu ? rules->menu_dflt : rules->dflt, u->lo, u->hi, u->split, u->menu, &why);
             if (u->mirror && c != HUD_CENTRE) { c = HUD_CENTRE; why = HUD_WHY_MIRROR; }
             code[i] = (uint8_t)c;
             pins |= c == HUD_LEFT || c == HUD_RIGHT;
@@ -963,6 +971,7 @@ static void wide_units_finish(GxFrame* f) {
                 g_hud_unit_draws[c] += u->draws;
                 if (why == HUD_WHY_FILE) g_hud_forced++;
                 if (why == HUD_WHY_SPLIT) g_hud_split++;
+                if (u->menu) g_hud_menu++;
                 wide_unit_log(u, c, why);
             }
         }
@@ -1013,6 +1022,35 @@ static int wide_kind(void) {
     return 0;
 }
 
+/* the menu screen's panels (TWindowCtrlScreen's own draws, pso_wide.c WIDE_CTX_BACKDROP): each vertex placed by
+ * pso_hud.h hud_backdrop_place (on the 4:3 frame's left / right edge: to the screen's edge; else in the middle),
+ * in both HUD modes. Only for a draw in the full-screen viewport, not mirrored, not split screen, with the 4:3
+ * HUD on (otherwise 0: placed as any HUD draw). lo..hi: the draw's extent in clip units. */
+static int backdrop_place(GxFrame* f, uint32_t v0, uint32_t count, float lo, float hi) {
+    if (g_wctx.split || !(g_gx.xf_reg[GX_XR_WIDE_FLAGS] & GX_WIDE_HUD_43)) return 0;
+    float xs, xo, P0, P1;
+    memcpy(&xs, &g_gx.xf_reg[0x1A], 4);
+    memcpy(&xo, &g_gx.xf_reg[0x1D], 4);
+    memcpy(&P0, &g_gx.xf_reg[0x20], 4);
+    memcpy(&P1, &g_gx.xf_reg[0x21], 4);
+    int sox = (int)(g_gx.bp[0x59] & 0x3FF) * 2;
+    if (fabsf(xs - 320.0f) > 1.0f || fabsf(xo - (float)sox - 320.0f) > 1.0f) return 0;
+    float plo = 320.0f + 320.0f * lo, phi = 320.0f + 320.0f * hi;  /* columns of the 4:3 frame */
+    for (uint32_t i = 0; i < count; i++) {
+        GxVertex* v = &f->verts[v0 + i];
+        uint32_t pm = ((uint32_t)v->pos[3] * 4) & 0xFFC;
+        float r[12];
+        memcpy(r, &g_gx.xf_mem[pm], sizeof r);
+        float vx = r[0] * v->pos[0] + r[1] * v->pos[1] + r[2] * v->pos[2] + r[3];
+        float vz = r[8] * v->pos[0] + r[9] * v->pos[1] + r[10] * v->pos[2] + r[11];
+        int p = HUD_CENTRE;
+        if (-vz > 1e-6f) p = hud_backdrop_place(320.0f + 320.0f * (P0 * vx + P1 * vz) / -vz, plo, phi);
+        v->nrm[3] = (float)(p == HUD_LEFT ? GX_ANCHOR_LEFT : p == HUD_RIGHT ? GX_ANCHOR_RIGHT : GX_ANCHOR_MIDDLE);
+    }
+    if (anchor_log()) rt_log("[anchor] menu screen panel: %u verts x %.1f..%.1f, edges to the screen edges", count, plo, phi);
+    return 1;
+}
+
 /* follow: every vertex gets GX_ANCHOR_FOLLOW + the middle of its piece (one object's draws together) */
 static struct { GxFrame* f; unsigned long long frame; unsigned seq; uint32_t n; uint32_t v0[256], cnt[256]; float lo, hi; } g_unit;
 static void follow_set(GxFrame* f, uint32_t v0, uint32_t n, float mid) {
@@ -1037,6 +1075,11 @@ static void wide_place(GxFrame* f, uint32_t v0, uint32_t count, int kind) {
     if (!seen) { lo = hi = 0.0f; }  /* nothing in front of the eye: drawn nowhere */
     if (kind == 1) {
         if (g_frame_edges && g_wctx.tag) wide_unit_note(f, v0, count, seen ? lo : 1.0f, seen ? hi : -1.0f);
+        if (g_wctx.backdrop && seen && backdrop_place(f, v0, count, lo, hi)) {
+            g_wide_draws[5]++;
+            hud_log(HL_BACKDROP);
+            return;
+        }
         int code = anchor_place(f, v0, count, lo, hi, ylo, yhi, 0);
         g_wide_draws[code == GX_ANCHOR_STRETCH]++;
         hud_log(code == GX_ANCHOR_STRETCH ? HL_STRETCHED : HL_CENTRED);
@@ -1065,22 +1108,24 @@ static void wide_place(GxFrame* f, uint32_t v0, uint32_t count, int kind) {
 
 /* every 10 s with the [pace] line (frame_pacing.c) */
 void gx_wide_report(void) {
-    unsigned long long t = g_wide_draws[0] + g_wide_draws[1] + g_wide_draws[2] + g_wide_draws[3] + g_wide_draws[4];
+    unsigned long long t = g_wide_draws[0] + g_wide_draws[1] + g_wide_draws[2] + g_wide_draws[3] + g_wide_draws[4] + g_wide_draws[5];
     if (!t && !(settings_wide_k() > 1.0f)) return;
-    rt_log("[wide] GP side: 2D draws centred %llu, stretched %llu, follow %llu; HUD 3D left as drawn %llu; world 2D classes %llu",
-           g_wide_draws[0], g_wide_draws[1], g_wide_draws[2], g_wide_draws[3], g_wide_draws[4]);
+    rt_log("[wide] GP side: 2D draws centred %llu, stretched %llu, follow %llu; HUD 3D left as drawn %llu; world 2D classes %llu; "
+           "menu screen panels %llu",
+           g_wide_draws[0], g_wide_draws[1], g_wide_draws[2], g_wide_draws[3], g_wide_draws[4], g_wide_draws[5]);
     memset(g_wide_draws, 0, sizeof g_wide_draws);
     if (g_settings.hud_edges)
         rt_log("[wide] HUD windows (frames x windows): left %llu (%llu draws), right %llu (%llu), centred %llu (%llu), "
-               "stretched %llu (%llu); by own hud_anchor.txt line %llu, kept in the middle for split screen %llu",
+               "stretched %llu (%llu); by own hud_anchor.txt line %llu, kept in the middle for split screen %llu, "
+               "on the menu screen %llu",
                g_hud_units[HUD_LEFT], g_hud_unit_draws[HUD_LEFT], g_hud_units[HUD_RIGHT], g_hud_unit_draws[HUD_RIGHT],
                g_hud_units[HUD_CENTRE], g_hud_unit_draws[HUD_CENTRE], g_hud_units[HUD_STRETCH], g_hud_unit_draws[HUD_STRETCH],
-               g_hud_forced, g_hud_split);
+               g_hud_forced, g_hud_split, g_hud_menu);
     else
         rt_log("[wide] HUD windows: all in the middle (Display > HUD: middle)");
     memset(g_hud_units, 0, sizeof g_hud_units);
     memset(g_hud_unit_draws, 0, sizeof g_hud_unit_draws);
-    g_hud_forced = g_hud_split = 0;
+    g_hud_forced = g_hud_split = g_hud_menu = 0;
 }
 
 static void draw_impl(int prim, int vat, uint32_t count, const uint8_t* vertices, uint32_t vertex_size) {

@@ -1,5 +1,48 @@
 # Progress log (newest first)
 
+## 2026-11-27: 16:9 widescreen, build C: the menu screen as one layout (test build, not yet run on the console)
+
+Owner's console run of build B (d99f9c0, 16:9, HUD "Screen edges"; log and two photos):
+- Field: the status window was centred. The log names it: `window tl_window TWindowStatus: centred (x 0..256,
+  hud_anchor.txt default)`. The one-player status window is TWindowStatus (create_status_window: TWindowSimpleStatus
+  only in split screen). With a hud_anchor.txt copy holding `TWindowStatus left` on the SD card it sat at the left
+  edge and the owner confirmed it looks great. Folded into the built-in file (TWindowSimpleStatus kept).
+- Main menu (Start): came apart. Status pinned left, menu list (TWindowMenuMainMenu x 28..144), help box
+  (TWindowMessage 17..223) and stats panel (TWindowSubStatusDisp 299..611) centred, so the list covered the
+  status's name tag; TWindowCtrlScreen's panels (x 0..640, 38 draws) partly stretched, partly centred, a dark strip
+  at the left; the 3D view's box to the right screen edge.
+
+What the original does, and the fix: docs/widescreen-research.md section 7. In short: the status window stays
+shown on the menu screen in one-player play (0x8024DFF4 closes it only in split screen; read in our DOL), so it is
+kept, unpinned, in its 4:3 place over the menu.
+
+- Signal (pso_wide.c, pso_hud.h hud_menu_screen): the 3D view's box, TWindowCtrlMain::viewport_states[0] left /
+  bottom (0x80518730 +0x0C / +0x18), set only by TWindowMainMenu1P::update_backdrop_transition (0x80288520, the
+  only caller of set_left / set_bottom in the DOL). Read at the start of each walk; never in split screen or while
+  the states are still zero. All marks carry it (kind byte flag WIDE_CTX_MENU), so a frame decides from one state.
+- Windows: hud_anchor.txt grew `menu:` lines, used instead of the ordinary line while the menu screen is up;
+  `menu: * centre` (status, menu, help, stats, every page in their 4:3 places relative to each other);
+  `menu: TWindowActionPalette right`, `TWindowEffectLight right`, `TWindowLockOn left` (closed by the game while the
+  menu is open, so they do not jump while animating), `TWindowMessageInfomation right` (moved by the game into the
+  3D box, which reaches the right edge). [hud] window lines say "menu screen, hud_anchor.txt menu: line".
+- Panels (gx_render.c backdrop_place, pso_hud.h hud_backdrop_place): TWindowCtrlScreen's own draws (flag
+  WIDE_CTX_BACKDROP) placed per vertex: on the 4:3 left / right edge to the screen edge, else centred; pieces 16
+  wide or less at an edge move whole. Column 0..267, band and lines to both edges, corner piece and the box's left
+  line at the column's edge. In both HUD settings (my choice: "Middle" gets the clean panels too; its windows are
+  unchanged from build A). Full-screen viewport only; split screen and mirrored views as before.
+- 3D box: unchanged (213..854); the column (drawn over it) ends at 267, so the box shows from the column's edge to
+  the right screen edge, as in 4:3. No gap at any step of the transition (left 0..320).
+- Covered: the main menu and every page opened from it (they keep the box up). Not this screen: shops, tekker,
+  bank, check room, Hunter's Guild, quest counter (no box: field placement, unchanged from build B).
+- Log: `[hud] menu screen on: 3D view in the box x 160..640, y 0..256 of 4:3; ...` / `[hud] menu screen off: ...`
+  (at most 200); the 10 s [wide] lines add "menu screen panels" draws and windows "on the menu screen".
+- 4:3: no marks, nothing changed (as 1.0.0).
+- Host test tools/tests/run_pso_wide_test.sh, extended: when the box is up (all 28 steps of the transition, split
+  screen, unset states), the `menu:` parser and the shipped lines, the walk's marks in 6 game states (menu flag,
+  each window's menu placement, the panel flag only on TWindowCtrlScreen), and every panel piece mapped to the 854
+  wide screen for all 28 steps (column edge, band, black and fade pieces, corner, lines, no gap to the 3D, the
+  menu's windows relative to the column); all build A and B checks: PASS.
+
 ## 2026-11-26: 16:9 widescreen, build B (test build, not yet run on the console)
 
 Build A (3caa2c7) passed the owner's console test: "It was so beautiful!! Successful test." 3D widened, HUD centred

@@ -16,6 +16,10 @@ enum {
     WIDE_MARK_SS = 2,    /* load_screen_space_matrix ran: position matrix 0 holds a screen space matrix */
     WIDE_MARK_PROJ = 3,  /* set_perspective_projection_from_fov set a widened projection */
 };
+#define WIDE_MARK_KIND 0x0Fu  /* the kind byte: the kind in bits 0-3, flags of a WIDE_MARK_CTX above */
+#define WIDE_CTX_MENU 0x10u      /* the menu screen is up (pso_hud.h hud_menu_screen): windows take their menu: line */
+#define WIDE_CTX_BACKDROP 0x20u  /* this object's own draws are the menu screen's panels (TWindowCtrlScreen):
+                                  * pso_hud.h hud_backdrop_place per vertex */
 
 /* where an object's screen space (2D) draws go */
 enum {

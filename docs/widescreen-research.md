@@ -2,7 +2,9 @@
 
 Research pass, 2026-11-26, after release 1.0.0. Build A is built and passed the owner's console test (3D widened,
 HUD centred 4:3, no problems reported), with the follow mode for speech bubbles and the lens flare brought forward
-from build B. Build B (HUD windows at the screen edges) is built, not yet run on the console: section 6 and
+from build B. Build B (HUD windows at the screen edges) ran on the console on 2026-11-27: the field HUD at the
+edges looks right once the one-player status window (TWindowStatus) was listed; the in-field main menu came apart
+(section 7). Build C (the menu screen kept as one layout) is built, not yet run on the console: section 7 and
 docs/progress-log.md. Goal: a real 16:9 picture (more of the world to the sides, nothing stretched), the HUD first
 kept 4:3 in the middle, then moved to the screen edges.
 
@@ -346,7 +348,9 @@ likely to need a second pass: some UI class missing from the table would show st
 
 ### Build B: HUD elements pinned
 
-Status 2026-11-26: built (docs/progress-log.md), waiting for the owner's console test. What differs from the plan
+Status 2026-11-27: run on the console (build d99f9c0). Field HUD right after adding `TWindowStatus left` (the
+one-player status window is TWindowStatus, x 0..256, not TWindowSimpleStatus); the main menu screen needed its
+own rule (section 7, build C). Status 2026-11-26: built (docs/progress-log.md). What differs from the plan
 below: windows are units of the task tree (an object directly under a layer, a window manager TWindowCtrl* or a
 window root, a plain TObject walked by a manager: every TWindowBase is made under get_client_window_root), the
 placement is decided when the frame is complete and written to all of the window's vertices and states, the
@@ -371,6 +375,74 @@ What the owner checks:
 3. Word select, keyboard, message windows centred and whole.
 4. Speech bubbles and lens flare the right shape.
 5. The same performance spots as build A (no change expected).
+
+## 7. The menu screen (build C)
+
+Owner's console run of build B (d99f9c0, 16:9, HUD "Screen edges"): in the field the status window at the left
+edge looks right; the in-field main menu (Start) came apart. The status window was pinned left while the menu list,
+help box and stats panel stayed centred, so the list no longer sat under the status (it covered its name tag); the
+teal panels were a mix of stretched and centred pieces with a dark strip at the left; the 3D view's box reached
+the right screen edge.
+
+### What the original does (proven unless marked)
+
+- The menu screen is one-player only. TWindowMainMenu1P::update_backdrop_transition (0x80288520) steps a counter a
+  frame (x 0..3, 0..6 while the Log page is open; y 0..3) and calls TWindowCtrlMain::set_left (0x8024CC5C,
+  left = 53.33 x) and set_bottom (0x8024CC2C, bottom = 480 - 74.67 y). It is the only caller of both in the whole
+  DOL (searched in our disassembly). The camera's view override (CameraViewParams, flag 0x400 of the word at
+  0x804FF630, begun by TWindowMainMenu1P::on_menu_opened 0x80288428) puts the 3D view's centre at
+  320 + 26.67 x, 240 - 37.33 y and scales it by 0.75 at x = 3: the box x 160..640, y 0..256. The override ends
+  (end_view_override) on the frame both counters are back at 0, the same frame left / bottom are 0 / 480 again.
+- viewport_states (0x80518730, 6 x 0x1C, read by update_fade_alphas 0x8024CCDC): +0x0C left, +0x18 bottom.
+  TWindowCtrlScreen::render (0x8024CA5C) draws the panels with draw_menu_backdrop_gradients (0x8024CE68): black
+  0..left/2 full height, black under the band's middle from left/2 to 640, two black-to-clear fades along the box,
+  teal scanline tiles 16 high from 0 to left above `bottom` and from 0 to 640 below it, a 16 x 16 corner piece at
+  left..left + 16, a line down the box's left side and one along its bottom to 640. The panels fade in and out
+  with backdrop_alpha (0.09 a frame) while left >= 0.1.
+- The status window stays shown on the menu screen. TWindowCtrlPlayer::update_trade_window_visibility
+  (0x8024DFF4, name from the decomp; it is the status window's show / close) closes it when there is no player,
+  the HUD is suppressed, status flag 0x10 is set, or split screen (0x80019690) and the main menu is open
+  (0x8024D960); otherwise it calls request_show (0x80244B64). Read in our DOL. The owner's photo agrees: status
+  at the top left, the menu list at 28,85 under it with the status's name tag on its frame. In the same update the
+  game closes the action palette and the lock-on window while the menu is open, and moves the information popup
+  to layout entry 0x21 (373,123: inside the 3D box).
+- The radar is not drawn while the view override is on (TRaderMapCore::is_render_admitted, decomp).
+- Which screens use it: only the main menu and the pages opened from it (TWindowMainMenu::create_submenu: Item
+  Pack, Equip, Mag, Customize, Technique, Status, Chat / symbol chat / short mail, Guild Card, Log, Options, Area
+  map, Quest board, Information board, Shortcut, Trade, Game End). They are made while the menu stays open, so the
+  box stays up. Shops, tekker, bank, check room, Hunter's Guild and the quest counter (TShop*, THunterGuildSeq*,
+  TWindowDeposit, TCheckRoomSequence) never call set_left or begin the override (only the main menu, the title
+  0x80336520 and character creation 0x80291290 begin one; the last two never set a box): they are windows over
+  the full 3D view, as in the field.
+
+### Build C
+
+- Signal: the box itself, viewport_states[0] left >= 0.1 or bottom <= 479.9 (pso_hud.h hud_menu_screen), read at
+  the start of each task tree walk on the game thread (pso_wide.c), never in split screen, and not while the states
+  are still zero before TWindowCtrlMain sets them up. On the frame the menu opens TWindowCtrlPlayer opens it in its
+  run_task and its child TWindowMainMenu1P steps the box in the same frame (TObject::run_tasks runs a parent
+  before its children), so the box and the windows change together; on close the box and the 3D view go back on
+  the same frame. Every mark of the frame carries the state (WIDE_CTX_MENU), so all windows of a frame decide
+  from one state: no frame with half the windows moved.
+- Windows: while the menu screen is up each window takes its class's `menu:` line of hud_anchor.txt instead of
+  its ordinary line; the default `menu: * centre` keeps the status window, menu list, help box, stats panel and
+  every page 4:3 in the middle, in their original places relative to each other. Kept pinned (they are on their
+  way out or placed in the 3D box, which reaches the right edge in both shapes): TWindowActionPalette and
+  TWindowEffectLight right, TWindowLockOn left, TWindowMessageInfomation right.
+- Panels: TWindowCtrlScreen's own draws (WIDE_CTX_BACKDROP) are placed per vertex (pso_hud.h hud_backdrop_place,
+  gx_render.c backdrop_place): a vertex on the 4:3 frame's left (right) edge goes to the screen's left (right)
+  edge, the others stay in the centred layout. So the column 0..left becomes 0..left + 107, ending where the
+  centred layout puts it; the band, the black under it and the box's bottom line reach both edges; a piece 16
+  columns or narrower at an edge (the corner piece and the left line while the panels fade out with left at 0)
+  moves whole to the edge. Only for a full-screen viewport, not mirrored, not split screen. Both HUD settings
+  ("Middle" gets the same panel fill: its windows are all centred already, so it lines up the same way).
+- The 3D box is left as the widened camera draws it: x 160 k..854 (213..854), y as in 4:3. The centred column
+  ends at 160 + 107 = 267, so it covers the box's first 54 columns: the box is seen from the column's edge to the
+  right screen edge, as in 4:3 it is seen from the column to the right edge. For every step of the transition
+  (left 0 to 320) 160 k <= left + 107, so no gap (equal at 320, the Log page). Using the extra width this way lines
+  up; moving the box's own left edge would need a different viewport and projection for the menu's 3D, not done.
+- Cost: the status window moves 107 columns to the right when the menu opens and back when the box is closed
+  (the price of keeping the layout together); it moves on the same frame as the box.
 
 ## Open questions for later
 

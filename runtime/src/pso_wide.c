@@ -27,6 +27,13 @@
  * game's view count, camera_split_screen_selector 0x805D34B8, read by TCameraCtrl::get_view_count 0x8006B330).
  * gx_render.c decides each window's placement from the x range of all its draws in the frame.
  *
+ * The menu screen (docs/widescreen-research.md section 7): while the in-field main menu has the 3D view shrunk
+ * into its box (TWindowCtrlMain::viewport_states[0] left / bottom, pso_hud.h hud_menu_screen), every window
+ * takes its class's "menu:" line of hud_anchor.txt (default centre), so the menu's pieces and the status
+ * window keep their 4:3 places relative to each other; the panels TWindowCtrlScreen draws itself are marked
+ * (WIDE_CTX_BACKDROP) so gx_render.c carries their edges out to the screen's edges. Read at the start of each
+ * outer walk, so every window of a frame sees the same state.
+ *
  * Nothing here changes what the game sends online: only its local projection and the local placement of
  * the picture's parts (docs/widescreen-research.md section 4). */
 #include <stdint.h>
@@ -47,13 +54,15 @@ void gx_host_mark(const uint8_t* b, int n);  /* gx_fifo.c */
 #define RADAR_PROJ_RETURN 0x801F93F4u  /* TRaderMapCore::setup_overhead_projection's call 0x801F93F0 + 4 */
 #define FOV_ANGLE_SCALE   0x805E0E18u  /* 0.85f, read by 0x803D67C4 */
 #define VIEW_COUNT        0x805D34B8u  /* camera_split_screen_selector: 1, or 2 to 4 in split screen */
+#define VIEWPORT_STATES   0x80518730u  /* TWindowCtrlMain::viewport_states[6], 0x1C each (read by update_fade_alphas
+                                        * 0x8024CCDC): +0x0C left, +0x18 bottom of the 3D view's box */
 
 static int wide_on(void) { return settings_wide_k() > 1.0f; }
 
 /* ---- statistics for the [wide] line (game thread) ---- */
 static unsigned long long g_proj_calls, g_proj_widened, g_ss_loads, g_marks, g_objects;
 
-static void mark(int kind, int place, int layer, uint32_t name, uint32_t unit) {
+static void mark(int kind, int place, int layer, uint32_t name, uint32_t unit) {  /* kind: WIDE_MARK_* | WIDE_CTX_* */
     uint8_t b[WIDE_MARK_BYTES] = {GX_HOST_MARK, (uint8_t)kind, (uint8_t)place, (uint8_t)layer,
                                   (uint8_t)(name >> 24), (uint8_t)(name >> 16), (uint8_t)(name >> 8), (uint8_t)name,
                                   (uint8_t)(unit >> 24), (uint8_t)(unit >> 16), (uint8_t)(unit >> 8), (uint8_t)unit};
@@ -95,7 +104,10 @@ static void hud_rules_load(void) {
         fclose(f);
     }
     hud_rules_parse(&g_hud_rules, text ? text : k_hud_anchor_txt);
-    rt_log("[hud] placements from %s: %d classes, default %s", src, g_hud_rules.n, k_hud_place_names[g_hud_rules.dflt]);
+    int nmenu = 0;
+    for (int i = 0; i < g_hud_rules.n; i++) nmenu += g_hud_rules.r[i].menu;
+    rt_log("[hud] placements from %s: %d classes, default %s; menu screen: %d classes, default %s", src,
+           g_hud_rules.n - nmenu, k_hud_place_names[g_hud_rules.dflt], nmenu, k_hud_place_names[g_hud_rules.menu_dflt]);
     if (g_hud_rules.errors)
         rt_log("[hud] hud_anchor.txt: %d line(s) not understood (first: line %d), left out", g_hud_rules.errors,
                g_hud_rules.first_error_line);
@@ -184,16 +196,18 @@ static int name_rule(const char* s) {
 
 /* class names are static strings: a small cache from the name's address to its rule */
 #define NAME_CACHE 1024
-typedef struct { int8_t rule; uint8_t force, container; } NameInfo;
+/* force: the class's own line; menu_force: its placement while the menu screen is up (pso_hud.h hud_menu_place);
+ * backdrop: its own draws are the menu screen's panels (TWindowCtrlScreen) */
+typedef struct { int8_t rule; uint8_t force, container, menu_force, backdrop; } NameInfo;
 static struct { uint32_t name; NameInfo info; } g_name_cache[NAME_CACHE];
 static NameInfo info_of(uint32_t name) {
-    if (!name) return (NameInfo){-1, HUD_NONE, 0};
+    if (!name) return (NameInfo){-1, HUD_NONE, 0, HUD_CENTRE, 0};
     uint32_t h = (name >> 2) * 2654435761u >> 22;
     for (int k = 0; k < 8; k++) {
         uint32_t i = (h + (uint32_t)k) & (NAME_CACHE - 1);
         if (g_name_cache[i].name == name) return g_name_cache[i].info;
         if (!g_name_cache[i].name) {
-            NameInfo info = {-1, HUD_NONE, 0};
+            NameInfo info = {-1, HUD_NONE, 0, HUD_CENTRE, 0};
             if (guest_span_ok(name, 1)) {
                 char s[64];
                 uint32_t n = 0;
@@ -207,6 +221,8 @@ static NameInfo info_of(uint32_t name) {
                 int force = name_force(s);
                 info.force = (uint8_t)(force == HUD_FOLLOW ? HUD_NONE : force);
                 info.container = (uint8_t)name_container(s);
+                info.menu_force = (uint8_t)hud_menu_place(pso_hud_rules(), s);
+                info.backdrop = !strcmp(s, "TWindowCtrlScreen");
             }
             g_name_cache[i].name = name;
             g_name_cache[i].info = info;
@@ -219,12 +235,15 @@ static NameInfo info_of(uint32_t name) {
 }
 
 /* place: WIDE_*; force: the class's own hud_anchor.txt line; unit: the window the object is part of (0: none);
- * kids: its children are windows of their own (a layer or a container) */
-typedef struct { uint8_t place, layer, force, kids; uint32_t name, unit; } WideCtx;
-static WideCtx g_cur = {WIDE_OUTSIDE, WIDE_NO_LAYER, 0, 0, 0, 0};  /* the object drawing now (or outside the tree) */
-static WideCtx g_sent = {0xFF, 0xFF, 0, 0, 0, 0};                    /* the last context the GP thread was told */
-static uint8_t g_sent_byte;
+ * kids: its children are windows of their own (a layer or a container); backdrop: the object's own draws are the
+ * menu screen's panels (not passed to its children) */
+typedef struct { uint8_t place, layer, force, kids; uint32_t name, unit; uint8_t backdrop; } WideCtx;
+static WideCtx g_cur = {WIDE_OUTSIDE, WIDE_NO_LAYER, 0, 0, 0, 0, 0};  /* the object drawing now (or outside the tree) */
+static WideCtx g_sent = {0xFF, 0xFF, 0, 0, 0, 0, 0};                    /* the last context the GP thread was told */
+static uint8_t g_sent_byte, g_sent_flags;
 static int g_split;                                          /* split screen on (read at each outer walk) */
+static int g_menu;                                           /* the menu screen is up (read at each outer walk) */
+static unsigned g_menu_lines;
 static int g_depth;                                          /* nested walks */
 static uint32_t g_layer[WIDE_LAYERS];                        /* the layer objects (re-read at each outer walk) */
 
@@ -237,12 +256,14 @@ static int layer_index(uint32_t obj) {
 static void send_ctx(const WideCtx* x) {
     /* every follow-unit object starts a unit of its own; otherwise only changes are sent */
     uint8_t b = wide_place_byte(x->place, x->force, g_split);
-    if (x->place != WIDE_FOLLOW_UNIT && b == g_sent_byte && x->layer == g_sent.layer && x->name == g_sent.name &&
-        x->unit == g_sent.unit)
+    uint8_t fl = (uint8_t)((g_menu ? WIDE_CTX_MENU : 0u) | (x->backdrop ? WIDE_CTX_BACKDROP : 0u));
+    if (x->place != WIDE_FOLLOW_UNIT && b == g_sent_byte && fl == g_sent_flags && x->layer == g_sent.layer &&
+        x->name == g_sent.name && x->unit == g_sent.unit)
         return;
     g_sent = *x;
     g_sent_byte = b;
-    mark(WIDE_MARK_CTX, b, x->layer, x->name, x->unit);
+    g_sent_flags = fl;
+    mark(WIDE_MARK_CTX | fl, b, x->layer, x->name, x->unit);
 }
 
 static WideCtx classify(uint32_t obj, const WideCtx* parent) {
@@ -255,16 +276,19 @@ static WideCtx classify(uint32_t obj, const WideCtx* parent) {
         me.force = HUD_NONE;
         me.unit = 0;
         me.kids = 1;
+        me.backdrop = 0;
         return me;
     }
     uint32_t name = ld32(obj);
     NameInfo in = info_of(name);
     me.name = name;
+    me.backdrop = in.backdrop;
     me.unit = parent->kids ? obj : parent->unit;
     me.kids = in.container == CONT_MANAGER || (in.container == CONT_TOBJECT && me.unit == obj);
     me.force = HUD_NONE;
     if (parent->place == WIDE_FOLLOW_UNIT || parent->place == WIDE_FOLLOW_DRAW) return me;  /* parts of it */
-    me.force = me.unit == obj ? in.force : HUD_NONE;  /* a window's placement is its own class's line */
+    /* a window's placement is its own class's line (its menu: line while the menu screen is up) */
+    me.force = me.unit == obj ? (g_menu ? in.menu_force : in.force) : HUD_NONE;
     if (in.rule >= 0) me.place = (uint8_t)in.rule;
     else if (me.place == WIDE_OUTSIDE) me.place = WIDE_WORLD;
     return me;
@@ -322,11 +346,24 @@ void hle_render_nodes(Cpu* c) {
         if (split != g_split) rt_log("[wide] split screen %s (%u views)%s", split ? "on" : "off", views,
                                      split ? ": HUD windows stay in the middle of each view" : "");
         g_split = split;
+        /* the menu screen: the 3D view's box (viewport 0's state: split screen never has one) */
+        float left = u32_as_f32(ld32r(VIEWPORT_STATES + 0x0Cu)), bottom = u32_as_f32(ld32r(VIEWPORT_STATES + 0x18u));
+        int menu = hud_menu_screen(left, bottom, split);
+        if (menu != g_menu && g_menu_lines < 200) {
+            g_menu_lines++;
+            if (menu)
+                rt_log("[hud] menu screen on: 3D view in the box x %.0f..640, y 0..%.0f of 4:3; windows take their menu: "
+                       "lines, the panels reach the screen edges", left, bottom);
+            else
+                rt_log("[hud] menu screen off: windows back to their field placement");
+            if (g_menu_lines == 200) rt_log("[hud] 200 menu screen lines: no more");
+        }
+        g_menu = menu;
     }
     WideCtx saved = g_cur, base;
     int li = layer_index(parent);
     if (li >= 0) {  /* called with a layer: render_ui (tl_window, tl_radermap), render_clipout_and_fade, ... */
-        base = (WideCtx){wide_layer_is_hud(li) ? WIDE_HUD : WIDE_WORLD, (uint8_t)li, HUD_NONE, 1, 0, 0};
+        base = (WideCtx){wide_layer_is_hud(li) ? WIDE_HUD : WIDE_WORLD, (uint8_t)li, HUD_NONE, 1, 0, 0, 0};
     } else if (g_depth > 0) {
         /* a walk inside an object's render: its children are its parts, or windows of their own when the list's
          * owner is a container (TWindowCtrlScreen::render walks the window roots) */
@@ -334,13 +371,13 @@ void hle_render_nodes(Cpu* c) {
         int ct = info_of(ld32(parent)).container;
         base.kids = ct == CONT_MANAGER || (ct == CONT_TOBJECT && info_of(g_cur.name).container == CONT_MANAGER);
     } else {
-        base = (WideCtx){WIDE_WORLD, WIDE_NO_LAYER, HUD_NONE, 1, ld32(parent), 0};  /* the root task: its children are the layers */
+        base = (WideCtx){WIDE_WORLD, WIDE_NO_LAYER, HUD_NONE, 1, ld32(parent), 0, 0};  /* the root task: its children are the layers */
     }
     g_depth++;
     walk(c, parent, &base, 1);
     g_depth--;
     /* back in the caller: the enclosing object's context, or outside the tree */
-    if (g_depth == 0) g_cur = (WideCtx){WIDE_OUTSIDE, WIDE_NO_LAYER, HUD_NONE, 0, 0, 0};
+    if (g_depth == 0) g_cur = (WideCtx){WIDE_OUTSIDE, WIDE_NO_LAYER, HUD_NONE, 0, 0, 0, 0};
     else g_cur = saved;
     send_ctx(&g_cur);
 }
