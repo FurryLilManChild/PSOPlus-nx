@@ -7,7 +7,7 @@ the Schtserv community server.
 
 **No game data is included.** You need your own copy of the game.
 
-Current release: **1.0.0**.
+Current release: **1.1.0** (adds 16:9 widescreen).
 
 ## What you need
 
@@ -81,7 +81,8 @@ and online.
   spots can dip below 30 fps now and then.
 - Movies are decoded natively and play at full speed.
 
-Higher resolutions and sharpness cost graphics time and can lower the frame rate in busy areas.
+Higher resolutions, sharpness and 16:9 widescreen cost graphics time and can lower the frame rate in busy
+areas; 4:3 is the lightest.
 
 Every area was tested, but that cannot rule out every bug. If you find one, please report it (see below).
 

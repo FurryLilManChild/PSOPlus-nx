@@ -1,5 +1,14 @@
 # Progress log (newest first)
 
+## 2026-11-27: Release 1.1.0 (16:9 widescreen)
+
+- The owner's run of build C (5d599768): menu screen on/off 21 times, the main menu kept as one layout, every
+  shop counter and the bank visited, verdict "this is great, ready to go". Placements in the log: status,
+  lock-on left; action palette, its light, info popups, radar right; everything else centred. 783 [perf]
+  readings at 1224 MHz in 16:9: 752 at 29.5 fps or more, 25 between 25 and 29.5, 6 below 25 (GPU-bound
+  moments, 77 ms waiting for the GPU at worst; one 0.2 fps reading is a 553 s sleep).
+- 1.1.0 is main at 5d59976 plus the version and README; nothing else changed since the tested build.
+
 ## 2026-11-27: 16:9 widescreen, build C: the menu screen as one layout (test build, not yet run on the console)
 
 Owner's console run of build B (d99f9c0, 16:9, HUD "Screen edges"; log and two photos):
