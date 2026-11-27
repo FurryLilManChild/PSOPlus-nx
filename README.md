@@ -7,7 +7,7 @@ the Schtserv community server.
 
 **No game data is included.** You need your own copy of the game.
 
-Current release: **1.1.0** (adds 16:9 widescreen).
+Current release: **1.1.1** (fixes a crash at login on Schtserv for some players; 1.1.0 added 16:9 widescreen).
 
 ## What you need
 

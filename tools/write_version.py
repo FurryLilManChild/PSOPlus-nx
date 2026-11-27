@@ -12,7 +12,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # the port's version: the NRO's title info (configure.py, nacptool), the log's first lines and the menu's
 # System page (g_port_version); the build stamp (the commit, below) is shown beside it
-PORT_VERSION = "1.1.0"
+PORT_VERSION = "1.1.1"
 
 
 def build_version():

@@ -1,5 +1,17 @@
 # Progress log (newest first)
 
+## 2026-11-27: Release 1.1.1 (the Schtserv login crash fixed, tested on the tester's console)
+
+- Tester's run of ce32bb2d: two Schtserv logins, lobby, a shop counter, the Start menu, logout, no FATAL.
+  `[interp] first entry at 80004000 (lr 801F2ED4)`, 312 instructions, back to the quest interpreter; it installs a
+  second piece at 8000B0E0, called from 801DE8C8 (entries 2 to 4 in the first session, 6 to 8 in the second).
+- That code patches the game's code on every login (not seen by the recompiled code): 80110F30 (in fn_80110F04,
+  blr -> b 8000BF30), 80102788 (in fn_80102748, -> b 8000C660) and 8011AEC4 (in fn_8011ADF4, -> b 8000C690), plus a
+  new routine at 8000C660-8000C6B8 (checks byte 0xEF of an object for 4 and makes an extra call). Purpose not
+  known yet; the game plays without them, as it does for players the server never sends them to.
+- The clean fatal exit (svcExitProcess) has not run on hardware yet: no fatal happened.
+- Version 1.1.1 (patch: a bug fix).
+
 ## 2026-11-27: Schtserv login crash: an interpreter for server code, and a clean fatal exit (not yet run on the console)
 
 A player's console crashed seconds after logging in to the Schtserv server. Evidence: the log ends with
