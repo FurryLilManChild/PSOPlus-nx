@@ -72,13 +72,14 @@ Controls > Right stick has two choices:
 - **Camera**: in the field, left and right turn the camera around your character; push up to look up (the camera
   goes lower) and down to look down (it goes higher). The camera stays where you put it instead of swinging back
   behind you; press L (the game's camera reset button; R if the game's options swap them) to put it behind you
-  again. Your character still runs the way you push the left stick, as seen on screen. When the camera would end
+  again (this also resets the height). Your character still runs the way you push the left stick, as seen on screen. When the camera would end
   up in a wall while you run, the game moves it as it always did.
 
 The camera only answers the stick in single-player view while no window is open. In the main menu, chat, word
 select, shops, counters and trades the stick works as in the original game. Bosses, quest scenes and
 conversations keep the game's own camera, and split screen keeps the original right stick. The change applies
-at once; no restart is needed.
+at once; no restart is needed. The camera does not stop at walls while you stand still and turn it: it can
+end up inside a wall until you move.
 
 ## Online play
 

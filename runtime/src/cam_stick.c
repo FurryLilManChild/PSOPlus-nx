@@ -63,6 +63,7 @@ void f_801A6A5C_orig(Cpu* c);  /* map_c_stick_to_buttons */
 #define PL_ACTOR_FLAGS  0x30u   /* 0x10000: at a shop or counter (TShopSequence, init_effect_5f0) */
 #define PL_STATE_FLAGS  0x334u  /* 0x100: controls locked by a window (is_controls_locked 0x801B5680) */
 #define PL_PORT         0x3D0u
+#define PL_ROT_Y        0x60u   /* facing angle (update_follow_motion_state: rotation_y + 0x8000) */
 
 #define STALE_FIELDS    8u      /* no camera update for this long: the stick goes back to the game */
 #define LOG_LINES_MAX   300
@@ -74,13 +75,14 @@ static uint32_t g_stamp;          /* VI field of the last camera update */
 static uint32_t g_pad_ea;         /* the controller context the camera reads */
 static int g_latch;               /* the stick was turning the camera: no direction bits until it is released */
 static float g_height;            /* eye height offset (cam_stick.h), kept between frames */
+static uint32_t g_last_yaw;       /* the yaw as our position hook left it, to see the game's recentre */
 static unsigned g_lines;
 
 /* window bits (logged) */
 enum { W_MENU = 1, W_SUPPRESSED = 2, W_SHORT_LIST = 4, W_CHAT = 8, W_LOCKED = 0x10, W_COUNTER = 0x20 };
 /* reasons the game keeps the stick */
 enum { G_SPLIT = 1, G_NOT_ACTIVE = 2, G_OVERRIDE = 4, G_CLOSE_UP = 8, G_BOSS = 0x10, G_STATE = 0x20, G_NO_PLAYER = 0x40,
-       G_STOPPED = 0x80 };
+       G_STOPPED = 0x80, G_GAME_TURNS = 0x100 };
 
 static int enabled(void) { return g_settings.right_stick == RIGHT_STICK_CAMERA; }
 
@@ -122,6 +124,8 @@ static uint32_t not_eligible(uint32_t cam) {
     uint32_t actor = ld32r(cam + CAM_ACTOR);
     if (!guest_ram(actor) || ld16r(cam + CAM_ACTOR_ID) != (ld32r(LOCAL_CLIENT_ID) & 0xFFFFu)) return G_NO_PLAYER;
     if (ld32r(actor + PL_PORT) > 3) return G_NO_PLAYER;
+    /* run_task 0x8006E660: actorFlags 0x800 hands the yaw to rotate_heading_by_stick (left stick) */
+    if (ld32r(actor + PL_ACTOR_FLAGS) & 0x800) return G_GAME_TURNS;
     return 0;
 }
 
@@ -150,7 +154,8 @@ static void log_owner(int owner, uint32_t why) {
         rt_log("[camera] right stick: game (%s)", why & G_SPLIT ? "split screen" : why & G_NOT_ACTIVE ? "another camera is active"
                : why & G_OVERRIDE ? "quest camera" : why & G_CLOSE_UP ? "conversation close-up"
                : why & G_BOSS ? "boss camera offsets" : why & G_STATE ? "camera starting" : why & G_NO_PLAYER ? "no local player"
-               : why & G_STOPPED ? "the follow camera stopped updating" : "off");
+               : why & G_STOPPED ? "the follow camera stopped updating"
+               : why & G_GAME_TURNS ? "the game turns the camera from the left stick" : "off");
     }
     if (g_lines == LOG_LINES_MAX) rt_log("[camera] %d right stick lines: no more", LOG_LINES_MAX);
 }
@@ -171,6 +176,9 @@ void hle_cam_motion(Cpu* c) {
         return;
     }
     uint32_t yaw = ld32r(cam + CAM_YAW), motion = ld32r(cam + CAM_MOTION), follow = ld32r(cam + CAM_FOLLOW_FL);
+    /* run_task's recentre (L, quest cam_adj) stores rotation_y + 0x8000 unmasked (0x8006E614) before this runs:
+     * that value, new since our last frame, resets the eye height too */
+    if (yaw != g_last_yaw && yaw == ld32r(ld32r(cam + CAM_ACTOR) + PL_ROT_Y) + 0x8000u) g_height = 0.0f;
     f_8006D6DC_orig(c);
     if (!(motion == 1 && (follow & 1))) st32r(cam + CAM_YAW, yaw);
 }
@@ -207,6 +215,7 @@ void hle_cam_position(Cpu* c) {
     st32r(cam + CAM_EYE_Y, f32_as_u32(u32_as_f32(eye_y) + g_height));
     f_8006D95C_orig(c);
     st32r(cam + CAM_EYE_Y, eye_y);
+    g_last_yaw = ld32r(cam + CAM_YAW);
 }
 
 /* map_c_stick_to_buttons (pad, x, y, previous): while the stick turns the camera, no direction bits; after it
@@ -215,6 +224,7 @@ void hle_cam_position(Cpu* c) {
 void hle_cam_cstick(Cpu* c) {
     if (!enabled()) {
         g_latch = 0;
+        g_height = 0.0f;  /* the option off resets the height */
         if (g_owner != OWN_GAME) set_owner(OWN_GAME, 0);
         f_801A6A5C_orig(c);
         return;

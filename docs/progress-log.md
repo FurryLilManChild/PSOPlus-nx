@@ -32,6 +32,12 @@ Layouts and addresses from zeroz41/pso-decomp 6b38b53 (MIT, docs/upstream.md), e
 Log lines (at most 300): `[camera] right stick: camera (...)`, `[camera] right stick: menus (window: ...)`,
 `[camera] right stick: game (<reason>)`, and `[settings] right stick: camera|menus`.
 
+Review follow-ups: the game's recentre (yaw stored as rotation_y + 0x8000 unmasked at 0x8006E614, new since our
+last frame) also resets the eye height, as does turning the option off; actorFlags 0x800 (run_task 0x8006E660,
+the game turns the yaw from the left stick in rotate_heading_by_stick) gives the camera back to the game. Known:
+the follow camera has no eye collision, so a camera turned or raised while standing still can go into walls
+until the player runs (the game's obstruction snap then puts it behind the player).
+
 Checks: Switch build compiles; host tests (cam_stick_test new, interp, dispatch cache) pass. To test on the
 console: turning, height limits, running and idling (no swing back), L, walls, every window type, bosses, split
 screen, online lobby.
