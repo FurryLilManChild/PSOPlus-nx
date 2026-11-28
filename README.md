@@ -58,11 +58,27 @@ moves, A chooses, B goes back or closes.
   palette, radar and info popups move to the sides of the screen, while menus, shops and dialogue stay 4:3 in the
   middle; or middle: the whole HUD 4:3 in the middle), resolution, field of view, sharpness (FSR 1), colour.
   Which window goes where is set in config/GPOE8P/hud_anchor.txt (built in; a copy beside settings.ini overrides it).
-- **Controls**: a button map for every GameCube button, and Reset to default. Holding Minus always opens the
-  menu, whatever the map.
+- **Controls**: Right stick (see below), a button map for every GameCube button, and Reset to default. Holding
+  Minus always opens the menu, whatever the map.
 - **System**: version, build, current clocks, online status, screenshot.
 
 Settings are saved in `sdmc:/switch/psoplus/settings.ini`.
+
+### Right stick camera
+
+Controls > Right stick has two choices:
+
+- **Menus** (the default): the right stick works as the GameCube's C-stick did in the original game.
+- **Camera**: in the field, left and right turn the camera around your character; push up to look up (the camera
+  goes lower) and down to look down (it goes higher). The camera stays where you put it instead of swinging back
+  behind you; press L (the game's camera reset button; R if the game's options swap them) to put it behind you
+  again. Your character still runs the way you push the left stick, as seen on screen. When the camera would end
+  up in a wall while you run, the game moves it as it always did.
+
+The camera only answers the stick in single-player view while no window is open. In the main menu, chat, word
+select, shops, counters and trades the stick works as in the original game. Bosses, quest scenes and
+conversations keep the game's own camera, and split screen keeps the original right stick. The change applies
+at once; no restart is needed.
 
 ## Online play
 
@@ -126,6 +142,8 @@ This port is released under the Mozilla Public License 2.0 (`LICENSE`). It build
 - [sonic-riders-recomp](https://github.com/teclilla18/sonic-riders-recomp) (MPL-2.0): the runtime this port's
   runtime is a modified copy of, and its fork of the ZeldaWWHDRecomp translator (MPL-2.0).
 - [decomp-toolkit](https://github.com/encounter/decomp-toolkit): analysis of the game's code.
+- [zeroz41/pso-decomp](https://github.com/zeroz41/pso-decomp) (MIT): a decompilation of this game, the reference
+  for the right stick camera (camera and window layouts, function addresses).
 - [Dear ImGui](https://github.com/ocornut/imgui) (MIT), [stb](https://github.com/nothings/stb) (public domain or
   MIT), [bcdec](https://github.com/iOrange/bcdec) (MIT or Unlicense).
 - [libnx](https://github.com/switchbrew/libnx) (ISC), [deko3d](https://github.com/devkitPro/deko3d) (zlib) and

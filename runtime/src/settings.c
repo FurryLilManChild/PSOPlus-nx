@@ -14,7 +14,7 @@ Settings g_settings = {
     .screen = SCREEN_4_3, .perf_overlay = 0, .resolution = RES_1X, .fullscreen = 0, .framerate = FR_AUTO,
     .handheld_gpu = 1, .hud_stretch = 0, .hud_edges = 1, .fov = 100, .pc_scale = 2, .msaa = 1, .bloom = 0, .grade_bright = 0,
     .grade_contrast = 100, .grade_sat = 100, .grade_warm = 0, .char_light = 0, .pc_fps = 0, .pad_background = 1,
-    .sharpness = 0, .update_check = 0, .cpu_clock = 0,
+    .sharpness = 0, .update_check = 0, .cpu_clock = 0, .right_stick = RIGHT_STICK_MENUS,
     .pad_map = {SW_A, SW_B, SW_X, SW_Y, SW_R, SW_ZL, SW_ZR, SW_PLUS, SW_UP, SW_DOWN, SW_LEFT, SW_RIGHT},
     .net_dns = "",  /* Schtserv's DNS servers (net_native.c) */
     .net_server = SETTINGS_NET_SERVER_DEFAULT,
@@ -132,6 +132,8 @@ static void settings_log(const char* when) {
         }
     rt_log("[settings] %sbuttons: %s", when, k ? map : "default layout");
 #endif
+    rt_log("[settings] %sright stick: %s", when,
+           g_settings.right_stick == RIGHT_STICK_CAMERA ? "camera (single-player view, windows closed)" : "menus (original)");
 }
 
 static void apply_view(void) {
@@ -220,6 +222,7 @@ void settings_load(void) {
             else if (!strcmp(line, "pad_background")) g_settings.pad_background = v != 0;
             else if (!strcmp(line, "sharpness") && v >= 0 && v <= 100) g_settings.sharpness = v;
             else if (!strcmp(line, "update_check")) g_settings.update_check = v != 0;
+            else if (!strcmp(line, "right_stick") && v >= 0 && v < RIGHT_STICK_MODES) g_settings.right_stick = v;
         }
         fclose(f);
         /* PC in-between pictures assume a 60-picture game (PSO draws 30): off. The screen mode is kept: 16:9 widens
@@ -293,12 +296,12 @@ void settings_apply(void) {
     }
     fprintf(f, "perf_overlay=%d\ncpu_clock=%d\nscreen=%d\nresolution=%d\nfullscreen=%d\nframerate=%d\nhandheld_gpu=%d\n"
                "hud_stretch=%d\nhud_edges=%d\nfov=%d\npc_scale=%d\nmsaa=%d\nbloom=%d\ngrade_bright=%d\ngrade_contrast=%d\ngrade_sat=%d\n"
-               "grade_warm=%d\nchar_light=%d\npc_fps=%d\npad_background=%d\nsharpness=%d\nupdate_check=%d\n",
+               "grade_warm=%d\nchar_light=%d\npc_fps=%d\npad_background=%d\nsharpness=%d\nupdate_check=%d\nright_stick=%d\n",
             g_settings.perf_overlay, g_settings.cpu_clock, g_settings.screen, g_settings.resolution, g_settings.fullscreen,
             g_settings.framerate, g_settings.handheld_gpu, g_settings.hud_stretch, g_settings.hud_edges, g_settings.fov, g_settings.pc_scale,
             g_settings.msaa, g_settings.bloom, g_settings.grade_bright, g_settings.grade_contrast, g_settings.grade_sat,
             g_settings.grade_warm, g_settings.char_light, g_settings.pc_fps, g_settings.pad_background, g_settings.sharpness,
-            g_settings.update_check);
+            g_settings.update_check, g_settings.right_stick);
     for (int i = 0; i < GC_INPUTS; i++) {
         int b = g_settings.pad_map[i];
         fprintf(f, "map_%s=%s\n", k_gc_key[i], b >= 0 && b < SW_BUTTONS ? k_sw_key[b] : k_sw_key[settings_pad_map_default[i]]);

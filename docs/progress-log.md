@@ -1,5 +1,41 @@
 # Progress log (newest first)
 
+## 2026-11-28: Right stick camera, opt-in (not yet tested on the console)
+
+New port option, menu > Controls > Right stick: Menus (default, the original game) or Camera. Saved as
+`right_stick=0/1` in settings.ini, applied at once.
+
+Camera mode (runtime/src/cam_stick.c, maths and tuning in cam_stick.h), three hle.txt hooks, each only the game's
+own function when the option is Menus:
+- 0x8006D6DC update_follow_motion_state: the game's own runs, then the yaw is put back, so the camera no longer
+  eases behind the player while running (motion_state 1) or recentres after 250 idle frames (motion_state 2).
+  Kept: its wall handling (entered moving with follow_flags 1, an obstruction predicted: the game snaps or eases
+  the yaw behind the player). L (get_camera_reset_button) and quest recentres run before it in run_task and stay.
+- 0x8006D95C calc_follow_position: right stick X turns the yaw (180 degrees a second at full deflection, the
+  game's dead zone of 31), Y moves an eye height offset (45 units a second, -16..+40 on the game's 25.43); the
+  offset is added to eye_offset.y for this placement only and the game's value put back (the game rewrites it
+  every frame). Time per step from the VI fields since the last update (30 or 60 fps alike).
+- 0x801A6A5C map_c_stick_to_buttons: no C-stick direction bits on the camera player's controller while the stick
+  turns the camera, and none after it until the stick is back inside the game's 0x30 thresholds.
+Only when the follow camera itself (vtable 0x80488E00, registry[view_state.controller] 0x80488A58 / 0x804FF628)
+drives a single-player view (camera_split_screen_selector 0x805D34B8 == 1), state 1, no quest override
+(camera_override_flags 0x805D4E20), no conversation close-up (+0x100), no boss offsets (follow_flags 8, set every
+frame in the Dragon, Gal Gryphon and Gol Dragon arenas) and the camera follows the local player.
+Windows: the stick is the game's while any of these is true: has_player_active_menu 0x8024AF74, is_slot_visible
+(suppressed: shops and counters) 0x8024B054, has_client_short_list 0x8024AFB8, is_chat_window_in_use 0x8024A314
+(the game's own four tests for hiding the lock-on window), the player's controls lock (+0x334 bit 0x100,
+reset_equip_slots 0x801B56EC: main menu, chat, short lists, trade, card exchange) or the counter flag (+0x30 bit
+0x10000, TShopSequence). Movement follows the camera: TCameraCtrl::update_active_controller copies the view yaw
+into view_yaw[0] each frame in single-player view, which the pad update adds to the stick angle.
+Layouts and addresses from zeroz41/pso-decomp 6b38b53 (MIT, docs/upstream.md), each checked in PsoV3.dol's code.
+
+Log lines (at most 300): `[camera] right stick: camera (...)`, `[camera] right stick: menus (window: ...)`,
+`[camera] right stick: game (<reason>)`, and `[settings] right stick: camera|menus`.
+
+Checks: Switch build compiles; host tests (cam_stick_test new, interp, dispatch cache) pass. To test on the
+console: turning, height limits, running and idling (no swing back), L, walls, every window type, bosses, split
+screen, online lobby.
+
 ## 2026-11-27: Release 1.1.1 (the Schtserv login crash fixed, tested on the tester's console)
 
 - Tester's run of ce32bb2d: two Schtserv logins, lobby, a shop counter, the Start menu, logout, no FATAL.

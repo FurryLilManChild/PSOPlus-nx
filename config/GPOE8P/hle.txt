@@ -117,3 +117,9 @@
 803F1548 kbd_type            # keyboard layout of a channel; 0x80132048
 803F1604 kbd_read            # key codes held now; 0x80132004 (SI callback, via 0x8013206C), 0x80132110, 0x801327F8
 803F0E90 kbd_detect          # start detection on a channel; 0x8013212C, 0x8013280C
+# Right-stick camera (runtime/src/cam_stick.c, settings "Right stick: Camera"); with Menus (the default) each
+# hook only runs the game's own function. TCameraFollow (vtable 0x80488E00), called once each from run_task
+# 0x8006E310 (0x8006E680 and 0x8006E688); the C-stick from the pad update 0x801A62E0
+8006D6DC cam_motion          # update_follow_motion_state: the yaw stays where the player put it
+8006D95C cam_position        # calc_follow_position: right stick yaw and eye height, then the game's eye
+801A6A5C cam_cstick          # map_c_stick_to_buttons: no C-stick direction bits while the stick turns the camera

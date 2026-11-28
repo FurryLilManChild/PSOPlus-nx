@@ -47,6 +47,7 @@ typedef struct Settings {
     int cpu_clock;      /* Switch: CPU clock in MHz while the game has focus, 0 = stock (1020, the system decides);
                            else 1224, 1428 or 1785 (platform_set_cpu_clock) */
     int pad_map[GC_INPUTS];  /* Switch: SW_* for each GC_IN_*; saved as map_<input>=<button> (settings.c) */
+    int right_stick;    /* RIGHT_STICK_*: what the right stick (the GameCube C-stick) does in the field (cam_stick.c) */
     /* online play (net_native.c): the DNS server(s) asked for the game's server names, "a.b.c.d" or
      * "a.b.c.d:port", or two of them separated by a comma (the second asked when the first does not answer).
      * Empty (the default): Schtserv's 3.18.217.27, then its older 144.217.87.48. Saved as net_dns=... */
@@ -58,6 +59,9 @@ typedef struct Settings {
 } Settings;
 
 enum { FR_60, FR_AUTO, FR_30, FR_MODES };
+/* RIGHT_STICK_MENUS: the original game (the C-stick's direction buttons); RIGHT_STICK_CAMERA: in single-player
+ * view it turns the follow camera and moves its eye height, and it is the game's again while a window is open */
+enum { RIGHT_STICK_MENUS, RIGHT_STICK_CAMERA, RIGHT_STICK_MODES };
 enum { PC_FPS_UNLIMITED = -1 };
 /* the PC frame rate presets (F1 > Performance): 30 = the game's 30 fps mode, 60 = as the game draws,
  * the others with in-between pictures; 0-terminated, PC_FPS_UNLIMITED last */

@@ -642,6 +642,26 @@ void button_map() {
 }
 #endif
 
+/* Right stick: Menus (the original game) or Camera (cam_stick.c); applies at once */
+void right_stick_option() {
+    heading("Right stick");
+    if (radio("Menus", g_settings.right_stick != RIGHT_STICK_CAMERA,
+              "The original game: the right stick (the GameCube C-stick) works as it did on the GameCube.")) {
+        g_settings.right_stick = RIGHT_STICK_MENUS;
+        settings_apply();
+    }
+    ImGui::SameLine();
+    if (radio("Camera", g_settings.right_stick == RIGHT_STICK_CAMERA,
+              "Left and right turn the camera around your character; up looks up and down looks down. The camera "
+              "stays where you put it; L still puts it back behind you. Only in single-player view, and only while no "
+              "window is open: in menus, chat, word select and shops the stick works as in the original game.")) {
+        g_settings.right_stick = RIGHT_STICK_CAMERA;
+        settings_apply();
+    }
+    note("Camera: bosses, quest scenes and conversations keep the game's own camera. Split screen keeps the original "
+         "right stick.");
+}
+
 void tab_controls() {
 #ifdef __SWITCH__
     heading("Controllers");
@@ -655,6 +675,7 @@ void tab_controls() {
         g_pads_request = 1;
     }
     help("The system's controller screen: pair or split Joy-Cons and change the player order.");
+    right_stick_option();
     button_map();
 #else
     heading("Buttons");
@@ -674,6 +695,7 @@ void tab_controls() {
     }
     note("Hold F1, or Back (View) on a controller, to open this menu (Q / E or the shoulder buttons switch its "
          "pages). F11 = fullscreen. More controllers are players 2 to 4.");
+    right_stick_option();
     heading("Background");
     if (check("Controllers work in the background", &g_settings.pad_background,
               "Controllers keep playing while another window has focus. Turn off to ignore them then."))
